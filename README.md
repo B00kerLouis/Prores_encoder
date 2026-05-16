@@ -83,18 +83,18 @@ Use `-aa` to provide an external audio file. Add `--audio-replace` or `-ar` to d
 
 ```bash
 proresencoder \
-  -i picture.mov \
+  -i input.mov \
   -q 4444xq \
   -aa replacement_7_1.wav \
   --audio-replace \
   -ef mov \
-  -o final.mov
+  -o output.mov
 ```
 
 Short form:
 
 ```bash
-proresencoder -i picture.mov -q 4444xq -aa replacement_7_1.wav -ar -o final.mov
+proresencoder -i input.mov -q 4444xq -aa replacement_7_1.wav -ar -o output.mov
 ```
 
 Safety rules:
