@@ -1,0 +1,2465 @@
+// swift-interface-format-version: 1.0
+// swift-compiler-version: Apple Swift version 6.2.4 effective-5.10 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)
+// swift-module-flags: -target arm64-apple-macos14.0 -enable-objc-interop -enable-library-evolution -swift-version 5 -enforce-exclusivity=checked -O -enable-upcoming-feature DisableOutwardActorInference -enable-upcoming-feature InferSendableFromCaptures -enable-upcoming-feature GlobalActorIsolatedTypesUsability -enable-upcoming-feature MemberImportVisibility -enable-upcoming-feature InferIsolatedConformances -enable-upcoming-feature NonisolatedNonsendingByDefault -enable-experimental-feature DebugDescriptionMacro -enable-bare-slash-regex -module-name swiftaaf_Framework
+// swift-module-flags-ignorable:  -formal-cxx-interoperability-mode=off -interface-compiler-version 6.2.4
+import Foundation
+import Swift
+import _Concurrency
+import _StringProcessing
+import _SwiftConcurrencyShims
+public enum CFBConstants {
+  public static let difSect: Swift.UInt32
+  public static let fatSect: Swift.UInt32
+  public static let endOfChain: Swift.UInt32
+  public static let freeSect: Swift.UInt32
+  public static let rangeLockSect: Swift.UInt32
+  public static let maxRegularSect: Swift.UInt32
+  public static let maxRegularSID: Swift.UInt32
+  public static let maxDirectoryEntries: Swift.UInt32
+  public static func isSpecialSector(_ sid: Swift.UInt32) -> Swift.Bool
+  public static func prettySector(_ sid: Swift.UInt32) -> Swift.String
+}
+public enum CFBDirectoryType : Swift.UInt8, Swift.CustomStringConvertible, Swift.Equatable {
+  case empty
+  case storage
+  case stream
+  case lockBytes
+  case property
+  case rootStorage
+  case unknown
+  public init(rawByte: Swift.UInt8)
+  public var description: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(rawValue: Swift.UInt8)
+  #endif
+  public typealias RawValue = Swift.UInt8
+  public var rawValue: Swift.UInt8 {
+    get
+  }
+}
+public enum CFBDirectoryColor : Swift.UInt8, Swift.Equatable {
+  case red
+  case black
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(rawValue: Swift.UInt8)
+  #endif
+  public typealias RawValue = Swift.UInt8
+  public var rawValue: Swift.UInt8 {
+    get
+  }
+}
+@_hasMissingDesignatedInitializers final public class CFBDirectoryEntry : Swift.CustomStringConvertible {
+  unowned final public let storage: swiftaaf_Framework.CompoundFileBinary
+  final public let directoryID: Swift.UInt32
+  weak final public var parent: swiftaaf_Framework.CFBDirectoryEntry?
+  final public var data: [Swift.UInt8]
+  final public var name: Swift.String {
+    get
+    set
+  }
+  final public var type: swiftaaf_Framework.CFBDirectoryType {
+    get
+    set
+  }
+  final public var color: swiftaaf_Framework.CFBDirectoryColor {
+    get
+    set
+  }
+  final public var isRed: Swift.Bool {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var leftID: Swift.UInt32? {
+    get
+    set
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var rightID: Swift.UInt32? {
+    get
+    set
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var childID: Swift.UInt32? {
+    get
+    set
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var classID: swiftaaf_Framework.AUID? {
+    get
+    set
+  }
+  #endif
+  final public var flags: Swift.UInt32 {
+    get
+    set
+  }
+  final public var createTime: Swift.UInt64 {
+    get
+    set
+  }
+  final public var modifyTime: Swift.UInt64 {
+    get
+    set
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sectorID: Swift.UInt32? {
+    get
+    set
+  }
+  #endif
+  final public var byteSize: Swift.UInt64 {
+    get
+    set
+  }
+  final public var description: Swift.String {
+    get
+  }
+  final public var isDirectory: Swift.Bool {
+    get
+  }
+  final public var isRoot: Swift.Bool {
+    get
+  }
+  final public var isFile: Swift.Bool {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func left() throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func right() throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func child() throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  final public func listDirectory() throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func get(_ name: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  final public func open(mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  final public func isdir() -> Swift.Bool
+  final public func isroot() -> Swift.Bool
+  final public func isfile() -> Swift.Bool
+  final public func listdir() throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func makedir(_ relativePath: Swift.String, classID: swiftaaf_Framework.AUID? = nil) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  #endif
+  final public func touch(_ name: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func addChild(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws
+  final public func path() -> Swift.String
+  @objc deinit
+}
+@_hasMissingDesignatedInitializers final public class CFBStream {
+  unowned final public let storage: swiftaaf_Framework.CompoundFileBinary
+  final public let directoryEntry: swiftaaf_Framework.CFBDirectoryEntry
+  final public var position: Swift.UInt64 {
+    get
+  }
+  final public var fatChain: [Swift.UInt32] {
+    get
+  }
+  final public let mode: swiftaaf_Framework.CFBStreamMode
+  final public func tell() -> Swift.UInt64
+  @discardableResult
+  final public func seek(_ offset: Swift.Int64, whence: swiftaaf_Framework.SeekWhence = .set) throws -> Swift.UInt64
+  final public var isMiniStream: Swift.Bool {
+    get
+  }
+  final public var sectorSize: Swift.Int {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func read(_ count: Swift.Int? = nil) throws -> Foundation.Data
+  #endif
+  final public func write(_ data: some Collection<UInt8>) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func truncate(_ size: Swift.UInt64? = nil) throws
+  #endif
+  @objc deinit
+}
+public enum SeekWhence {
+  case set
+  case current
+  case end
+  public static func == (a: swiftaaf_Framework.SeekWhence, b: swiftaaf_Framework.SeekWhence) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum CFBStreamMode {
+  case read
+  case write
+  case readWrite
+  public static func == (a: swiftaaf_Framework.CFBStreamMode, b: swiftaaf_Framework.CFBStreamMode) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum CFBFileMode : Swift.Equatable {
+  case read
+  case readWrite
+  case write
+  public static func == (a: swiftaaf_Framework.CFBFileMode, b: swiftaaf_Framework.CFBFileMode) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+final public class CompoundFileBinary {
+  final public var data: Foundation.Data {
+    get
+  }
+  final public var mode: swiftaaf_Framework.CFBFileMode {
+    get
+  }
+  final public var magic: Foundation.Data {
+    get
+  }
+  final public var classID: swiftaaf_Framework.AUID! {
+    get
+  }
+  final public var minorVersion: Swift.UInt16 {
+    get
+  }
+  final public var majorVersion: Swift.UInt16 {
+    get
+  }
+  final public var byteOrder: Swift.String {
+    get
+  }
+  final public var sectorSize: Swift.Int {
+    get
+  }
+  final public var miniStreamSectorSize: Swift.Int {
+    get
+  }
+  final public var directorySectorCount: Swift.UInt32 {
+    get
+  }
+  final public var fatSectorCount: Swift.UInt32 {
+    get
+  }
+  final public var directorySectorStart: Swift.UInt32 {
+    get
+  }
+  final public var transactionSignature: Swift.UInt32 {
+    get
+  }
+  final public var minStreamMaxSize: Swift.UInt32 {
+    get
+  }
+  final public var miniFATSectorStart: Swift.UInt32 {
+    get
+  }
+  final public var miniFATSectorCount: Swift.UInt32 {
+    get
+  }
+  final public var difatSectorStart: Swift.UInt32 {
+    get
+  }
+  final public var difatSectorCount: Swift.UInt32 {
+    get
+  }
+  final public var difat: [[Swift.UInt32]] {
+    get
+  }
+  final public var difatChain: [Swift.UInt32] {
+    get
+  }
+  final public var fat: [Swift.UInt32] {
+    get
+  }
+  final public var miniFAT: [Swift.UInt32] {
+    get
+  }
+  final public var miniFATChain: [Swift.UInt32] {
+    get
+  }
+  final public var directoryFATChain: [Swift.UInt32] {
+    get
+  }
+  final public var miniStreamChain: [Swift.UInt32] {
+    get
+  }
+  final public var root: swiftaaf_Framework.CFBDirectoryEntry! {
+    get
+  }
+  convenience public init(url: Foundation.URL, mode: swiftaaf_Framework.CFBFileMode = .read, sectorSize: Swift.Int = 4096) throws
+  convenience public init(path: Swift.String, mode: swiftaaf_Framework.CFBFileMode = .read, sectorSize: Swift.Int = 4096) throws
+  convenience public init(data: Foundation.Data) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(data: Foundation.Data, mode: swiftaaf_Framework.CFBFileMode = .read, fileURL: Foundation.URL? = nil) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(mode: swiftaaf_Framework.CFBFileMode, sectorSize: Swift.Int = 4096, fileURL: Foundation.URL? = nil) throws
+  #endif
+  final public func open(_ path: Swift.String, mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  final public func open(_ entry: swiftaaf_Framework.CFBDirectoryEntry, mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  final public func exists(_ path: Swift.String) throws -> Swift.Bool
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func find(_ path: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  final public func listDirectory(_ path: Swift.String = "/") throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  final public func listDirectory(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  final public func listDirectoryDictionary(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws -> [Swift.String : swiftaaf_Framework.CFBDirectoryEntry]
+  final public func walk(_ path: Swift.String = "/", topDown: Swift.Bool = true) throws -> [(root: swiftaaf_Framework.CFBDirectoryEntry, storages: [swiftaaf_Framework.CFBDirectoryEntry], streams: [swiftaaf_Framework.CFBDirectoryEntry])]
+  final public func fatChain(startingAt startSID: Swift.UInt32, miniFAT: Swift.Bool = false) throws -> [Swift.UInt32]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func makeDirectory(_ path: Swift.String, classID: swiftaaf_Framework.AUID? = nil) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func makedir(_ path: Swift.String, classID: swiftaaf_Framework.AUID? = nil) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  #endif
+  @discardableResult
+  final public func makeDirectories(_ path: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  @discardableResult
+  final public func makedirs(_ path: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func touch(_ path: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func remove(_ path: Swift.String) throws
+  final public func removeTree(_ path: Swift.String) throws
+  final public func rmtree(_ path: Swift.String) throws
+  final public func listdir(_ path: Swift.String = "/") throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  final public func listdir(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws -> [swiftaaf_Framework.CFBDirectoryEntry]
+  final public func listdirDictionary(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws -> [Swift.String : swiftaaf_Framework.CFBDirectoryEntry]
+  final public func listdir_dict(_ entry: swiftaaf_Framework.CFBDirectoryEntry) throws -> [Swift.String : swiftaaf_Framework.CFBDirectoryEntry]
+  @discardableResult
+  final public func move(_ sourcePath: Swift.String, to destinationPath: Swift.String) throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func close() throws
+  final public func save(to url: Foundation.URL) throws
+  @objc deinit
+}
+public struct AAFPCMProfile : Swift.Equatable {
+  public let sampleFormat: Swift.String
+  public let sampleRate: Swift.Int
+  public static func == (a: swiftaaf_Framework.AAFPCMProfile, b: swiftaaf_Framework.AAFPCMProfile) -> Swift.Bool
+}
+final public class AAFWaveReader {
+  public static let waveExtensiblePCM: Swift.UInt16
+  final public let channels: Swift.Int
+  final public let frameRate: Swift.Int
+  final public let sampleWidth: Swift.Int
+  final public let blockAlign: Swift.Int
+  final public let frameCount: Swift.Int
+  convenience public init(path: Swift.String) throws
+  public init(url: Foundation.URL) throws
+  final public func readFrames(_ count: Swift.Int) -> Foundation.Data
+  final public func readframes(_ count: Swift.Int) -> Foundation.Data
+  final public func getframerate() -> Swift.Int
+  final public func getnchannels() -> Swift.Int
+  final public func getsampwidth() -> Swift.Int
+  final public func getblockalign() -> Swift.Int
+  final public func getnframes() -> Swift.Int
+  @objc deinit
+}
+public enum AAFAudio {
+  public static let pcmProfiles: [Swift.String : swiftaaf_Framework.AAFPCMProfile]
+  public static let audioFormatSizes: [Swift.String : (bits: Swift.Int, bytes: Swift.Int)]
+  public static func writeWAV(url: Foundation.URL, channels: Swift.Int, sampleRate: Swift.Int, sampleWidth: Swift.Int, pcmData: Foundation.Data) throws
+}
+public enum AAFDictionarySupport {
+  public static func shortName(_ name: Swift.String) -> Swift.String
+}
+extension swiftaaf_Framework.AAFObject {
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var definitionAUID: swiftaaf_Framework.AUID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var definitionUUID: Foundation.UUID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var definitionName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var definitionShortName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var definitionDescription: Swift.String? {
+    get throws
+  }
+  #endif
+  final public func setDefinitionAUID(_ value: swiftaaf_Framework.AUID) throws
+  final public func setDefinitionUUID(_ value: Foundation.UUID) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setDefinitionName(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setDefinitionDescription(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupTypeDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_typedef(_ value: Any) throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupTypeDefinitionObject(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_typedef_object(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func parameterTypeDefinition() throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  final public func setParameterTypeDefinition(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func operationDataDefinition() throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setOperationDataDefinition(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func operationMediaKind() throws -> Swift.String?
+  #endif
+  final public func setOperationMediaKind(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func operationParametersDefined() throws -> swiftaaf_Framework.AAFWeakReferenceSetProperty?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func operationNumberInputs() throws -> Swift.Int32?
+  #endif
+  final public func setOperationNumberInputs(_ value: Swift.Int32) throws
+  final public func registerDefinition(_ object: swiftaaf_Framework.AAFObject) throws
+  final public func register_def(_ object: swiftaaf_Framework.AAFObject) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupDataDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_datadef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupContainerDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_containerdef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupCodecDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_codecdef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupParameterDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_parameterdef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupOperationDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_operationdef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupInterpolationDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_interperlationdef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupTaggedValueDefinition(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookup_taggedvaluedef(_ value: Any) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+}
+extension swiftaaf_Framework.AAFObject {
+  final public var locator: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var fileDescriptorLength: Swift.Int64? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setFileDescriptorLength(_ value: Swift.Int64?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sampleRate: swiftaaf_Framework.AAFRational? {
+    get throws
+  }
+  #endif
+  final public func setSampleRate(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var containerFormat: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setContainerFormat(_ value: Any?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var codecDefinition: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setCodecDefinition(_ value: Any?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mediaContainer: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setMediaContainer(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mediaContainerGUID: swiftaaf_Framework.AUID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setMediaContainerGUID(_ value: swiftaaf_Framework.AUID?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var containerHandlerGUID: swiftaaf_Framework.AUID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setContainerHandlerGUID(_ value: swiftaaf_Framework.AUID?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var urlString: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setURLString(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var essenceMobID: swiftaaf_Framework.MobID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setEssenceMobID(_ value: swiftaaf_Framework.MobID?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var essenceMob: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setEssenceMob(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  final public func openEssenceData(mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  final public func open(_ mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  final public func open(_ mode: Swift.String) throws -> swiftaaf_Framework.CFBStream
+}
+@dynamicMemberLookup final public class AAFFactory {
+  unowned final public let root: swiftaaf_Framework.AAFFile
+  public init(root: swiftaaf_Framework.AAFFile)
+  final public subscript(dynamicMember className: Swift.String) -> () throws -> swiftaaf_Framework.AAFObject {
+    get
+  }
+  final public func fromName(_ name: Swift.String) throws -> swiftaaf_Framework.AAFObject
+  final public func createInstance(_ name: Swift.String) throws -> swiftaaf_Framework.AAFObject
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func mob(className: Swift.String, name: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func CompositionMob(_ name: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func MasterMob(_ name: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func SourceMob(_ name: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func TimelineMobSlot(_ slotID: Swift.UInt32? = nil, name: Swift.String? = nil, segment: swiftaaf_Framework.AAFObject? = nil, origin: Swift.Int64 = 0, editRate: Any = 25) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func EventMobSlot(_ slotID: Swift.UInt32? = nil, name: Swift.String? = nil, segment: swiftaaf_Framework.AAFObject? = nil, editRate: Any = 25) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func StaticMobSlot(_ slotID: Swift.UInt32? = nil, name: Swift.String? = nil, segment: swiftaaf_Framework.AAFObject? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Sequence(mediaKind: Any? = nil, length: Swift.Int64? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Transition(mediaKind: Any? = nil, length: Swift.Int64? = nil, cutPoint: Swift.Int64? = nil, operationGroup: swiftaaf_Framework.AAFObject? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func NestedScope(mediaKind: Any? = nil, length: Swift.Int64? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Selector(mediaKind: Any? = nil, length: Swift.Int64? = nil, selected: swiftaaf_Framework.AAFObject? = nil, alternates: [swiftaaf_Framework.AAFObject] = []) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func EssenceGroup(mediaKind: Any? = nil, length: Swift.Int64? = nil, choices: [swiftaaf_Framework.AAFObject] = [], stillFrame: swiftaaf_Framework.AAFObject? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func ScopeReference(mediaKind: Any? = nil, length: Swift.Int64? = nil, relativeScope: Swift.UInt32 = 0, relativeSlot: Swift.UInt32 = 0) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Pulldown(mediaKind: Any? = nil, length: Swift.Int64? = nil, inputSegment: swiftaaf_Framework.AAFObject? = nil, kind: Any = "TwoThreePD", direction: Any = "TapeToFilmSpeed", phaseFrame: Any = 0) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Filler(mediaKind: Any? = nil, length: Swift.Int64? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func SourceClip(start: Swift.Int64 = 0, length: Swift.Int64 = 0, mobID: swiftaaf_Framework.MobID = MobID(), slotID: Swift.UInt32 = 0, mediaKind: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func Timecode(fps: Swift.UInt16 = 25, drop: Swift.Bool = false, length: Swift.Int64? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func TaggedValue(_ name: Swift.String? = nil, _ value: Any? = nil, _ valueType: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func NetworkLocator(_ urlString: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  final public func EssenceData() throws -> swiftaaf_Framework.AAFObject
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func ConstantValue(_ parameterDefinition: Any? = nil, _ value: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func VaryingValue(_ parameterDefinition: Any? = nil, _ interpolationDefinition: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func ControlPoint(time: Any? = nil, value: Any? = nil, valueType: Any? = nil, editHint: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func OperationGroup(_ operationDefinition: Any, _ length: Swift.Int64? = nil, mediaKind: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func definitionObject(className: Swift.String, id: Any, name: Swift.String, description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func dataDefinition(id: Any, name: Swift.String, description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func DataDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func containerDefinition(id: Any, name: Swift.String, description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func ContainerDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func parameterDefinition(id: Any, name: Swift.String, description: Swift.String? = nil, type: Any) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func ParameterDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil, _ type: Any) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func operationDefinition(id: Any, name: Swift.String, description: Swift.String? = nil, dataDefinition: Any? = nil, numberInputs: Swift.Int32? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func OperationDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func interpolationDefinition(id: Any, name: Swift.String, description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func InterpolationDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func taggedValueDefinition(id: Any, name: Swift.String, description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func TaggedValueDef(_ id: Any, _ name: Swift.String, _ description: Swift.String? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  @objc deinit
+}
+final public class AAFFile {
+  final public let cfb: swiftaaf_Framework.CompoundFileBinary
+  final public let mode: swiftaaf_Framework.CFBFileMode
+  final public let canonicalMode: Swift.String
+  final public var isOpen: Swift.Bool {
+    get
+  }
+  final public var weakReferenceTable: [[Swift.UInt16]] {
+    get
+  }
+  final public var manager: swiftaaf_Framework.AAFObjectManager! {
+    get
+  }
+  final public var create: swiftaaf_Framework.AAFFactory! {
+    get
+  }
+  final public var metaDictionary: swiftaaf_Framework.AAFMetaDictionary? {
+    get
+  }
+  public init(url: Foundation.URL, mode: swiftaaf_Framework.CFBFileMode = .read, sectorSize: Swift.Int = 4096) throws
+  convenience public init(path: Swift.String, mode: swiftaaf_Framework.CFBFileMode = .read, sectorSize: Swift.Int = 4096) throws
+  convenience public init(url: Foundation.URL, mode: Swift.String, sectorSize: Swift.Int = 4096) throws
+  convenience public init(path: Swift.String, mode: Swift.String, sectorSize: Swift.Int = 4096) throws
+  public static func cfbMode(forAAFMode mode: Swift.String) throws -> swiftaaf_Framework.CFBFileMode
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func object(at path: Swift.String) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  final public var writeable: Swift.Bool {
+    get
+  }
+  final public var root: swiftaaf_Framework.AAFObject {
+    get throws
+  }
+  final public var header: swiftaaf_Framework.AAFObject {
+    get throws
+  }
+  final public var content: swiftaaf_Framework.AAFObject {
+    get throws
+  }
+  final public var dictionary: swiftaaf_Framework.AAFObject {
+    get throws
+  }
+  final public func save() throws
+  final public func close() throws
+  final public func rootObject() throws -> swiftaaf_Framework.AAFObject
+  final public func dumpString() throws -> Swift.String
+  final public func dump() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var metadict: swiftaaf_Framework.AAFMetaDictionary? {
+    get
+  }
+  #endif
+  final public func setupEmpty() throws
+  final public func weakReferenceProperty(index: Swift.UInt16) throws -> (parent: swiftaaf_Framework.AAFObject, property: swiftaaf_Framework.AAFProperty)
+  final public func weakrefProp(_ index: Swift.UInt16) throws -> (parent: swiftaaf_Framework.AAFObject, property: swiftaaf_Framework.AAFProperty)
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func resolveWeakReference(index: Swift.UInt16, keyPID: Swift.UInt16, key: swiftaaf_Framework.AAFReferenceKey) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func resovleWeakref(index: Swift.UInt16, refPID: Swift.UInt16, ref: swiftaaf_Framework.AAFReferenceKey) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  final public func weakReferenceIndex(_ pidPath: [Swift.UInt16]) -> Swift.UInt16
+  final public func weakrefIndex(_ pidPath: [Swift.UInt16]) -> Swift.UInt16
+  final public func readReferenceProperties() throws
+  final public func writeReferenceProperties() throws
+  @objc deinit
+}
+public func openAAF(_ path: Swift.String, mode: swiftaaf_Framework.CFBFileMode = .read, sectorSize: Swift.Int = 4096) throws -> swiftaaf_Framework.AAFFile
+public func openAAF(_ path: Swift.String, mode: Swift.String = "r", sectorSize: Swift.Int = 4096) throws -> swiftaaf_Framework.AAFFile
+public typealias AAFInterpolationPoint = (x: Swift.Double, y: Swift.Double)
+public enum AAFInterpolationIDs {
+  public static let constant: swiftaaf_Framework.AUID
+  public static let linear: swiftaaf_Framework.AUID
+  public static let bezier: swiftaaf_Framework.AUID
+  public static let cubic: swiftaaf_Framework.AUID
+}
+public enum AAFInterpolation {
+  public static let epsilon: Swift.Double
+  public static func lerp(_ a: Swift.Double, _ b: Swift.Double, _ t: Swift.Double) -> Swift.Double
+  public static func cubicBezier(_ p0: Swift.Double, _ p1: Swift.Double, _ p2: Swift.Double, _ p3: Swift.Double, _ t: Swift.Double) -> Swift.Double
+  public static func validRoot(_ value: Swift.Double) -> Swift.Bool
+  public static func cubeRoot(_ value: Swift.Double) -> Swift.Double
+  public static func bezierCubicRoots(_ pa: Swift.Double, _ pb: Swift.Double, _ pc: Swift.Double, _ pd: Swift.Double) -> [Swift.Double]
+  public static func scaleHandle(_ p0: swiftaaf_Framework.AAFInterpolationPoint, _ p1: swiftaaf_Framework.AAFInterpolationPoint, _ p2: swiftaaf_Framework.AAFInterpolationPoint) -> swiftaaf_Framework.AAFInterpolationPoint
+  public static func bezierInterpolate(_ p0: swiftaaf_Framework.AAFInterpolationPoint, _ p1: swiftaaf_Framework.AAFInterpolationPoint, _ p2: swiftaaf_Framework.AAFInterpolationPoint, _ p3: swiftaaf_Framework.AAFInterpolationPoint, _ x: Swift.Double) throws -> Swift.Double
+  public static func bezierInterpolateOld(_ p0: swiftaaf_Framework.AAFInterpolationPoint, _ p1: swiftaaf_Framework.AAFInterpolationPoint, _ p2: swiftaaf_Framework.AAFInterpolationPoint, _ p3: swiftaaf_Framework.AAFInterpolationPoint, _ t: Swift.Double) -> Swift.Double
+  public static func signNoZero(_ value: Swift.Double) -> Swift.Int
+  public static func calculateTangent(_ p0: swiftaaf_Framework.AAFInterpolationPoint, _ p1: swiftaaf_Framework.AAFInterpolationPoint, _ p2: swiftaaf_Framework.AAFInterpolationPoint, inTangent: Swift.Bool = false) -> swiftaaf_Framework.AAFInterpolationPoint
+  public static func cubicInterpolate(_ p0: swiftaaf_Framework.AAFInterpolationPoint, _ p1: swiftaaf_Framework.AAFInterpolationPoint, _ p2: swiftaaf_Framework.AAFInterpolationPoint, _ p3: swiftaaf_Framework.AAFInterpolationPoint, _ t: Swift.Double) throws -> Swift.Double
+  public static func mcTrapezoidalIntegrate(_ valueAt: (Swift.Double) throws -> Swift.Double, _ a: Swift.Double, _ b: Swift.Double, n: Swift.Int = 5) throws -> Swift.Double
+  public static func integrateIter(_ valueAt: (Swift.Double) throws -> Swift.Double, start: Swift.Int, end: Swift.Int) throws -> [(time: Swift.Double, position: Swift.Double)]
+}
+public enum AAFTypeKind : Swift.String {
+  case base
+  case int
+  case strongReference
+  case weakReference
+  case enumeration
+  case fixedArray
+  case variableArray
+  case set
+  case string
+  case stream
+  case record
+  case rename
+  case extendibleEnumeration
+  case indirect
+  case opaque
+  case character
+  case genericCharacter
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(rawValue: Swift.String)
+  #endif
+  public typealias RawValue = Swift.String
+  public var rawValue: Swift.String {
+    get
+  }
+}
+final public class AAFMetaDictionary {
+  public static let pidName: Swift.UInt16
+  public static let pidAUID: Swift.UInt16
+  public static let pidType: Swift.UInt16
+  public static let pidOptional: Swift.UInt16
+  public static let pidPID: Swift.UInt16
+  public static let pidUnique: Swift.UInt16
+  public static let pidParent: Swift.UInt16
+  public static let pidProperties: Swift.UInt16
+  public static let pidConcrete: Swift.UInt16
+  public static let pidClassDefinitions: Swift.UInt16
+  public static let pidTypeDefinitions: Swift.UInt16
+  unowned final public let root: swiftaaf_Framework.AAFFile
+  final public let object: swiftaaf_Framework.AAFObject
+  final public var classDefinitionsByName: [Swift.String : swiftaaf_Framework.AAFClassDefinition] {
+    get
+  }
+  final public var classDefinitionsByAUID: [swiftaaf_Framework.AUID : swiftaaf_Framework.AAFClassDefinition] {
+    get
+  }
+  final public var typeDefinitionsByName: [Swift.String : swiftaaf_Framework.AAFTypeDefinition] {
+    get
+  }
+  final public var typeDefinitionsByAUID: [swiftaaf_Framework.AUID : swiftaaf_Framework.AAFTypeDefinition] {
+    get
+  }
+  public init(root: swiftaaf_Framework.AAFFile) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupClassDefinition(_ key: swiftaaf_Framework.AUID?) -> swiftaaf_Framework.AAFClassDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupClassDefinition(named name: Swift.String) -> swiftaaf_Framework.AAFClassDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupTypeDefinition(_ key: swiftaaf_Framework.AUID?) -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func lookupTypeDefinition(named name: Swift.String) -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  @objc deinit
+}
+final public class AAFClassDefinition {
+  final public let auid: swiftaaf_Framework.AUID
+  final public let className: Swift.String
+  final public let parentID: swiftaaf_Framework.AUID?
+  final public let concrete: Swift.Bool
+  final public let object: swiftaaf_Framework.AAFObject?
+  unowned final public let metaDictionary: swiftaaf_Framework.AAFMetaDictionary
+  final public var propertyDefinitions: [swiftaaf_Framework.AAFPropertyDefinition] {
+    get
+  }
+  final public var propertyDefinitionsByPID: [Swift.UInt16 : swiftaaf_Framework.AAFPropertyDefinition] {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  convenience public init?(object: swiftaaf_Framework.AAFObject, metaDictionary: swiftaaf_Framework.AAFMetaDictionary) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(auid: swiftaaf_Framework.AUID, className: Swift.String, parentID: swiftaaf_Framework.AUID?, concrete: Swift.Bool, propertyDefinitions: [swiftaaf_Framework.AAFPropertyDefinition], object: swiftaaf_Framework.AAFObject?, metaDictionary: swiftaaf_Framework.AAFMetaDictionary)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var parent: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var uniqueKeyPID: Swift.UInt16? {
+    get
+  }
+  #endif
+  final public var uniqueKeySize: Swift.UInt8 {
+    get
+  }
+  final public func isInstance(of other: swiftaaf_Framework.AAFClassDefinition) -> Swift.Bool
+  final public func isInstance(of otherAUID: swiftaaf_Framework.AUID) -> Swift.Bool
+  final public func relatives() -> [swiftaaf_Framework.AAFClassDefinition]
+  final public func allPropertyDefinitions() -> [swiftaaf_Framework.AAFPropertyDefinition]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func propertyDefinition(pid: Swift.UInt16) -> swiftaaf_Framework.AAFPropertyDefinition?
+  #endif
+  @objc deinit
+}
+final public class AAFPropertyDefinition {
+  final public let auid: swiftaaf_Framework.AUID
+  final public let propertyName: Swift.String
+  final public let pid: Swift.UInt16
+  final public let typeID: swiftaaf_Framework.AUID
+  final public let optional: Swift.Bool
+  final public let unique: Swift.Bool
+  final public let object: swiftaaf_Framework.AAFObject?
+  unowned final public let metaDictionary: swiftaaf_Framework.AAFMetaDictionary
+  #if compiler(>=5.3) && $NonescapableTypes
+  convenience public init?(object: swiftaaf_Framework.AAFObject, metaDictionary: swiftaaf_Framework.AAFMetaDictionary) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(auid: swiftaaf_Framework.AUID, propertyName: Swift.String, pid: Swift.UInt16, typeID: swiftaaf_Framework.AUID, optional: Swift.Bool, unique: Swift.Bool, object: swiftaaf_Framework.AAFObject?, metaDictionary: swiftaaf_Framework.AAFMetaDictionary)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var typeDefinition: swiftaaf_Framework.AAFTypeDefinition? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var storeFormat: Swift.UInt16? {
+    get
+  }
+  #endif
+  @objc deinit
+}
+@_hasMissingDesignatedInitializers final public class AAFTypeDefinition {
+  final public let auid: swiftaaf_Framework.AUID
+  final public let typeName: Swift.String
+  final public let classID: swiftaaf_Framework.AUID?
+  final public let kind: swiftaaf_Framework.AAFTypeKind
+  final public let object: swiftaaf_Framework.AAFObject?
+  unowned final public let metaDictionary: swiftaaf_Framework.AAFMetaDictionary
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(object: swiftaaf_Framework.AAFObject, metaDictionary: swiftaaf_Framework.AAFMetaDictionary) throws
+  #endif
+  final public var storeFormat: Swift.UInt16 {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var elementTypeID: swiftaaf_Framework.AUID? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var elementTypeDefinition: swiftaaf_Framework.AAFTypeDefinition? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var referencedClassID: swiftaaf_Framework.AUID? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var referencedClassDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  final public var weakReferenceTargetSetPath: [swiftaaf_Framework.AUID] {
+    get
+  }
+  final public var weakReferencePIDPath: [Swift.UInt16] {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var byteSize: Swift.Int? {
+    get
+  }
+  #endif
+  final public func decode(_ data: Foundation.Data) throws -> Any
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func encode(_ value: Any, dataType: swiftaaf_Framework.AAFTypeDefinition? = nil) throws -> Foundation.Data
+  #endif
+  final public var fieldDefinitions: [(name: Swift.String, type: swiftaaf_Framework.AAFTypeDefinition)] {
+    get
+  }
+  final public var enumElements: [Swift.Int64 : Swift.String] {
+    get
+  }
+  final public var extendibleEnumElements: [swiftaaf_Framework.AUID : Swift.String] {
+    get
+  }
+  @objc deinit
+}
+extension swiftaaf_Framework.AAFObject {
+  final public var mobs: swiftaaf_Framework.AAFStrongReferenceSetProperty {
+    get throws
+  }
+  final public var essenceData: swiftaaf_Framework.AAFStrongReferenceSetProperty {
+    get throws
+  }
+  final public var essencedata: swiftaaf_Framework.AAFStrongReferenceSetProperty {
+    get throws
+  }
+  final public func topLevelMobs() throws -> [swiftaaf_Framework.AAFObject]
+  final public func masterMobs() throws -> [swiftaaf_Framework.AAFObject]
+  final public func compositionMobs() throws -> [swiftaaf_Framework.AAFObject]
+  final public func sourceMobs() throws -> [swiftaaf_Framework.AAFObject]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func mob(for mobID: swiftaaf_Framework.MobID) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mobName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setMobName(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mobID: swiftaaf_Framework.MobID? {
+    get throws
+  }
+  #endif
+  final public func setMobID(_ value: swiftaaf_Framework.MobID) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mobUsage: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setMobUsage(_ value: Swift.String?) throws
+  #endif
+  final public var slots: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  final public func slot(at slotID: Swift.UInt32) throws -> swiftaaf_Framework.AAFObject
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createTimelineSlot(_ editRate: Any = 25, slotID requestedSlotID: Swift.UInt32? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createEmptySequenceSlot(_ editRate: Any = 25, slotID: Swift.UInt32? = nil, mediaKind: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  final public func createPictureSlot(_ editRate: Any = 25) throws -> swiftaaf_Framework.AAFObject
+  final public func createSoundSlot(_ editRate: Any = 25) throws -> swiftaaf_Framework.AAFObject
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createEmptySlot(_ editRate: Any? = nil, mediaKind: Any? = "picture", slotID: Swift.UInt32? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createEssence(editRate: Any? = nil, mediaKind: Any? = "picture", slotID: Swift.UInt32? = nil, offline: Swift.Bool = false) throws -> (essenceData: swiftaaf_Framework.AAFObject?, slot: swiftaaf_Framework.AAFObject)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var essence: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func importAudioEssence(path: Swift.String, editRate: Any? = nil, tape: swiftaaf_Framework.AAFObject? = nil, length: Swift.Int64? = nil, offline: Swift.Bool = false) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func import_audio_essence(_ path: Swift.String, editRate: Any? = nil, tape: swiftaaf_Framework.AAFObject? = nil, length: Swift.Int64? = nil, offline: Swift.Bool = false) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  final public func exportAudio(path: Swift.String) throws
+  final public func export_audio(_ path: Swift.String) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createTimecodeSlot(_ editRate: Any, timecodeFPS: Swift.UInt16, dropFrame: Swift.Bool = false, length: Swift.Int64? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createTapeSlots(tapeName: Swift.String, editRate: Any, timecodeFPS: Swift.UInt16, dropFrame: Swift.Bool = false, mediaKind: Any? = nil, length: Swift.Int64? = nil) throws -> (slot: swiftaaf_Framework.AAFObject, timecodeSlot: swiftaaf_Framework.AAFObject)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func createSourceClip(slotID: Swift.UInt32, start: Swift.Int64? = nil, length: Swift.Int64? = nil, mediaKind: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  final public func dependantMobs() throws -> [swiftaaf_Framework.AAFObject]
+  final public func dependentMobs() throws -> [swiftaaf_Framework.AAFObject]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sourceMobDescriptor: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSourceMobDescriptor(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var slotID: Swift.UInt32? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSlotID(_ value: Swift.UInt32?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var slotName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSlotName(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var segment: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSegment(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var editRate: swiftaaf_Framework.AAFRational? {
+    get throws
+  }
+  #endif
+  final public func setEditRate(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var origin: Swift.Int64? {
+    get throws
+  }
+  #endif
+  final public func setOrigin(_ value: Swift.Int64) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var slotLength: Swift.Int64? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var componentLength: Swift.Int64? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setComponentLength(_ value: Swift.Int64?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var dataDefinition: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setDataDefinition(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var mediaKind: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setMediaKind(_ value: Any?) throws
+  #endif
+  final public var components: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  final public func sequencePositions() throws -> [(index: Swift.Int, position: Swift.Int64, component: swiftaaf_Framework.AAFObject)]
+  final public func sequenceIndex(at editUnit: Swift.Int64) throws -> Swift.Int
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func component(at editUnit: Swift.Int64) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func computedSegmentLength() throws -> Swift.Int64?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var transitionOperationGroup: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setTransitionOperationGroup(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var cutPoint: Swift.Int64? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setCutPoint(_ value: Swift.Int64?) throws
+  #endif
+  final public var nestedScopeSlots: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var selectorSelected: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSelectorSelected(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  final public var selectorAlternates: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  final public var essenceGroupChoices: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var essenceGroupStillFrame: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setEssenceGroupStillFrame(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var relativeScope: Swift.UInt32? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setRelativeScope(_ value: Swift.UInt32?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var relativeSlot: Swift.UInt32? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setRelativeSlot(_ value: Swift.UInt32?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var pulldownInputSegment: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setPulldownInputSegment(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var pulldownKind: Swift.String? {
+    get throws
+  }
+  #endif
+  final public func setPulldownKind(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var pulldownDirection: Swift.String? {
+    get throws
+  }
+  #endif
+  final public func setPulldownDirection(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var phaseFrame: Swift.Int64? {
+    get throws
+  }
+  #endif
+  final public func setPhaseFrame(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sourceMobID: swiftaaf_Framework.MobID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSourceMobID(_ value: swiftaaf_Framework.MobID?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sourceSlotID: Swift.UInt32? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setSourceSlotID(_ value: Swift.UInt32?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sourceMob: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  final public func setSourceMob(_ value: swiftaaf_Framework.AAFObject) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var sourceSlot: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  final public func setSourceSlot(_ value: swiftaaf_Framework.AAFObject) throws
+  final public func walkSourceClip() throws -> [swiftaaf_Framework.AAFObject]
+  final public func walkSourceReferences() throws -> [swiftaaf_Framework.AAFObject]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var startTime: Swift.Int64? {
+    get throws
+  }
+  #endif
+  final public func setStartTime(_ value: Swift.Int64) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var timecodeStart: Swift.Int64? {
+    get throws
+  }
+  #endif
+  final public func setTimecodeStart(_ value: Swift.Int64) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var timecodeFPS: Swift.UInt16? {
+    get throws
+  }
+  #endif
+  final public func setTimecodeFPS(_ value: Swift.UInt16) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var timecodeDrop: Swift.Bool? {
+    get throws
+  }
+  #endif
+  final public func setTimecodeDrop(_ value: Swift.Bool) throws
+}
+extension swiftaaf_Framework.AAFObject {
+  final public func isAAFInstance(named className: Swift.String) -> Swift.Bool
+}
+public enum AAFLinkedMXFOperation {
+  case op1a
+  case opAtom
+  public static func == (a: swiftaaf_Framework.AAFLinkedMXFOperation, b: swiftaaf_Framework.AAFLinkedMXFOperation) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum AAFVideoDescriptorKind {
+  case cdci
+  case rgba
+  public static func == (a: swiftaaf_Framework.AAFVideoDescriptorKind, b: swiftaaf_Framework.AAFVideoDescriptorKind) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum AAFMXFLocatorStyle {
+  case fileURL
+  case localhostFileURL
+  case literal
+  public static func == (a: swiftaaf_Framework.AAFMXFLocatorStyle, b: swiftaaf_Framework.AAFMXFLocatorStyle) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum AAFProResCompressionAUID {
+  public static let proxy: swiftaaf_Framework.AUID
+  public static let lt: swiftaaf_Framework.AUID
+  public static let standard: swiftaaf_Framework.AUID
+  public static let hq: swiftaaf_Framework.AUID
+  public static let fourByFour: swiftaaf_Framework.AUID
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func from(variant: Swift.String) -> swiftaaf_Framework.AUID?
+  #endif
+}
+public struct AAFLinkedMXFAudioTrack {
+  public var mxfPath: Swift.String
+  public var sourceMobID: swiftaaf_Framework.MobID
+  public var masterMobID: swiftaaf_Framework.MobID?
+  public var sourceMobName: Swift.String?
+  public var lengthSamples: Swift.Int64
+  public var fileLengthSamples: Swift.Int64?
+  public var physicalTrackNumber: Swift.UInt32?
+  public var sampleRate: Swift.Int
+  public var channelCount: Swift.Int
+  public var quantizationBits: Swift.Int
+  public var blockAlign: Swift.Int?
+  public var averageBytesPerSecond: Swift.Int?
+  public var timecodeEditRate: swiftaaf_Framework.AAFRational?
+  public var timecodeLengthFrames: Swift.Int64?
+  public var slotName: Swift.String?
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(mxfPath: Swift.String, sourceMobID: swiftaaf_Framework.MobID, masterMobID: swiftaaf_Framework.MobID? = nil, sourceMobName: Swift.String? = nil, lengthSamples: Swift.Int64, fileLengthSamples: Swift.Int64? = nil, physicalTrackNumber: Swift.UInt32? = nil, sampleRate: Swift.Int = 48_000, channelCount: Swift.Int = 1, quantizationBits: Swift.Int = 24, blockAlign: Swift.Int? = nil, averageBytesPerSecond: Swift.Int? = nil, timecodeEditRate: swiftaaf_Framework.AAFRational? = nil, timecodeLengthFrames: Swift.Int64? = nil, slotName: Swift.String? = nil)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(mxfPath: Swift.String, sourceMobIDBytesLE: some Collection<UInt8>, masterMobIDBytesLE: (any Swift.Collection<Swift.UInt8>)? = nil, sourceMobName: Swift.String? = nil, lengthSamples: Swift.Int64, fileLengthSamples: Swift.Int64? = nil, physicalTrackNumber: Swift.UInt32? = nil, sampleRate: Swift.Int = 48_000, channelCount: Swift.Int = 1, quantizationBits: Swift.Int = 24, blockAlign: Swift.Int? = nil, averageBytesPerSecond: Swift.Int? = nil, timecodeEditRate: swiftaaf_Framework.AAFRational? = nil, timecodeLengthFrames: Swift.Int64? = nil, slotName: Swift.String? = nil) throws
+  #endif
+}
+public struct AAFLinkedMXFClip {
+  public var name: Swift.String
+  public var operation: swiftaaf_Framework.AAFLinkedMXFOperation
+  public var videoMXFPath: Swift.String
+  public var videoSourceMobID: swiftaaf_Framework.MobID
+  public var videoMasterMobID: swiftaaf_Framework.MobID?
+  public var videoSourceMobName: Swift.String?
+  public var videoPhysicalTrackNumber: Swift.UInt32?
+  public var videoDescriptorLength: Swift.Int64?
+  public var videoDescriptorKind: swiftaaf_Framework.AAFVideoDescriptorKind
+  public var videoCompression: swiftaaf_Framework.AUID?
+  public var width: Swift.Int
+  public var height: Swift.Int
+  public var durationFrames: Swift.Int64
+  public var editRate: swiftaaf_Framework.AAFRational
+  public var isDropFrame: Swift.Bool
+  public var startTimecode: Swift.String
+  public var audioTracks: [swiftaaf_Framework.AAFLinkedMXFAudioTrack]
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(name: Swift.String, operation: swiftaaf_Framework.AAFLinkedMXFOperation, videoMXFPath: Swift.String, videoSourceMobID: swiftaaf_Framework.MobID, videoMasterMobID: swiftaaf_Framework.MobID? = nil, videoSourceMobName: Swift.String? = nil, videoPhysicalTrackNumber: Swift.UInt32? = nil, videoDescriptorLength: Swift.Int64? = nil, videoDescriptorKind: swiftaaf_Framework.AAFVideoDescriptorKind = .cdci, videoCompression: swiftaaf_Framework.AUID? = AAFProResCompressionAUID.hq, width: Swift.Int, height: Swift.Int, durationFrames: Swift.Int64, editRate: swiftaaf_Framework.AAFRational, isDropFrame: Swift.Bool = false, startTimecode: Swift.String = "00:00:00:00", audioTracks: [swiftaaf_Framework.AAFLinkedMXFAudioTrack] = [])
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(name: Swift.String, operation: swiftaaf_Framework.AAFLinkedMXFOperation, videoMXFPath: Swift.String, videoSourceMobIDBytesLE: some Collection<UInt8>, videoMasterMobIDBytesLE: (any Swift.Collection<Swift.UInt8>)? = nil, videoSourceMobName: Swift.String? = nil, videoPhysicalTrackNumber: Swift.UInt32? = nil, videoDescriptorLength: Swift.Int64? = nil, videoDescriptorKind: swiftaaf_Framework.AAFVideoDescriptorKind = .cdci, videoCompression: swiftaaf_Framework.AUID? = AAFProResCompressionAUID.hq, width: Swift.Int, height: Swift.Int, durationFrames: Swift.Int64, editRate: swiftaaf_Framework.AAFRational, isDropFrame: Swift.Bool = false, startTimecode: Swift.String = "00:00:00:00", audioTracks: [swiftaaf_Framework.AAFLinkedMXFAudioTrack] = []) throws
+  #endif
+}
+public struct AAFMXFSequenceWriterOptions {
+  public var sequenceName: Swift.String
+  public var locatorStyle: swiftaaf_Framework.AAFMXFLocatorStyle
+  public var productName: Swift.String
+  public var companyName: Swift.String
+  public var productVersion: Swift.String
+  public init(sequenceName: Swift.String = "ProRes Sequence", locatorStyle: swiftaaf_Framework.AAFMXFLocatorStyle = .fileURL, productName: Swift.String = "SwiftAAF", companyName: Swift.String = "SwiftAAF", productVersion: Swift.String = SwiftAAF.version)
+}
+public struct AAFMXFSequenceWriter {
+  public init()
+  public func write(clips: [swiftaaf_Framework.AAFLinkedMXFClip], to url: Foundation.URL, options: swiftaaf_Framework.AAFMXFSequenceWriterOptions = AAFMXFSequenceWriterOptions()) throws
+  public func write(clips: [swiftaaf_Framework.AAFLinkedMXFClip], to path: Swift.String, options: swiftaaf_Framework.AAFMXFSequenceWriterOptions = AAFMXFSequenceWriterOptions()) throws
+}
+final public class AAFObject : Swift.CustomStringConvertible {
+  final public var classID: swiftaaf_Framework.AUID?
+  weak final public var root: swiftaaf_Framework.AAFFile?
+  final public var directory: swiftaaf_Framework.CFBDirectoryEntry?
+  final public var propertyEntries: [Swift.UInt16 : swiftaaf_Framework.AAFProperty]
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(classID: swiftaaf_Framework.AUID? = nil, root: swiftaaf_Framework.AAFFile? = nil, directory: swiftaaf_Framework.CFBDirectoryEntry? = nil)
+  #endif
+  final public var name: Swift.String {
+    get
+  }
+  final public var description: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var classDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  final public var uniqueProperty: swiftaaf_Framework.AAFProperty {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var uniqueKey: Any? {
+    get throws
+  }
+  #endif
+  final public var properties: [swiftaaf_Framework.AAFProperty] {
+    get
+  }
+  final public func allKeys() -> [Swift.UInt16]
+  final public func allPropertyNames() -> [Swift.String]
+  final public func propertyNames() -> [Swift.String]
+  final public func keys() -> [Swift.UInt16]
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func get(_ pid: Swift.UInt16) -> swiftaaf_Framework.AAFProperty?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func get(_ key: Swift.String, allKeys: Swift.Bool = true) -> swiftaaf_Framework.AAFProperty?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public subscript(pid: Swift.UInt16) -> swiftaaf_Framework.AAFProperty? {
+    get
+    set
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public subscript(key: Swift.String) -> swiftaaf_Framework.AAFProperty? {
+    get
+    set
+  }
+  #endif
+  final public func contains(_ pid: Swift.UInt16) -> Swift.Bool
+  final public func contains(_ key: Swift.String, allKeys: Swift.Bool = false) -> Swift.Bool
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func value(for key: Swift.String, default defaultValue: Any? = nil) throws -> Any?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func getValue(_ key: Swift.String, default defaultValue: Any? = nil) throws -> Any?
+  #endif
+  final public func remove(_ key: Swift.String) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func stringProperty(_ pid: Swift.UInt16) -> Swift.String?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func boolProperty(_ pid: Swift.UInt16) -> Swift.Bool?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func auidProperty(_ pid: Swift.UInt16) throws -> swiftaaf_Framework.AUID?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func uint16Property(_ pid: Swift.UInt16) throws -> Swift.UInt16?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func uint32Property(_ pid: Swift.UInt16) throws -> Swift.UInt32?
+  #endif
+  final public func detach(delete: Swift.Bool = false) throws
+  final public func attach(to directory: swiftaaf_Framework.CFBDirectoryEntry) throws
+  final public func attach(_ directory: swiftaaf_Framework.CFBDirectoryEntry) throws
+  final public func walkReferences(topDown: Swift.Bool = false) throws -> [(object: swiftaaf_Framework.AAFObject, streams: [swiftaaf_Framework.AAFStreamProperty])]
+  final public func dumpString(space: Swift.String = "") throws -> Swift.String
+  final public func dump(space: Swift.String = "") throws
+  final public func validate() throws
+  final public func readProperties() throws
+  final public func writeProperties(validate: Swift.Bool = true) throws
+  @objc deinit
+}
+final public class AAFObjectManager {
+  unowned final public let root: swiftaaf_Framework.AAFFile
+  final public var modified: [Swift.String : swiftaaf_Framework.AAFObject] {
+    get
+  }
+  public init(root: swiftaaf_Framework.AAFFile)
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public subscript(path: Swift.String) -> swiftaaf_Framework.AAFObject? {
+    get
+    set
+  }
+  #endif
+  final public func createTempDirectory() throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func create_temp_dir() throws -> swiftaaf_Framework.CFBDirectoryEntry
+  final public func removeTemp() throws
+  final public func remove_temp() throws
+  final public func addModified(_ object: swiftaaf_Framework.AAFObject) throws
+  final public func add_modified(_ object: swiftaaf_Framework.AAFObject) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  @discardableResult
+  final public func pop(_ path: Swift.String) -> swiftaaf_Framework.AAFObject?
+  #endif
+  final public func readObject(at path: Swift.String) throws -> swiftaaf_Framework.AAFObject
+  final public func read_object(_ path: Swift.String) throws -> swiftaaf_Framework.AAFObject
+  final public func readObject(_ directory: swiftaaf_Framework.CFBDirectoryEntry) throws -> swiftaaf_Framework.AAFObject
+  final public func read_object(_ directory: swiftaaf_Framework.CFBDirectoryEntry) throws -> swiftaaf_Framework.AAFObject
+  final public func writeObjects(validate: Swift.Bool = true) throws
+  final public func write_objects() throws
+  @objc deinit
+}
+extension swiftaaf_Framework.AAFObject {
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var parameterAUID: swiftaaf_Framework.AUID? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setParameterAUID(_ value: swiftaaf_Framework.AUID?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func parameterDefinitionObject() throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  final public func setParameterDefinitionObject(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var parameterName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func constantValueTypeDefinition() throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var constantValue: Any? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setConstantValue(_ value: Any?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func constantValue(at time: Any? = nil) throws -> Any?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var interpolationDefinitionObject: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  final public func setInterpolationDefinitionObject(_ value: Any) throws
+  final public var pointList: swiftaaf_Framework.AAFStrongReferenceVectorProperty {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func varyingValueTypeDefinition() throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  @discardableResult
+  final public func addKeyframe(time: Any, value: Any, editHint: Any? = nil) throws -> swiftaaf_Framework.AAFObject
+  #endif
+  final public func value(at time: Any) throws -> Swift.Double
+  final public func nearestKeyframeIndex(time: Any) throws -> Swift.Int
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func generateOffsetMap(start: Swift.Int = 0, end: Swift.Int? = nil) throws -> [(time: Swift.Double, value: Swift.Double)]
+  #endif
+  final public var controlPointTime: Swift.Double {
+    get throws
+  }
+  final public func setControlPointTime(_ value: Any) throws
+  final public var controlPointValue: Swift.Double {
+    get throws
+  }
+  final public func setControlPointValue(_ value: Any) throws
+  final public var controlPointPointProperties: [Swift.String : Any] {
+    get throws
+  }
+  final public var controlPointBaseFrame: Any {
+    get throws
+  }
+  final public var controlPointTangents: (in: swiftaaf_Framework.AAFInterpolationPoint, out: swiftaaf_Framework.AAFInterpolationPoint) {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var operationDefinitionObject: swiftaaf_Framework.AAFObject? {
+    get throws
+  }
+  #endif
+  final public func setOperationDefinitionObject(_ value: Any) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var operationGroupParameters: swiftaaf_Framework.AAFStrongReferenceSetProperty? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var operationGroupSegments: swiftaaf_Framework.AAFStrongReferenceVectorProperty? {
+    get throws
+  }
+  #endif
+}
+public struct AAFQuickTimeLinkedClip {
+  public var movieURL: Foundation.URL
+  public var name: Swift.String
+  public var projectName: Swift.String
+  public var videoEditRate: swiftaaf_Framework.AAFRational
+  public var videoLengthFrames: Swift.Int64
+  public var importedSourceLength: Swift.Int64
+  public var timecodeStartFrames: Swift.Int64
+  public var timecodeFPS: Swift.UInt16
+  public var width: Swift.Int
+  public var height: Swift.Int
+  public var audioSampleRate: Swift.Int
+  public var audioSampleLength: Swift.Int64
+  public var audioChannels: Swift.Int
+  public var audioQuantizationBits: Swift.Int
+  public var audioBlockAlign: Swift.Int
+  public var audioAverageBytesPerSecond: Swift.Int
+  public var fileModificationUnixTime: Swift.Int64
+  public var videoCompression: swiftaaf_Framework.AUID?
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(movieURL: Foundation.URL, name: Swift.String? = nil, projectName: Swift.String = "", videoEditRate: swiftaaf_Framework.AAFRational, videoLengthFrames: Swift.Int64, importedSourceLength: Swift.Int64? = nil, timecodeStartFrames: Swift.Int64 = 0, timecodeFPS: Swift.UInt16 = 24, width: Swift.Int, height: Swift.Int, audioSampleRate: Swift.Int = 48_000, audioSampleLength: Swift.Int64, audioChannels: Swift.Int, audioQuantizationBits: Swift.Int = 16, audioBlockAlign: Swift.Int? = nil, audioAverageBytesPerSecond: Swift.Int? = nil, fileModificationUnixTime: Swift.Int64? = nil, videoCompression: swiftaaf_Framework.AUID? = AAFQuickTimeSequenceWriter.proResHQCompressionAUID) throws
+  #endif
+}
+public struct AAFQuickTimeSequenceWriterOptions {
+  public var sequenceName: Swift.String
+  public var productName: Swift.String
+  public var companyName: Swift.String
+  public var productVersion: Swift.String
+  public init(sequenceName: Swift.String = "QuickTime Sequence", productName: Swift.String = "SwiftAAF", companyName: Swift.String = "SwiftAAF", productVersion: Swift.String = SwiftAAF.version)
+}
+public struct AAFQuickTimeSequenceWriter {
+  public static let proResHQCompressionAUID: swiftaaf_Framework.AUID
+  public init()
+  public func write(clip: swiftaaf_Framework.AAFQuickTimeLinkedClip, to url: Foundation.URL, options: swiftaaf_Framework.AAFQuickTimeSequenceWriterOptions = AAFQuickTimeSequenceWriterOptions()) throws
+  public func write(clip: swiftaaf_Framework.AAFQuickTimeLinkedClip, to path: Swift.String, options: swiftaaf_Framework.AAFQuickTimeSequenceWriterOptions = AAFQuickTimeSequenceWriterOptions()) throws
+}
+final public class AAFTaggedValueHelper {
+  final public let property: swiftaaf_Framework.AAFStrongReferenceVectorProperty
+  public init(_ property: swiftaaf_Framework.AAFStrongReferenceVectorProperty)
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func get(_ key: Swift.String) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  final public func contains(_ key: Swift.String) throws -> Swift.Bool
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func value(for key: Swift.String) throws -> Any?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func items() throws -> [(name: Swift.String, value: Any?)]
+  #endif
+  final public func append(_ value: swiftaaf_Framework.AAFObject) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func set(_ value: Any, for key: Swift.String, valueType: Any? = nil) throws
+  #endif
+  @objc deinit
+}
+extension swiftaaf_Framework.AAFObject {
+  final public var comments: swiftaaf_Framework.AAFTaggedValueHelper {
+    get throws
+  }
+  final public var attributes: swiftaaf_Framework.AAFTaggedValueHelper {
+    get throws
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var taggedName: Swift.String? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setTaggedName(_ value: Swift.String?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var taggedValue: Any? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func setTaggedValue(_ value: Any?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func taggedValueTypeDefinition() throws -> swiftaaf_Framework.AAFTypeDefinition?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func encodeTaggedValue(_ value: Any, valueType: Any? = nil) throws
+  #endif
+}
+public struct AAFDNXFrameHeader : Swift.Equatable {
+  public let cid: Swift.Int
+  public let width: Swift.Int
+  public let height: Swift.Int
+  public let bitDepth: Swift.Int
+  public let interlaced: Swift.Bool
+  public init(cid: Swift.Int, width: Swift.Int, height: Swift.Int, bitDepth: Swift.Int, interlaced: Swift.Bool)
+  public static func == (a: swiftaaf_Framework.AAFDNXFrameHeader, b: swiftaaf_Framework.AAFDNXFrameHeader) -> Swift.Bool
+}
+public enum AAFVideo {
+  public static let dnxHDFrameSizes: [Swift.Int : Swift.Int]
+  public static let dnxHRCompressionRatio: [Swift.Int : (numerator: Swift.Int, denominator: Swift.Int)]
+  public static let dnxCompressionAUIDs: [Swift.Int : swiftaaf_Framework.AUID]
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func dnxFrameSize(cid: Swift.Int, width: Swift.Int? = nil, height: Swift.Int? = nil) throws -> Swift.Int
+  #endif
+  public static func validDNXPrefix(_ prefix: Swift.UInt64) -> Swift.Bool
+  public static func readDNXFrameHeader(_ data: Foundation.Data) throws -> swiftaaf_Framework.AAFDNXFrameHeader
+  public static func iterDNXStream(data: Foundation.Data) throws -> [Foundation.Data]
+  public static func iterDNXStream(url: Foundation.URL) throws -> [Foundation.Data]
+  public static func iterDNXStream(path: Swift.String) throws -> [Foundation.Data]
+}
+public struct AUID : Swift.Hashable, Swift.Comparable, Swift.CustomStringConvertible, Swift.Codable {
+  public var bytesLE: [Swift.UInt8] {
+    get
+  }
+  public init(_ hex: Swift.String) throws
+  public init(uuid: Foundation.UUID)
+  public init(bytesLE: some Collection<UInt8>) throws
+  public init(bytesBE: some Collection<UInt8>) throws
+  public init(integer: Swift.UInt64)
+  public init(integer: swiftaaf_Framework.AAFBigUInt)
+  public var bytesBE: [Swift.UInt8] {
+    get
+  }
+  public var integer: swiftaaf_Framework.AAFBigUInt {
+    get
+  }
+  public var hex: Swift.String {
+    get
+  }
+  public var uuid: Foundation.UUID {
+    get
+  }
+  public var data1: Swift.UInt32 {
+    get
+  }
+  public var data2: Swift.UInt16 {
+    get
+  }
+  public var data3: Swift.UInt16 {
+    get
+  }
+  public var data4: [Swift.UInt8] {
+    get
+  }
+  public var description: Swift.String {
+    get
+  }
+  public static func < (lhs: swiftaaf_Framework.AUID, rhs: swiftaaf_Framework.AUID) -> Swift.Bool
+  public static func == (a: swiftaaf_Framework.AUID, b: swiftaaf_Framework.AUID) -> Swift.Bool
+  public func encode(to encoder: any Swift.Encoder) throws
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+  public init(from decoder: any Swift.Decoder) throws
+}
+public struct MobID : Swift.Hashable, Swift.Comparable, Swift.CustomStringConvertible {
+  public var bytesLE: [Swift.UInt8] {
+    get
+  }
+  public init()
+  public init(_ urn: Swift.String) throws
+  public init(bytesLE: some Collection<UInt8>) throws
+  public init(integer: Swift.UInt64)
+  public init(integer: swiftaaf_Framework.AAFBigUInt)
+  public static func new() -> swiftaaf_Framework.MobID
+  public var material: swiftaaf_Framework.AUID {
+    get
+    set
+  }
+  public var materialUUID: Foundation.UUID {
+    get
+    set
+  }
+  public var smpteLabel: [Swift.UInt8] {
+    get
+    set
+  }
+  public var length: Swift.UInt8 {
+    get
+    set
+  }
+  public var instanceHigh: Swift.UInt8 {
+    get
+    set
+  }
+  public var instanceMid: Swift.UInt8 {
+    get
+    set
+  }
+  public var instanceLow: Swift.UInt8 {
+    get
+    set
+  }
+  public var data1: Swift.UInt32 {
+    get
+    set
+  }
+  public var data2: Swift.UInt16 {
+    get
+    set
+  }
+  public var data3: Swift.UInt16 {
+    get
+    set
+  }
+  public var data4: [Swift.UInt8] {
+    get
+    set
+  }
+  public var dictionary: [Swift.String : Any] {
+    get
+  }
+  public var integer: swiftaaf_Framework.AAFBigUInt {
+    get
+  }
+  public var urn: Swift.String {
+    get
+  }
+  public var description: Swift.String {
+    get
+  }
+  public mutating func setDictionary(_ dictionary: [Swift.String : Any]) throws
+  public mutating func setURN(_ value: Swift.String) throws
+  public static func < (lhs: swiftaaf_Framework.MobID, rhs: swiftaaf_Framework.MobID) -> Swift.Bool
+  public static func == (a: swiftaaf_Framework.MobID, b: swiftaaf_Framework.MobID) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum AAFPropertyFormat : Swift.UInt16, Swift.CustomStringConvertible {
+  case data
+  case dataStream
+  case strongObjectReference
+  case strongObjectReferenceVector
+  case strongObjectReferenceSet
+  case weakObjectReference
+  case weakObjectReferenceVector
+  case weakObjectReferenceSet
+  case weakObjectReferenceStoredObjectID
+  case uniqueObjectID
+  case opaqueStream
+  case dataVector
+  case dataSet
+  public var description: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(rawValue: Swift.UInt16)
+  #endif
+  public typealias RawValue = Swift.UInt16
+  public var rawValue: Swift.UInt16 {
+    get
+  }
+}
+public enum AAFPropertyFormats {
+  public static let sfData: Swift.UInt16
+  public static let sfDataStream: Swift.UInt16
+  public static let sfStrongObjectReference: Swift.UInt16
+  public static let sfStrongObjectReferenceVector: Swift.UInt16
+  public static let sfStrongObjectReferenceSet: Swift.UInt16
+  public static let sfWeakObjectReference: Swift.UInt16
+  public static let sfWeakObjectReferenceVector: Swift.UInt16
+  public static let sfWeakObjectReferenceSet: Swift.UInt16
+  public static let sfWeakObjectReferenceStoredObjectID: Swift.UInt16
+  public static let sfUniqueObjectID: Swift.UInt16
+  public static let sfOpaqueStream: Swift.UInt16
+  public static let sfDataVector: Swift.UInt16
+  public static let sfDataSet: Swift.UInt16
+  public static let propertyVersion: Swift.UInt8
+}
+public enum AAFReferenceKey : Swift.Hashable, Swift.Comparable, Swift.CustomStringConvertible {
+  case auid(swiftaaf_Framework.AUID)
+  case mobID(swiftaaf_Framework.MobID)
+  public init(value: Any) throws
+  public init(bytesLE: some Collection<UInt8>, keySize: Swift.UInt8) throws
+  public var bytesLE: [Swift.UInt8] {
+    get
+  }
+  public var keySize: Swift.UInt8 {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var auid: swiftaaf_Framework.AUID? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var mobID: swiftaaf_Framework.MobID? {
+    get
+  }
+  #endif
+  public var description: Swift.String {
+    get
+  }
+  public static func < (lhs: swiftaaf_Framework.AAFReferenceKey, rhs: swiftaaf_Framework.AAFReferenceKey) -> Swift.Bool
+  public static func == (a: swiftaaf_Framework.AAFReferenceKey, b: swiftaaf_Framework.AAFReferenceKey) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+open class AAFProperty : Swift.CustomStringConvertible {
+  weak public var parent: swiftaaf_Framework.AAFObject?
+  final public let pid: Swift.UInt16
+  final public let format: Swift.UInt16
+  final public let version: Swift.UInt8
+  public var data: Foundation.Data?
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = AAFPropertyFormats.propertyVersion)
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var formatKind: swiftaaf_Framework.AAFPropertyFormat? {
+    get
+  }
+  #endif
+  public var formatName: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var propertyDefinition: swiftaaf_Framework.AAFPropertyDefinition? {
+    get
+  }
+  #endif
+  public var attached: Swift.Bool {
+    get
+  }
+  public var writeable: Swift.Bool {
+    get
+  }
+  public var unique: Swift.Bool {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var name: Swift.String? {
+    get
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var typeDefinition: swiftaaf_Framework.AAFTypeDefinition? {
+    get
+  }
+  #endif
+  open func decode() throws
+  open func readIndex() throws
+  open func writeIndex() throws
+  open func detach() throws
+  open func attach() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  open func copy(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16? = nil) -> swiftaaf_Framework.AAFProperty
+  #endif
+  public func addPIDEntry()
+  public func removePIDEntry()
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func decodedValue() throws -> Any?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  open func setDecodedValue(_ value: Any?, dataType: swiftaaf_Framework.AAFTypeDefinition? = nil) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setValue(_ value: Any?, dataType: swiftaaf_Framework.AAFTypeDefinition? = nil) throws
+  #endif
+  public func markModified() throws
+  public var description: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func make(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8) -> swiftaaf_Framework.AAFProperty
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFStreamProperty : swiftaaf_Framework.AAFProperty {
+  final public var streamName: Swift.String? {
+    get
+  }
+  final public var detachedEntry: swiftaaf_Framework.CFBDirectoryEntry? {
+    get
+  }
+  override final public func decode() throws
+  public static func encodeStreamName(_ name: Swift.String) -> Foundation.Data
+  final public func setStreamName(_ name: Swift.String)
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func streamEntry() throws -> swiftaaf_Framework.CFBDirectoryEntry?
+  #endif
+  final public func open(mode: swiftaaf_Framework.CFBStreamMode = .read) throws -> swiftaaf_Framework.CFBStream
+  override final public func detach() throws
+  override final public func attach() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public var value: swiftaaf_Framework.CFBDirectoryEntry? {
+    get throws
+  }
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers public class AAFStrongReferenceProperty : swiftaaf_Framework.AAFProperty {
+  public var referenceName: Swift.String? {
+    get
+  }
+  override public func decode() throws
+  public static func encodeReferenceName(_ name: Swift.String) -> Foundation.Data
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func objectValue() throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setObjectValue(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  override public func detach() throws
+  override public func attach() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers public class AAFStrongReferenceVectorProperty : swiftaaf_Framework.AAFProperty {
+  public var indexName: Swift.String? {
+    get
+  }
+  public var references: [Swift.UInt32]
+  public var nextFreeKey: Swift.UInt32
+  public var lastFreeKey: Swift.UInt32
+  public var count: Swift.Int {
+    get
+  }
+  override public func decode() throws
+  public static func encodeIndexName(_ name: Swift.String) -> Foundation.Data
+  public func setIndexName(_ name: Swift.String)
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var referencedClassDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  @discardableResult
+  public func ensureIndexName() throws -> Swift.String
+  override public func readIndex() throws
+  override public func writeIndex() throws
+  public func indexReferenceName(at index: Swift.Int) throws -> Swift.String
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func object(at index: Swift.Int) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  public func objects() throws -> [swiftaaf_Framework.AAFObject]
+  public subscript(index: Swift.Int) -> Swift.UInt32 {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func appendLocalKey(_ localKey: Swift.UInt32? = nil)
+  #endif
+  public func append(_ object: swiftaaf_Framework.AAFObject) throws
+  public func insert(_ object: swiftaaf_Framework.AAFObject, at index: Swift.Int) throws
+  public func replaceObject(at index: Swift.Int, with object: swiftaaf_Framework.AAFObject) throws
+  public func extend(_ objects: [swiftaaf_Framework.AAFObject]) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setObjects(_ objects: [swiftaaf_Framework.AAFObject]?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func insertLocalKey(_ localKey: Swift.UInt32? = nil, at index: Swift.Int)
+  #endif
+  public func clear() throws
+  @discardableResult
+  public func removeLocalKey(at index: Swift.Int) -> Swift.UInt32
+  public func clearLocalKeys()
+  override public func detach() throws
+  override public func attach() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers public class AAFStrongReferenceSetProperty : swiftaaf_Framework.AAFProperty {
+  public var indexName: Swift.String? {
+    get
+  }
+  public var references: [swiftaaf_Framework.AAFReferenceKey : Swift.UInt32] {
+    get
+  }
+  public var referenceOrder: [swiftaaf_Framework.AAFReferenceKey] {
+    get
+  }
+  public var nextFreeKey: Swift.UInt32
+  public var lastFreeKey: Swift.UInt32
+  public var keyPID: Swift.UInt16?
+  public var keySize: Swift.UInt8?
+  public var count: Swift.Int {
+    get
+  }
+  override public func decode() throws
+  public static func encodeIndexName(_ name: Swift.String) -> Foundation.Data
+  public func setIndexName(_ name: Swift.String)
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var referencedClassDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  @discardableResult
+  public func ensureIndexName() throws -> Swift.String
+  override public func readIndex() throws
+  override public func writeIndex() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func localKey(for key: swiftaaf_Framework.AAFReferenceKey) -> Swift.UInt32?
+  #endif
+  public func contains(_ key: swiftaaf_Framework.AAFReferenceKey) -> Swift.Bool
+  public func indexReferenceName(for key: swiftaaf_Framework.AAFReferenceKey) throws -> Swift.String
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func object(for key: swiftaaf_Framework.AAFReferenceKey) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  public func items() throws -> [(key: swiftaaf_Framework.AAFReferenceKey, object: swiftaaf_Framework.AAFObject)]
+  public func values() throws -> [swiftaaf_Framework.AAFObject]
+  public func append(_ object: swiftaaf_Framework.AAFObject) throws
+  public func extend(_ objects: [swiftaaf_Framework.AAFObject]) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setObjects(_ objects: [swiftaaf_Framework.AAFObject]?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setReference(_ key: swiftaaf_Framework.AAFReferenceKey, localKey: Swift.UInt32? = nil)
+  #endif
+  public func clear() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  @discardableResult
+  public func removeReference(_ key: swiftaaf_Framework.AAFReferenceKey) -> Swift.UInt32?
+  #endif
+  public func clearReferences()
+  override public func detach() throws
+  override public func attach() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers public class AAFWeakReferenceProperty : swiftaaf_Framework.AAFProperty {
+  public var weakReferenceIndex: Swift.UInt16? {
+    get
+  }
+  public var keyPID: Swift.UInt16? {
+    get
+  }
+  public var keySize: Swift.UInt8? {
+    get
+  }
+  public var referenceKey: swiftaaf_Framework.AAFReferenceKey? {
+    get
+  }
+  public var referenceAUID: swiftaaf_Framework.AUID? {
+    get
+  }
+  public var referenceMobID: swiftaaf_Framework.MobID? {
+    get
+  }
+  override public func decode() throws
+  public func setReference(weakReferenceIndex: Swift.UInt16, keyPID: Swift.UInt16, key: swiftaaf_Framework.AAFReferenceKey)
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var referencedClassDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  public var pidPath: [Swift.UInt16] {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setObjectValue(_ value: swiftaaf_Framework.AAFObject?) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public func setDecodedValue(_ value: Any?, dataType: swiftaaf_Framework.AAFTypeDefinition? = nil) throws
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func encode() -> Foundation.Data?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func objectValue() throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers public class AAFWeakReferenceArrayProperty : swiftaaf_Framework.AAFProperty {
+  public var indexName: Swift.String? {
+    get
+  }
+  public var references: [swiftaaf_Framework.AAFReferenceKey] {
+    get
+  }
+  public var weakReferenceIndex: Swift.UInt16?
+  public var keyPID: Swift.UInt16?
+  public var keySize: Swift.UInt8?
+  public var count: Swift.Int {
+    get
+  }
+  override public func decode() throws
+  public static func encodeIndexName(_ name: Swift.String) -> Foundation.Data
+  public func setIndexName(_ name: Swift.String)
+  @discardableResult
+  public func ensureIndexName() throws -> Swift.String
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var referencedClassDefinition: swiftaaf_Framework.AAFClassDefinition? {
+    get
+  }
+  #endif
+  public var pidPath: [Swift.UInt16] {
+    get
+  }
+  override public func readIndex() throws
+  override public func writeIndex() throws
+  public func appendReference(_ key: swiftaaf_Framework.AAFReferenceKey)
+  public func extendReferences(_ keys: [swiftaaf_Framework.AAFReferenceKey])
+  public func append(_ object: swiftaaf_Framework.AAFObject) throws
+  public func extend(_ objects: [swiftaaf_Framework.AAFObject]) throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func setObjects(_ objects: [swiftaaf_Framework.AAFObject]?) throws
+  #endif
+  public func contains(_ key: swiftaaf_Framework.AAFReferenceKey) -> Swift.Bool
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func object(for key: swiftaaf_Framework.AAFReferenceKey) throws -> swiftaaf_Framework.AAFObject?
+  #endif
+  public func items() throws -> [(key: swiftaaf_Framework.AAFReferenceKey, object: swiftaaf_Framework.AAFObject)]
+  public func objects() throws -> [swiftaaf_Framework.AAFObject]
+  public func clearReferences()
+  public func clear() throws
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFWeakReferenceVectorProperty : swiftaaf_Framework.AAFWeakReferenceArrayProperty {
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFWeakReferenceSetProperty : swiftaaf_Framework.AAFWeakReferenceArrayProperty {
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFWeakReferencePropertyID : swiftaaf_Framework.AAFWeakReferenceProperty {
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFUniqueIDProperty : swiftaaf_Framework.AAFProperty {
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+@_inheritsConvenienceInitializers final public class AAFOpaqueStreamProperty : swiftaaf_Framework.AAFProperty {
+  #if compiler(>=5.3) && $NonescapableTypes
+  override public init(parent: swiftaaf_Framework.AAFObject?, pid: Swift.UInt16, format: Swift.UInt16, version: Swift.UInt8 = super)
+  #endif
+  @objc deinit
+}
+#if compiler(>=5.3) && $NonescapableTypes
+@discardableResult
+public func addStringProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: Swift.String?) -> swiftaaf_Framework.AAFProperty
+#endif
+@discardableResult
+public func addBoolProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: Swift.Bool) -> swiftaaf_Framework.AAFProperty
+#if compiler(>=5.3) && $NonescapableTypes
+@discardableResult
+public func addUInt32LEProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: Swift.UInt32?) -> swiftaaf_Framework.AAFProperty
+#endif
+#if compiler(>=5.3) && $NonescapableTypes
+@discardableResult
+public func addUInt16LEProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: Swift.UInt16?) -> swiftaaf_Framework.AAFProperty
+#endif
+#if compiler(>=5.3) && $NonescapableTypes
+@discardableResult
+public func addUInt8Property(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: Swift.UInt8?) -> swiftaaf_Framework.AAFProperty
+#endif
+#if compiler(>=5.3) && $NonescapableTypes
+@discardableResult
+public func addAUIDProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: swiftaaf_Framework.AUID?) -> swiftaaf_Framework.AAFProperty
+#endif
+@discardableResult
+public func addAUIDArrayProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, values: [swiftaaf_Framework.AUID]) -> swiftaaf_Framework.AAFProperty
+@discardableResult
+public func addAUIDArrayPropertry(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, values: [swiftaaf_Framework.AUID]) -> swiftaaf_Framework.AAFProperty
+@discardableResult
+public func addUTF16ArrayProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, values: [Swift.String]) -> swiftaaf_Framework.AAFProperty
+@discardableResult
+public func addInt64LEArrayProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, values: [Swift.Int64]) -> swiftaaf_Framework.AAFProperty
+@discardableResult
+public func addWeakRefProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, pidPath: [Swift.UInt16], keyPID: Swift.UInt16, value: swiftaaf_Framework.AAFReferenceKey) throws -> swiftaaf_Framework.AAFWeakReferenceProperty
+@discardableResult
+public func addWeakRefProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, pidPath: [Swift.UInt16], keyPID: Swift.UInt16, value: swiftaaf_Framework.AUID) throws -> swiftaaf_Framework.AAFWeakReferenceProperty
+@discardableResult
+public func addWeakRefProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, pidPath: [Swift.UInt16], keyPID: Swift.UInt16, value: swiftaaf_Framework.MobID) throws -> swiftaaf_Framework.AAFWeakReferenceProperty
+@discardableResult
+public func addClassDefWeakRefProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: swiftaaf_Framework.AUID) throws -> swiftaaf_Framework.AAFWeakReferenceProperty
+@discardableResult
+public func addTypeDefWeakRefProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, value: swiftaaf_Framework.AUID) throws -> swiftaaf_Framework.AAFWeakReferenceProperty
+@discardableResult
+public func addStrongRefSetProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, propertyName: Swift.String, uniquePID: Swift.UInt16, keySize: Swift.UInt8 = 16) -> swiftaaf_Framework.AAFStrongReferenceSetProperty
+@discardableResult
+public func addTypeDefWeakRefVectorProperty(parent: swiftaaf_Framework.AAFObject, pid: Swift.UInt16, propertyName: Swift.String, values: [swiftaaf_Framework.AUID]) throws -> swiftaaf_Framework.AAFWeakReferenceVectorProperty
+public enum AAFError : Swift.Error, Swift.Equatable, Foundation.LocalizedError {
+  case attach(Swift.String)
+  case property(Swift.String)
+  case compoundFileBinary(Swift.String)
+  case invalidValue(Swift.String)
+  case endOfData(expected: Swift.Int, actual: Swift.Int)
+  #if compiler(>=5.3) && $NonescapableTypes
+  public var errorDescription: Swift.String? {
+    get
+  }
+  #endif
+  public static func == (a: swiftaaf_Framework.AAFError, b: swiftaaf_Framework.AAFError) -> Swift.Bool
+}
+public struct AAFBigUInt : Swift.Hashable, Swift.Comparable, Swift.CustomStringConvertible {
+  public var bigEndianBytes: [Swift.UInt8]
+  public init(bigEndianBytes: some Collection<UInt8>)
+  public init(_ value: Swift.UInt64)
+  public var isZero: Swift.Bool {
+    get
+  }
+  public var description: Swift.String {
+    get
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  public func hexString(paddedToByteCount byteCount: Swift.Int? = nil) -> Swift.String
+  #endif
+  public func padded(toByteCount byteCount: Swift.Int) -> [Swift.UInt8]
+  public static func < (lhs: swiftaaf_Framework.AAFBigUInt, rhs: swiftaaf_Framework.AAFBigUInt) -> Swift.Bool
+  public static func == (a: swiftaaf_Framework.AAFBigUInt, b: swiftaaf_Framework.AAFBigUInt) -> Swift.Bool
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum AAFByteOrder : Swift.String {
+  case big
+  case little
+  #if compiler(>=5.3) && $NonescapableTypes
+  public init?(rawValue: Swift.String)
+  #endif
+  public typealias RawValue = Swift.String
+  public var rawValue: Swift.String {
+    get
+  }
+}
+public struct EndianDataReader {
+  public var data: Foundation.Data {
+    get
+  }
+  public var offset: Swift.Int {
+    get
+  }
+  public init(data: Foundation.Data, offset: Swift.Int = 0)
+  public var remainingCount: Swift.Int {
+    get
+  }
+  public mutating func readData(count: Swift.Int) throws -> Foundation.Data
+  public mutating func readUInt8() throws -> Swift.UInt8
+  public mutating func readUInt16LE() throws -> Swift.UInt16
+  public mutating func readUInt16BE() throws -> Swift.UInt16
+  public mutating func readUInt32LE() throws -> Swift.UInt32
+  public mutating func readUInt32BE() throws -> Swift.UInt32
+  public mutating func readInt32BE() throws -> Swift.Int32
+  public mutating func readUInt64LE() throws -> Swift.UInt64
+  public mutating func readInt64LE() throws -> Swift.Int64
+  public mutating func readUInt64BE() throws -> Swift.UInt64
+  public mutating func readInt64BE() throws -> Swift.Int64
+  #if compiler(>=5.3) && $NonescapableTypes
+  public mutating func readSID() throws -> Swift.UInt32?
+  #endif
+}
+public struct EndianDataWriter {
+  public var data: Foundation.Data {
+    get
+  }
+  public init(data: Foundation.Data = Data())
+  public mutating func writeUInt8(_ value: Swift.UInt8)
+  public mutating func writeUInt16LE(_ value: Swift.UInt16)
+  public mutating func writeUInt32LE(_ value: Swift.UInt32)
+  public mutating func writeUInt64LE(_ value: Swift.UInt64)
+  public mutating func writeInt64LE(_ value: Swift.Int64)
+  #if compiler(>=5.3) && $NonescapableTypes
+  public mutating func writeSID(_ value: Swift.UInt32?)
+  #endif
+  public mutating func writeData(_ value: Foundation.Data)
+}
+public enum BinaryPrimitives {
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func decodeSID(_ sid: Swift.UInt32) -> Swift.UInt32?
+  #endif
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func encodeSID(_ sid: Swift.UInt32?) -> Swift.UInt32
+  #endif
+  public static func readFileTime(_ reader: inout swiftaaf_Framework.EndianDataReader) throws -> Swift.UInt64
+  public static func writeFileTime(_ value: Swift.UInt64, to writer: inout swiftaaf_Framework.EndianDataWriter)
+  public static func decodeUTF16LE(_ data: Foundation.Data) -> Swift.String
+  public static func encodeUTF16LE(_ string: Swift.String) -> Foundation.Data
+  public static func encodeUInt16LE(_ value: Swift.UInt16) -> Foundation.Data
+  public static func encodeUInt32LE(_ value: Swift.UInt32) -> Foundation.Data
+  public static func encodeUInt8(_ value: Swift.UInt8) -> Foundation.Data
+  public static func encodeUTF16Array(_ values: [Swift.String]) -> Foundation.Data
+  public static func encodeAUIDArray(_ values: [swiftaaf_Framework.AUID]) -> Foundation.Data
+  #if compiler(>=5.3) && $NonescapableTypes
+  public static func str2auid(_ value: Swift.String?) -> Any?
+  #endif
+  public static func encodeInt64LE(_ value: Swift.Int64) -> Foundation.Data
+  public static func unpackUInt16LE(from buffer: some Collection<UInt8>, offset: Swift.Int) throws -> Swift.UInt16
+  public static func unpackUInt32LE(from buffer: some Collection<UInt8>, offset: Swift.Int) throws -> Swift.UInt32
+  public static func unpackUInt64LE(from buffer: some Collection<UInt8>, offset: Swift.Int) throws -> Swift.UInt64
+  public static func intFromBytes(_ bytes: some Collection<UInt8>, byteOrder: swiftaaf_Framework.AAFByteOrder = .big) -> swiftaaf_Framework.AAFBigUInt
+  public static func bytesFromInt(_ value: swiftaaf_Framework.AAFBigUInt, length: Swift.Int, byteOrder: swiftaaf_Framework.AAFByteOrder = .big) throws -> [Swift.UInt8]
+  public static func squeezeName(_ name: Swift.String, size: Swift.Int) -> Swift.String
+  public static func mangleName(_ name: Swift.String, pid: Swift.UInt32, size: Swift.Int) -> Swift.String
+  public static func rescale(value: Swift.Double, currentRate: Swift.Double, newRate: Swift.Double) -> Swift.Double
+}
+final public class LRUCache<Key, Value> where Key : Swift.Hashable {
+  public init(capacity: Swift.Int = 512)
+  final public var count: Swift.Int {
+    get
+  }
+  final public func contains(_ key: Key) -> Swift.Bool
+  final public subscript(key: Key) -> Value {
+    get
+    set
+  }
+  #if compiler(>=5.3) && $NonescapableTypes
+  final public func get(_ key: Key, default defaultValue: @autoclosure () -> Value? = nil) -> Value?
+  #endif
+  final public func set(_ value: Value, forKey key: Key)
+  final public func removeValue(forKey key: Key)
+  @objc deinit
+}
+public struct AAFRational : Swift.Hashable, Swift.Comparable, Swift.CustomStringConvertible, Swift.ExpressibleByIntegerLiteral {
+  public var numerator: Swift.Int64
+  public var denominator: Swift.Int64
+  public init(integerLiteral value: Swift.Int64)
+  public init(_ numerator: Swift.Int64 = 0, _ denominator: Swift.Int64 = 1)
+  public init(_ value: Swift.Double)
+  public init(_ string: Swift.String) throws
+  public init(_ decimal: Foundation.Decimal)
+  public var doubleValue: Swift.Double {
+    get
+  }
+  public var description: Swift.String {
+    get
+  }
+  public static func < (lhs: swiftaaf_Framework.AAFRational, rhs: swiftaaf_Framework.AAFRational) -> Swift.Bool
+  public static func + (lhs: swiftaaf_Framework.AAFRational, rhs: swiftaaf_Framework.AAFRational) -> swiftaaf_Framework.AAFRational
+  public static func - (lhs: swiftaaf_Framework.AAFRational, rhs: swiftaaf_Framework.AAFRational) -> swiftaaf_Framework.AAFRational
+  public static func * (lhs: swiftaaf_Framework.AAFRational, rhs: swiftaaf_Framework.AAFRational) -> swiftaaf_Framework.AAFRational
+  public static func / (lhs: swiftaaf_Framework.AAFRational, rhs: swiftaaf_Framework.AAFRational) -> swiftaaf_Framework.AAFRational
+  public static func == (a: swiftaaf_Framework.AAFRational, b: swiftaaf_Framework.AAFRational) -> Swift.Bool
+  public typealias IntegerLiteralType = Swift.Int64
+  public func hash(into hasher: inout Swift.Hasher)
+  public var hashValue: Swift.Int {
+    get
+  }
+}
+public enum SwiftAAF {
+  public static let version: Swift.String
+  public static let implementation: Swift.String
+  public static let license: Swift.String
+  public static func open(_ path: Swift.String, mode: Swift.String = "r", sectorSize: Swift.Int = 4096) throws -> swiftaaf_Framework.AAFFile
+  public static func open(_ url: Foundation.URL, mode: Swift.String = "r", sectorSize: Swift.Int = 4096) throws -> swiftaaf_Framework.AAFFile
+}
+extension swiftaaf_Framework.CFBDirectoryType : Swift.Hashable {}
+extension swiftaaf_Framework.CFBDirectoryType : Swift.RawRepresentable {}
+extension swiftaaf_Framework.CFBDirectoryColor : Swift.Hashable {}
+extension swiftaaf_Framework.CFBDirectoryColor : Swift.RawRepresentable {}
+extension swiftaaf_Framework.SeekWhence : Swift.Equatable {}
+extension swiftaaf_Framework.SeekWhence : Swift.Hashable {}
+extension swiftaaf_Framework.CFBStreamMode : Swift.Equatable {}
+extension swiftaaf_Framework.CFBStreamMode : Swift.Hashable {}
+extension swiftaaf_Framework.CFBFileMode : Swift.Hashable {}
+extension swiftaaf_Framework.AAFTypeKind : Swift.Equatable {}
+extension swiftaaf_Framework.AAFTypeKind : Swift.Hashable {}
+extension swiftaaf_Framework.AAFTypeKind : Swift.RawRepresentable {}
+extension swiftaaf_Framework.AAFLinkedMXFOperation : Swift.Equatable {}
+extension swiftaaf_Framework.AAFLinkedMXFOperation : Swift.Hashable {}
+extension swiftaaf_Framework.AAFVideoDescriptorKind : Swift.Equatable {}
+extension swiftaaf_Framework.AAFVideoDescriptorKind : Swift.Hashable {}
+extension swiftaaf_Framework.AAFMXFLocatorStyle : Swift.Equatable {}
+extension swiftaaf_Framework.AAFMXFLocatorStyle : Swift.Hashable {}
+extension swiftaaf_Framework.AAFPropertyFormat : Swift.Equatable {}
+extension swiftaaf_Framework.AAFPropertyFormat : Swift.Hashable {}
+extension swiftaaf_Framework.AAFPropertyFormat : Swift.RawRepresentable {}
+extension swiftaaf_Framework.AAFByteOrder : Swift.Equatable {}
+extension swiftaaf_Framework.AAFByteOrder : Swift.Hashable {}
+extension swiftaaf_Framework.AAFByteOrder : Swift.RawRepresentable {}

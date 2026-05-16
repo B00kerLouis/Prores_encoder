@@ -6,19 +6,8 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXCopyFilesBuildPhase section */
-		C96311CC2F73E1A4005C254E /* CopyFiles */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = /usr/share/man/man1/;
-			dstSubfolderSpec = 0;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 1;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
+		C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = swiftaaf_Framework.framework; path = Frameworks/swiftaaf_Framework.framework; sourceTree = "<group>"; };
 		C96311CE2F73E1A4005C254E /* prores encoder */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "prores encoder"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -45,8 +34,17 @@
 			isa = PBXGroup;
 			children = (
 				C96311D02F73E1A4005C254E /* prores encoder */,
+				C9AAF0022F8A000100000001 /* Frameworks */,
 				C96311CF2F73E1A4005C254E /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		C9AAF0022F8A000100000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		C96311CF2F73E1A4005C254E /* Products */ = {
@@ -66,7 +64,6 @@
 			buildPhases = (
 				C96311CA2F73E1A4005C254E /* Sources */,
 				C96311CB2F73E1A4005C254E /* Frameworks */,
-				C96311CC2F73E1A4005C254E /* CopyFiles */,
 			);
 			buildRules = (
 			);
@@ -184,9 +181,11 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SYMROOT = "$(SRCROOT)/Build";
 			};
 			name = Debug;
 		};
@@ -240,30 +239,86 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SYMROOT = "$(SRCROOT)/Build";
 			};
 			name = Release;
 		};
 		C96311D62F73E1A4005C254E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/src_cpp",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					swiftaaf_Framework,
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_FORCE_STATIC_LINK_STDLIB = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
+				SYMROOT = "$(SRCROOT)/Build";
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 			};
 			name = Debug;
 		};
 		C96311D72F73E1A4005C254E /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/src_cpp",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					swiftaaf_Framework,
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_FORCE_STATIC_LINK_STDLIB = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
+				SYMROOT = "$(SRCROOT)/Build";
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 			};
 			name = Release;
 		};

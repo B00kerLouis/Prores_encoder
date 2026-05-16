@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="390" viewBox="0 0 920 390" role="img" aria-labelledby="title desc">
+  <title id="title">ProRes 4444 XQ benchmark</title>
+  <desc id="desc">Realtime speed comparison for ProRes Encoder and two ffmpeg ProRes encoder paths.</desc>
+  <rect width="920" height="390" fill="#f7f8fb"/>
+  <text x="42" y="54" font-family="Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#111827">ProRes 4444 XQ Benchmark</text>
+  <text x="42" y="82" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#4b5563">3840x2160 / 24p source, realtime speed factor. Higher is faster.</text>
+
+  <line x1="250" y1="112" x2="250" y2="312" stroke="#d1d5db" stroke-width="1"/>
+  <line x1="250" y1="312" x2="800" y2="312" stroke="#d1d5db" stroke-width="1"/>
+
+  <text x="42" y="147" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">ProRes Encoder</text>
+  <rect x="250" y="124" width="520" height="34" rx="4" fill="#2563eb"/>
+  <text x="784" y="147" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#111827">7.04x</text>
+  <text x="250" y="178" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">13.22 s, MOV encode with 7.1 audio replacement</text>
+
+  <text x="42" y="225" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">ffmpeg prores_videotoolbox</text>
+  <rect x="250" y="202" width="139" height="34" rx="4" fill="#14b8a6"/>
+  <text x="403" y="225" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#111827">1.88x</text>
+  <text x="250" y="256" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">49.52 s, video-only encode to null output</text>
+
+  <text x="42" y="303" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">ffmpeg prores_ks</text>
+  <rect x="250" y="280" width="22" height="34" rx="4" fill="#f97316"/>
+  <text x="286" y="303" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#111827">0.29x</text>
+  <text x="250" y="334" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">316.71 s, video-only encode to null output</text>
+
+  <text x="42" y="364" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b7280">Note: benchmark scopes differ where marked; re-run on the same host and output target for final delivery comparisons.</text>
+</svg>
