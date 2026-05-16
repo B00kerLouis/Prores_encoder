@@ -85,7 +85,7 @@ Use `-aa` to provide an external audio file. Add `--audio-replace` or `-ar` to d
 proresencoder \
   -i input.mov \
   -q 4444xq \
-  -aa replacement_7_1.wav \
+  -aa audio_if_u_need.wav(or other format,MXF only supports WAV) \
   --audio-replace \
   -ef mov \
   -o output.mov
