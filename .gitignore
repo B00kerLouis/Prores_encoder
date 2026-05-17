@@ -1,8 +1,15 @@
 .DS_Store
 Build/
+build/
+!build/
+build/*
+!build/Release/
+!build/Release/**
 DerivedData/
 dist/
 *.dSYM/
+!build/Release/*.dSYM/
+!build/Release/*.dSYM/**
 *.xcuserstate
 *.moved-aside
 **/*.xcodeproj/project.xcworkspace/xcuserdata/
