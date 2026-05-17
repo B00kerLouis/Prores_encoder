@@ -5,8 +5,8 @@ dist/
 *.dSYM/
 *.xcuserstate
 *.moved-aside
-prores encoder.xcodeproj/project.xcworkspace/xcuserdata/
-prores encoder.xcodeproj/xcuserdata/
+**/*.xcodeproj/project.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/
 
 # Local media outputs and scratch files
 *.mov
