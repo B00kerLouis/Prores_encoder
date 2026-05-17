@@ -50,16 +50,54 @@ struct SourceColorSpace: Sendable {
     let primaries: String?
     let transfer:  String?
     let matrix:    String?
+    let masteringDisplayColorVolume: Data?
+    let contentLightLevelInfo: Data?
     /// 16-byte SMPTE UL data (for MXFBridge)
     let mxfPrimaries: Data?
     let mxfTransfer:  Data?
     let mxfMatrix:    Data?
 }
 
+enum DolbyVisionHEVCProfile: String, Sendable {
+    case profile81 = "81"
+
+    init?(argument: String) {
+        switch argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "81", "8.1":
+            self = .profile81
+        default:
+            return nil
+        }
+    }
+
+    var doviToolProfileArgument: String {
+        switch self {
+        case .profile81: return "8.1"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .profile81: return "8.1"
+        }
+    }
+}
+
+struct HEVCEncodeOptions: Sendable {
+    let bitrateMbps: Double
+    let dvProfile: DolbyVisionHEVCProfile?
+
+    var bitrateBitsPerSecond: Int {
+        Int((bitrateMbps * 1_000_000.0).rounded())
+    }
+}
+
 func detectColorSpace(from track: AVAssetTrack) async -> SourceColorSpace {
     guard let fmts = try? await track.load(.formatDescriptions),
           let fd = fmts.first else {
         return SourceColorSpace(primaries: nil, transfer: nil, matrix: nil,
+                                masteringDisplayColorVolume: nil,
+                                contentLightLevelInfo: nil,
                                 mxfPrimaries: nil, mxfTransfer: nil, mxfMatrix: nil)
     }
 
@@ -69,6 +107,10 @@ func detectColorSpace(from track: AVAssetTrack) async -> SourceColorSpace {
         fd, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String
     let mCF = CMFormatDescriptionGetExtension(
         fd, extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix) as? String
+    let masteringDisplay = CMFormatDescriptionGetExtension(
+        fd, extensionKey: kCMFormatDescriptionExtension_MasteringDisplayColorVolume) as? Data
+    let contentLight = CMFormatDescriptionGetExtension(
+        fd, extensionKey: kCMFormatDescriptionExtension_ContentLightLevelInfo) as? Data
 
     // Map to MXF ULs
     var mP: Data?; var mT: Data?; var mM: Data?
@@ -93,6 +135,8 @@ func detectColorSpace(from track: AVAssetTrack) async -> SourceColorSpace {
     }
 
     return SourceColorSpace(primaries: pCF, transfer: tCF, matrix: mCF,
+                            masteringDisplayColorVolume: masteringDisplay,
+                            contentLightLevelInfo: contentLight,
                             mxfPrimaries: mP, mxfTransfer: mT, mxfMatrix: mM)
 }
 
@@ -197,7 +241,7 @@ func videoSize(from asset: AVAsset) async -> (width: Int, height: Int) {
 // MARK: - ProRes codec type mapping
 
 let supportedProResQualities: Set<String> = [
-    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass"
+    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "hevc"
 ]
 
 func normalizedProResQuality(_ quality: String) -> String {
@@ -212,7 +256,11 @@ func proResQualityValidationError(_ quality: String) -> String? {
     if normalized == "xq" {
         return "Unsupported quality '\(quality)'. Use '4444xq' explicitly."
     }
-    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass."
+    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc."
+}
+
+func isHEVCQuality(_ quality: String) -> Bool {
+    normalizedProResQuality(quality) == "hevc"
 }
 
 func is4444FamilyQuality(_ quality: String) -> Bool {
@@ -221,14 +269,20 @@ func is4444FamilyQuality(_ quality: String) -> Bool {
 }
 
 func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
-    let pixelFormat: OSType = is4444FamilyQuality(quality)
-        ? kCVPixelFormatType_32BGRA
-        : kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    let pixelFormat: OSType
+    if isHEVCQuality(quality) {
+        pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    } else if is4444FamilyQuality(quality) {
+        pixelFormat = kCVPixelFormatType_32BGRA
+    } else {
+        pixelFormat = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    }
     return [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
 }
 
 func proResCodecType(_ quality: String) -> CMVideoCodecType {
     switch normalizedProResQuality(quality) {
+    case "hevc":    return kCMVideoCodecType_HEVC
     case "proxy":   return kCMVideoCodecType_AppleProRes422Proxy
     case "422lt":   return kCMVideoCodecType_AppleProRes422LT
     case "422":     return kCMVideoCodecType_AppleProRes422
@@ -248,7 +302,7 @@ func proResVariantInt(_ quality: String) -> Int {
 }
 
 func proResPipelineChannelCapacity(width: Int, height: Int, quality: String) -> Int {
-    let bytesPerPixel = 4
+    let bytesPerPixel = isHEVCQuality(quality) ? 2 : 4
     let frameBytes = max(width * height * bytesPerPixel, 1)
     let targetBufferedBytes = 128 * 1024 * 1024
     let memoryLimited = max(4, min(targetBufferedBytes / frameBytes, 8))
@@ -267,6 +321,9 @@ private func fourCCString(_ code: FourCharCode) -> String {
 }
 
 private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
+    if codecType == kCMVideoCodecType_HEVC {
+        return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    }
     switch codecType {
     case kCMVideoCodecType_AppleProRes4444, kCMVideoCodecType_AppleProRes4444XQ:
         return kCVPixelFormatType_32BGRA
@@ -287,6 +344,28 @@ private func proResHardwareEncoderSpecification() -> CFDictionary {
     [
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: kCFBooleanTrue as Any
     ] as CFDictionary
+}
+
+private func hevcHardwareEncoderSpecification() -> CFDictionary {
+    [
+        kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: kCFBooleanTrue as Any
+    ] as CFDictionary
+}
+
+private func vtSessionBooleanProperty(_ session: VTCompressionSession, key: CFString) -> Bool? {
+    var unmanagedValue: Unmanaged<CFTypeRef>?
+    let status = withUnsafeMutablePointer(to: &unmanagedValue) { pointer in
+        VTSessionCopyProperty(
+            session,
+            key: key,
+            allocator: kCFAllocatorDefault,
+            valueOut: UnsafeMutableRawPointer(pointer)
+        )
+    }
+    guard status == noErr, let unmanagedValue else { return nil }
+    let value = unmanagedValue.takeRetainedValue()
+    guard CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+    return CFBooleanGetValue((value as! CFBoolean))
 }
 
 // MARK: - Source ProRes check
@@ -581,10 +660,14 @@ final class ProResSession: @unchecked Sendable {
     private(set) var outputChannel: AsyncChannel<SendableSampleBuffer>?
 
     init(width: Int, height: Int, codecType: CMVideoCodecType,
-         fpsHint: Int, colorSpace: SourceColorSpace?) throws {
+         fpsHint: Int, colorSpace: SourceColorSpace?,
+         hevcOptions: HEVCEncodeOptions? = nil) throws {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
-        let encoderSpecification = proResHardwareEncoderSpecification()
+        let isHEVC = (codecType == kCMVideoCodecType_HEVC)
+        let encoderSpecification = isHEVC
+            ? hevcHardwareEncoderSpecification()
+            : proResHardwareEncoderSpecification()
         let imageBufferAttributeCandidates: [CFDictionary?] = [
             proResEncoderImageBufferAttributes(width: width, height: height, codecType: codecType),
             nil
@@ -633,7 +716,61 @@ final class ProResSession: @unchecked Sendable {
         if let m = colorSpace?.matrix {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix, value: m as CFString)
         }
+        if isHEVC {
+            guard let hevcOptions else {
+                throw NSError(domain: "ProResSession", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "HEVC encode requires bitrate options."])
+            }
+            if colorSpace?.primaries == nil {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
+                                     value: kCMFormatDescriptionColorPrimaries_ITU_R_2020)
+            }
+            if colorSpace?.transfer == nil {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
+                                     value: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ)
+            }
+            if colorSpace?.matrix == nil {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                                     value: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020)
+            }
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_HDRMetadataInsertionMode,
+                                 value: kVTHDRMetadataInsertionMode_Auto)
+            if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MasteringDisplayColorVolume,
+                                     value: masteringDisplay as CFData)
+            }
+            if let contentLight = colorSpace?.contentLightLevelInfo {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ContentLightLevelInfo,
+                                     value: contentLight as CFData)
+            }
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                                 value: kVTProfileLevel_HEVC_Main10_AutoLevel)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                 value: NSNumber(value: hevcOptions.bitrateBitsPerSecond))
+            let bytesPerSecond = max(1, hevcOptions.bitrateBitsPerSecond / 8)
+            let dataRateLimits = [
+                NSNumber(value: bytesPerSecond),
+                NSNumber(value: 1)
+            ] as CFArray
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+                                 value: dataRateLimits)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                                 value: NSNumber(value: max(fpsHint * 2, 1)))
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                                 value: NSNumber(value: 2))
+        }
         VTCompressionSessionPrepareToEncodeFrames(session)
+        if isHEVC,
+           let usingHardware = vtSessionBooleanProperty(
+                session,
+                key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
+           ),
+           !usingHardware {
+            throw NSError(domain: "ProResSession", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "VideoToolbox created a software HEVC encoder; hardware HEVC is required."])
+        }
     }
 
     /// Switch to async mode: creates the outputChannel and routes VT callback to it.
