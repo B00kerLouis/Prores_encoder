@@ -165,6 +165,32 @@ Measured data:
 
 Benchmark commands should be re-run on the same host, source clip, codec profile, and output scope before using the numbers for purchasing or delivery decisions.
 
+### Dolby Vision ProRes Master
+
+![Dolby Vision ProRes master benchmark](docs/benchmark-dolbyvision-prores-master.svg)
+
+Measured data:
+
+| Encoder path | Output | Wall time | Realtime speed | Metadata verification |
+|---|---:|---:|---:|---|
+| ProRes Encoder | ProRes 4444 XQ MOV | 13.24 s | 7.03x | Dolby Vision Metadata |
+| DaVinci Resolve 20.3.1 | ProRes 422 HQ MOV | 137.82 s | 0.68x | SMPTE ST 2086 only; no Dolby Vision metadata found |
+| Mezzinator 5.6.2 | ProRes 4444 XQ MOV | 364.02 s | 0.26x | SMPTE ST 2086 / Dolby Vision Metadata |
+
+Resolve's ProRes 422 HQ result is included as a speed reference, but it should not be treated as an embedded Dolby Vision ProRes master from this test because MediaInfo did not report a Dolby Vision metadata track.
+
+### Dolby Vision HEVC Profile 8.1
+
+![Dolby Vision HEVC Profile 8.1 benchmark](docs/benchmark-dolbyvision-hevc-p81.svg)
+
+Measured data:
+
+| Encoder path | Output | Wall time | Realtime speed | Metadata verification |
+|---|---:|---:|---:|---|
+| ProRes Encoder | HEVC Main 10 MOV | 21.68 s | 4.29x | hvc1 with hvcC+dvvC, Dolby Vision / SMPTE ST 2086 |
+| DaVinci Resolve 20.3.1 | HEVC Main 10 MOV | 169.07 s | 0.55x | hvc1 with hvcC+dvvC, Dolby Vision / SMPTE ST 2086 |
+| Mezzinator 5.6.2 | Unsupported | N/A | N/A | Tested CLI exposes no HEVC output path |
+
 ## Notes
 
 - The CLI prints explicit errors for unsafe argument combinations.

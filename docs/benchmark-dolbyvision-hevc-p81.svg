@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="430" viewBox="0 0 980 430" role="img" aria-labelledby="title desc">
+  <title id="title">Dolby Vision HEVC Profile 8.1 benchmark</title>
+  <desc id="desc">Realtime speed comparison for Dolby Vision HEVC Profile 8.1 exports. Mezzinator is marked unsupported because version 5.6.2 exposes no HEVC output path.</desc>
+  <rect width="980" height="430" fill="#f7f8fb"/>
+  <text x="42" y="54" font-family="Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#111827">Dolby Vision HEVC Profile 8.1 Benchmark</text>
+  <text x="42" y="82" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#4b5563">3840x2160 / 24p, 93.08 s source. Realtime speed factor; higher is faster.</text>
+
+  <line x1="280" y1="112" x2="280" y2="342" stroke="#d1d5db" stroke-width="1"/>
+  <line x1="280" y1="342" x2="840" y2="342" stroke="#d1d5db" stroke-width="1"/>
+
+  <text x="42" y="147" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">ProRes Encoder</text>
+  <rect x="280" y="124" width="520" height="34" rx="4" fill="#2563eb"/>
+  <text x="814" y="147" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#111827">4.29x</text>
+  <text x="280" y="178" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">21.68 s, HEVC Main 10 hvc1, hvcC+dvvC, Dolby Vision / SMPTE ST 2086 verified</text>
+
+  <text x="42" y="225" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">DaVinci Resolve 20.3.1</text>
+  <rect x="280" y="202" width="67" height="34" rx="4" fill="#14b8a6"/>
+  <text x="361" y="225" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#111827">0.55x</text>
+  <text x="280" y="256" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">169.07 s, HEVC Main 10 hvc1, hvcC+dvvC, Dolby Vision / SMPTE ST 2086 verified</text>
+
+  <text x="42" y="303" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#111827">Mezzinator 5.6.2</text>
+  <rect x="280" y="280" width="142" height="34" rx="4" fill="#e5e7eb" stroke="#9ca3af" stroke-dasharray="6 5"/>
+  <text x="438" y="303" font-family="Helvetica, Arial, sans-serif" font-size="15" fill="#374151">unsupported</text>
+  <text x="280" y="334" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#6b7280">No HEVC output mode exposed in the tested Mezzinator CLI, so no valid Profile 8.1 run was made</text>
+
+  <text x="42" y="386" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#6b7280">Note: timings are wall-clock measurements on the same host and source. Mezzinator unsupported status is not plotted as a speed value.</text>
+</svg>
