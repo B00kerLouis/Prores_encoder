@@ -382,9 +382,29 @@ private struct DolbyVisionVideoColorProfile {
     }
 }
 
+private struct DolbyVisionEditRate {
+    let numerator: Int
+    let denominator: Int
+
+    var fps: Double { Double(numerator) / Double(denominator) }
+    var label: String { "\(numerator) \(denominator)" }
+
+    func matches(_ fpsInfo: FramerateInfo) -> Bool {
+        abs(fps - fpsInfo.fps) < 0.0005
+    }
+}
+
+private struct QuickTimeTimecodeInfo {
+    let startFrame: Int64
+    let fps: Int
+    let isDropFrame: Bool
+    let stringValue: String
+}
+
 private struct DolbyVisionShot {
     let recordIn: Int
     let duration: Int
+    let sourceIn: Int?
     let xml: String
 
     func contains(frameNumber: Int) -> Bool {
@@ -399,6 +419,8 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
     let metadataIdentifier: AVMetadataIdentifier
     let trackName: String?
     let frameCount: Int
+    let editRate: DolbyVisionEditRate
+    let explicitStartTimecode: String?
 
     private let style: DolbyVisionMDFStyle
     private let schemaURL: String
@@ -459,6 +481,15 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
 
         try Self.validateXMLColorEncoding(track: track)
+        guard let parsedEditRate = Self.parseEditRate(track: track) else {
+            throw NSError(
+                domain: "DolbyVisionMetadata",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Dolby Vision XML Track must contain Rate or EditRate."]
+            )
+        }
+        editRate = parsedEditRate
+        explicitStartTimecode = firstExplicitTimecodeString(in: root)
         trackName = track.attribute(forName: "name")?.stringValue?.trimmedNonEmpty
             ?? textForXPath("./*[local-name()='TrackName']", in: track)
 
@@ -493,6 +524,60 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
         shots = parsedShots
         frameCount = parsedShots.map { $0.recordIn + $0.duration }.max() ?? 0
+    }
+
+    func validateAgainstSource(
+        fpsInfo: FramerateInfo,
+        estimatedFrames: Int64,
+        sourceTimecode: QuickTimeTimecodeInfo?
+    ) throws {
+        guard editRate.matches(fpsInfo) else {
+            throw NSError(
+                domain: "DolbyVisionMetadata",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Dolby Vision XML edit rate is \(editRate.label) (\(String(format: "%.6f", editRate.fps)) fps), but source video is \(fpsInfo.numerator) \(fpsInfo.denominator) (\(String(format: "%.6f", fpsInfo.fps)) fps)."
+                ]
+            )
+        }
+
+        try Self.validateShotCoverage(shots: shots, expectedFrameCount: estimatedFrames)
+
+        if let firstSourceIn = shots.sorted(by: { $0.recordIn < $1.recordIn }).compactMap(\.sourceIn).first,
+           firstSourceIn != 0 {
+            throw NSError(
+                domain: "DolbyVisionMetadata",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Dolby Vision XML first Shot/Source/In is \(firstSourceIn), but single-file encode expects source metadata to begin at frame 0."
+                ]
+            )
+        }
+
+        if let sourceTimecode, let explicitStartTimecode {
+            guard let xmlTCFrame = parseTimecodeFrameNumber(
+                explicitStartTimecode,
+                fps: sourceTimecode.fps,
+                dropFrame: sourceTimecode.isDropFrame || explicitStartTimecode.contains(";")
+            ) else {
+                throw NSError(
+                    domain: "DolbyVisionMetadata",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Dolby Vision XML timecode '\(explicitStartTimecode)' is not readable."
+                    ]
+                )
+            }
+            guard xmlTCFrame == sourceTimecode.startFrame else {
+                throw NSError(
+                    domain: "DolbyVisionMetadata",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Dolby Vision XML start timecode \(explicitStartTimecode) does not match source QuickTime TC \(sourceTimecode.stringValue)."
+                    ]
+                )
+            }
+        }
     }
 
     func makeFormatDescription() throws -> CMMetadataFormatDescription {
@@ -602,6 +687,102 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    private static func parseEditRate(track: XMLElement) -> DolbyVisionEditRate? {
+        if let editRate = textForXPath("./*[local-name()='EditRate']", in: track),
+           let parsed = parseEditRateText(editRate) {
+            return parsed
+        }
+        if let nText = textForXPath("./*[local-name()='Rate']/*[local-name()='n']", in: track),
+           let dText = textForXPath("./*[local-name()='Rate']/*[local-name()='d']", in: track),
+           let numerator = Int(nText),
+           let denominator = Int(dText),
+           numerator > 0,
+           denominator > 0 {
+            return DolbyVisionEditRate(numerator: numerator, denominator: denominator)
+        }
+        return nil
+    }
+
+    private static func parseEditRateText(_ text: String) -> DolbyVisionEditRate? {
+        let parts = text
+            .replacingOccurrences(of: "/", with: " ")
+            .replacingOccurrences(of: ",", with: " ")
+            .split { $0 == " " || $0 == "\n" || $0 == "\t" }
+        guard !parts.isEmpty else { return nil }
+        if parts.count >= 2,
+           let numerator = Int(parts[0]),
+           let denominator = Int(parts[1]),
+           numerator > 0,
+           denominator > 0 {
+            return DolbyVisionEditRate(numerator: numerator, denominator: denominator)
+        }
+        if let fps = Double(parts[0]), fps > 0 {
+            let known: [(Double, Int, Int)] = [
+                (23.976, 24000, 1001),
+                (24.0, 24, 1),
+                (25.0, 25, 1),
+                (29.97, 30000, 1001),
+                (30.0, 30, 1),
+                (50.0, 50, 1),
+                (59.94, 60000, 1001),
+                (60.0, 60, 1)
+            ]
+            for (reference, numerator, denominator) in known where abs(fps - reference) < 0.02 {
+                return DolbyVisionEditRate(numerator: numerator, denominator: denominator)
+            }
+            return DolbyVisionEditRate(numerator: Int(fps.rounded()), denominator: 1)
+        }
+        return nil
+    }
+
+    private static func validateShotCoverage(shots: [DolbyVisionShot], expectedFrameCount: Int64) throws {
+        let sortedShots = shots.sorted {
+            if $0.recordIn == $1.recordIn { return $0.duration < $1.duration }
+            return $0.recordIn < $1.recordIn
+        }
+        var expectedRecordIn = 0
+        for shot in sortedShots {
+            guard shot.recordIn >= 0 else {
+                throw NSError(
+                    domain: "DolbyVisionMetadata",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Dolby Vision XML Shot/Record/In must not be negative, found \(shot.recordIn)."
+                    ]
+                )
+            }
+            guard shot.duration > 0 else {
+                throw NSError(
+                    domain: "DolbyVisionMetadata",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Dolby Vision XML Shot/Record/Duration must be positive at Record/In \(shot.recordIn)."
+                    ]
+                )
+            }
+            guard shot.recordIn == expectedRecordIn else {
+                let relation = shot.recordIn > expectedRecordIn ? "gap" : "overlap"
+                throw NSError(
+                    domain: "DolbyVisionMetadata",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Dolby Vision XML Shot records have a \(relation): expected Record/In \(expectedRecordIn), found \(shot.recordIn)."
+                    ]
+                )
+            }
+            expectedRecordIn += shot.duration
+        }
+        if expectedFrameCount > 0, expectedRecordIn != Int(expectedFrameCount) {
+            throw NSError(
+                domain: "DolbyVisionMetadata",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Dolby Vision XML duration is \(expectedRecordIn) frames, but source video is estimated at \(expectedFrameCount) frames."
+                ]
+            )
+        }
+    }
+
     private static func makeLegacyGlobalXML(
         root: XMLElement,
         output: XMLElement,
@@ -689,6 +870,7 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
                 )
             }
             let recordIn = Int(textForXPath("./*[local-name()='Record']/*[local-name()='In']", in: shot) ?? "0") ?? 0
+            let sourceIn = textForXPath("./*[local-name()='Source']/*[local-name()='In']", in: shot).flatMap(Int.init)
             let xml: String
             switch style {
             case .legacy205:
@@ -702,7 +884,7 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
     </dvmd-int:Shot>
 """
             }
-            return DolbyVisionShot(recordIn: recordIn, duration: duration, xml: xml)
+            return DolbyVisionShot(recordIn: recordIn, duration: duration, sourceIn: sourceIn, xml: xml)
         }
     }
 }
@@ -726,6 +908,86 @@ private func firstElementForXPath(_ xPath: String, in node: XMLNode) -> XMLEleme
 
 private func textForXPath(_ xPath: String, in node: XMLNode) -> String? {
     (try? node.nodes(forXPath: xPath))?.first?.stringValue?.trimmedNonEmpty
+}
+
+private func firstExplicitTimecodeString(in element: XMLElement) -> String? {
+    let localName = xmlLocalName(element).lowercased()
+    if (localName.contains("timecode") || localName == "starttc" || localName == "tcstart"),
+       let value = element.stringValue?.trimmedNonEmpty,
+       parseTimecodeParts(value) != nil {
+        return value
+    }
+    for child in element.children ?? [] {
+        guard child.kind == .element, let childElement = child as? XMLElement else { continue }
+        if let value = firstExplicitTimecodeString(in: childElement) {
+            return value
+        }
+    }
+    return nil
+}
+
+private func parseTimecodeParts(_ value: String) -> (hours: Int64, minutes: Int64, seconds: Int64, frames: Int64)? {
+    let separators = CharacterSet(charactersIn: ":;.")
+    let parts = value
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .components(separatedBy: separators)
+    guard parts.count == 4,
+          let hours = Int64(parts[0]),
+          let minutes = Int64(parts[1]),
+          let seconds = Int64(parts[2]),
+          let frames = Int64(parts[3]),
+          minutes >= 0, minutes < 60,
+          seconds >= 0, seconds < 60,
+          frames >= 0 else {
+        return nil
+    }
+    return (hours, minutes, seconds, frames)
+}
+
+private func parseTimecodeFrameNumber(_ value: String, fps: Int, dropFrame: Bool) -> Int64? {
+    guard fps > 0, let parts = parseTimecodeParts(value) else { return nil }
+    guard parts.frames < Int64(fps) else { return nil }
+    let nominalFrames = ((parts.hours * 3600) + (parts.minutes * 60) + parts.seconds) * Int64(fps) + parts.frames
+    guard dropFrame else { return nominalFrames }
+    let dropFrames = Int64(2 * max(fps / 30, 1))
+    let totalMinutes = parts.hours * 60 + parts.minutes
+    return nominalFrames - dropFrames * (totalMinutes - totalMinutes / 10)
+}
+
+private func timecodeString(from frameNumber: Int64, fps: Int, dropFrame: Bool) -> String {
+    guard fps > 0 else { return "00:00:00:00" }
+    let safeFrameNumber = max(frameNumber, 0)
+    let separator = dropFrame ? ";" : ":"
+    if dropFrame && fps % 30 == 0 && fps >= 30 {
+        let dropFrames = 2 * fps / 30
+        let framesPerDroppedMinute = fps * 60 - dropFrames
+        let framesPerTenMinutes = framesPerDroppedMinute * 9 + fps * 60
+        let tenMinuteGroups = Int(safeFrameNumber) / framesPerTenMinutes
+        let remainder = Int(safeFrameNumber) % framesPerTenMinutes
+        let minuteInGroup: Int
+        let frameInMinute: Int
+        if remainder < fps * 60 {
+            minuteInGroup = 0
+            frameInMinute = remainder
+        } else {
+            let afterFirstMinute = remainder - fps * 60
+            minuteInGroup = 1 + afterFirstMinute / framesPerDroppedMinute
+            frameInMinute = afterFirstMinute % framesPerDroppedMinute + dropFrames
+        }
+        let totalMinutes = tenMinuteGroups * 10 + minuteInGroup
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        let seconds = frameInMinute / fps
+        let frames = frameInMinute % fps
+        return String(format: "%02d:%02d:%02d%@%02d", hours, minutes, seconds, separator, frames)
+    }
+    let fps64 = Int64(fps)
+    let frames = safeFrameNumber % fps64
+    let totalSeconds = safeFrameNumber / fps64
+    let seconds = totalSeconds % 60
+    let minutes = (totalSeconds / 60) % 60
+    let hours = totalSeconds / 3600
+    return String(format: "%02lld:%02lld:%02lld%@%02lld", hours, minutes, seconds, separator, frames)
 }
 
 private func parseNumberList(_ text: String?) -> [Double] {
@@ -1076,6 +1338,72 @@ private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) asyn
             "Dolby Vision encode refused: source video primaries must be Rec.2020 or P3, found \(primaries ?? "missing")."
         ]
     )
+}
+
+private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) async throws -> QuickTimeTimecodeInfo {
+    guard let fd = try? await track.load(.formatDescriptions).first else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Source QuickTime timecode track has no readable format description."]
+        )
+    }
+
+    let frameQuanta = Int(CMTimeCodeFormatDescriptionGetFrameQuanta(fd))
+    let fps = frameQuanta > 0 ? frameQuanta : 25
+    let isDropFrame = (CMTimeCodeFormatDescriptionGetTimeCodeFlags(fd) & kCMTimeCodeFlag_DropFrame) != 0
+
+    let reader = try AVAssetReader(asset: asset)
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Source QuickTime timecode track cannot be read."]
+        )
+    }
+    reader.add(output)
+    guard reader.startReading() else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Source QuickTime timecode reader start failed: \(reader.error?.localizedDescription ?? "unknown error")."
+            ]
+        )
+    }
+    guard let sample = output.copyNextSampleBuffer(),
+          let blockBuffer = CMSampleBufferGetDataBuffer(sample) else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Source QuickTime timecode track produced no sample."]
+        )
+    }
+
+    var totalLength = 0
+    var pointer: UnsafeMutablePointer<CChar>?
+    CMBlockBufferGetDataPointer(
+        blockBuffer,
+        atOffset: 0,
+        lengthAtOffsetOut: nil,
+        totalLengthOut: &totalLength,
+        dataPointerOut: &pointer)
+    guard totalLength >= 4, let pointer else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Source QuickTime timecode sample is too small."]
+        )
+    }
+
+    let startFrame = Int64(Int32(bigEndian: pointer.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }))
+    return QuickTimeTimecodeInfo(
+        startFrame: startFrame,
+        fps: fps,
+        isDropFrame: isDropFrame,
+        stringValue: timecodeString(from: startFrame, fps: fps, dropFrame: isDropFrame))
 }
 
 private func validateHDR10HEVCVideoColorProfile(from track: AVAssetTrack) async throws {
@@ -1825,15 +2153,26 @@ func encodeMOV(
             let metadata = try DolbyVisionMetadataSource(
                 xmlURL: dolbyVisionXMLURL,
                 videoColorProfile: videoColorProfile)
-            if estimatedFrames > 0, metadata.frameCount != Int(estimatedFrames) {
-                throw NSError(
-                    domain: "DolbyVisionMetadata",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey:
-                        "Dolby Vision XML duration is \(metadata.frameCount) frames, but source video is estimated at \(estimatedFrames) frames."
-                    ]
-                )
+            let sourceTimecodeInfo: QuickTimeTimecodeInfo?
+            if let timecodeTrack {
+                sourceTimecodeInfo = try await readQuickTimeTimecodeInfo(asset: asset, track: timecodeTrack)
+            } else {
+                sourceTimecodeInfo = nil
             }
+            try metadata.validateAgainstSource(
+                fpsInfo: fpsInfo,
+                estimatedFrames: estimatedFrames,
+                sourceTimecode: sourceTimecodeInfo)
+            if let sourceTimecodeInfo {
+                if let explicitStartTimecode = metadata.explicitStartTimecode {
+                    print("[DoVi] XML start TC \(explicitStartTimecode) matches source QuickTime TC \(sourceTimecodeInfo.stringValue).")
+                } else {
+                    print("[DoVi] Source QuickTime TC \(sourceTimecodeInfo.stringValue) detected; XML has no explicit SMPTE TC field, so record timeline was validated from frame 0.")
+                }
+            } else {
+                print("[DoVi] Source has no QuickTime TC track; output will not synthesize a TC track.")
+            }
+            print("[DoVi] XML edit rate \(metadata.editRate.label) matches source \(fpsInfo.numerator) \(fpsInfo.denominator); shot coverage is continuous for \(metadata.frameCount) frames.")
             if isHEVC {
                 guard let profile = hevcOptions?.dvProfile else {
                     throw NSError(
@@ -1923,8 +2262,18 @@ func encodeMOV(
 
         var tcOut: AVAssetReaderTrackOutput? = nil
         if let tTrack = timecodeTrack {
-            tcOut = AVAssetReaderTrackOutput(track: tTrack, outputSettings: nil)
-            if reader.canAdd(tcOut!) { reader.add(tcOut!) }
+            let output = AVAssetReaderTrackOutput(track: tTrack, outputSettings: nil)
+            guard reader.canAdd(output) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Source has a QuickTime timecode track, but the reader cannot add it for passthrough."
+                    ]
+                )
+            }
+            reader.add(output)
+            tcOut = output
         }
 
         var metaOutputAdaptors: [AVAssetReaderOutputMetadataAdaptor] = []
@@ -2003,18 +2352,40 @@ func encodeMOV(
 
         var tcIn: AVAssetWriterInput? = nil
         if tcOut != nil, let tTrack = timecodeTrack {
-            let tcFmt = try? await tTrack.load(.formatDescriptions).first
+            guard let tcFmt = try? await tTrack.load(.formatDescriptions).first else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Source has a QuickTime timecode track, but its format description is not readable."
+                    ]
+                )
+            }
             tcIn = AVAssetWriterInput(mediaType: .timecode, outputSettings: nil,
                                       sourceFormatHint: tcFmt)
             tcIn!.expectsMediaDataInRealTime = false
-            if writer.canAdd(tcIn!) {
-                writer.add(tcIn!)
-                sourceTrackInputMap[tTrack.trackID] = tcIn!
+            guard writer.canAdd(tcIn!) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Source has a QuickTime timecode track, but the MOV writer cannot add a timecode track."
+                    ]
+                )
             }
+            writer.add(tcIn!)
+            sourceTrackInputMap[tTrack.trackID] = tcIn!
             let timecodeAssociationType = AVAssetTrack.AssociationType.timecode.rawValue
-            if videoIn.canAddTrackAssociation(withTrackOf: tcIn!, type: timecodeAssociationType) {
-                videoIn.addTrackAssociation(withTrackOf: tcIn!, type: timecodeAssociationType)
+            guard videoIn.canAddTrackAssociation(withTrackOf: tcIn!, type: timecodeAssociationType) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Source has a QuickTime timecode track, but the MOV writer cannot associate it with the video track."
+                    ]
+                )
             }
+            videoIn.addTrackAssociation(withTrackOf: tcIn!, type: timecodeAssociationType)
         }
 
         var metaIns: [AVAssetWriterInput] = []
