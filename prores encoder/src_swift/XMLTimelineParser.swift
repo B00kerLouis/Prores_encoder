@@ -133,14 +133,14 @@ public final class XMLTimelineParser: NSObject {
 
     private func buildResourceTables(root: XMLElement, baseURL: URL) {
         // <asset id="r1" src="file:///..." />
-        for asset in (try? root.elements(forXPath: ".//resources/asset")) ?? [] {
+        for asset in root.elements(forXPath: ".//resources/asset") {
             guard let assetID = asset.attribute(forName: "id")?.stringValue else { continue }
             if let src = asset.attribute(forName: "src")?.stringValue {
                 assetsByID[assetID] = resolveFilePath(src, baseURL: baseURL)
             }
         }
         // <format id="r2" frameDuration="..." width="..." height="..." />
-        for fmt in (try? root.elements(forXPath: ".//resources/format")) ?? [] {
+        for fmt in root.elements(forXPath: ".//resources/format") {
             guard let fmtID = fmt.attribute(forName: "id")?.stringValue else { continue }
             let fd = fmt.attribute(forName: "frameDuration")?.stringValue ?? "1001/24000s"
             formatsByID[fmtID] = FCPXMLFormat(
@@ -150,7 +150,7 @@ public final class XMLTimelineParser: NSObject {
                 colorSpace: fmt.attribute(forName: "colorSpace")?.stringValue)
         }
         // <media id="r3" ...><sequence>...</sequence></media>
-        for media in (try? root.elements(forXPath: ".//resources/media")) ?? [] {
+        for media in root.elements(forXPath: ".//resources/media") {
             guard let mediaID = media.attribute(forName: "id")?.stringValue else { continue }
             mediasByID[mediaID] = media
         }
@@ -312,8 +312,8 @@ public final class XMLTimelineParser: NSObject {
             guard child.name == "asset-clip" || child.name == "clip" else { continue }
             let lane  = Int(child.attribute(forName: "lane")?.stringValue ?? "0") ?? 0
             let start = parseFCPXMLTime(child.attribute(forName: "start")?.stringValue ?? "0s")
-            let dur   = parseFCPXMLTime(child.attribute(forName: "duration")?.stringValue)
-                        ?? duration
+            let dur = child.attribute(forName: "duration")?.stringValue
+                .map { parseFCPXMLTime($0) } ?? duration
             let ref   = child.attribute(forName: "ref")?.stringValue ?? ""
             if let srcPath = assetsByID[ref] {
                 let (vIdx, aIdx) = trackIndices(forLane: lane)
@@ -356,9 +356,9 @@ public final class XMLTimelineParser: NSObject {
         var clips: [ClipDescriptor] = []
 
         // Video tracks
-        let videoTracks = (try? sequence.elements(forXPath: "media/video/track")) ?? []
+        let videoTracks = sequence.elements(forXPath: "media/video/track")
         for (trackIdx, track) in videoTracks.enumerated() {
-            for clipitem in (try? track.elements(forXPath: "clipitem")) ?? [] {
+            for clipitem in track.elements(forXPath: "clipitem") {
                 clips.append(contentsOf: parseFCP7ClipItems(
                     clipitem,
                     trackIndex: trackIdx,
@@ -370,9 +370,9 @@ public final class XMLTimelineParser: NSObject {
             }
         }
         // Audio tracks
-        let audioTracks = (try? sequence.elements(forXPath: "media/audio/track")) ?? []
+        let audioTracks = sequence.elements(forXPath: "media/audio/track")
         for (trackIdx, track) in audioTracks.enumerated() {
-            for clipitem in (try? track.elements(forXPath: "clipitem")) ?? [] {
+            for clipitem in track.elements(forXPath: "clipitem") {
                 clips.append(contentsOf: parseFCP7ClipItems(
                     clipitem,
                     trackIndex: trackIdx + 1,
@@ -426,10 +426,10 @@ public final class XMLTimelineParser: NSObject {
         // Check for nested inline sequence
         if let nestedSeq = clipitem.elements(forXPath: "sequence").first {
             var subClips: [ClipDescriptor] = []
-            let nestedTracks = (try? nestedSeq.elements(
-                forXPath: mediaType == .video ? "media/video/track" : "media/audio/track")) ?? []
+            let nestedTracks = nestedSeq.elements(
+                forXPath: mediaType == .video ? "media/video/track" : "media/audio/track")
             for (ti, track) in nestedTracks.enumerated() {
-                for ci in (try? track.elements(forXPath: "clipitem")) ?? [] {
+                for ci in track.elements(forXPath: "clipitem") {
                     subClips.append(contentsOf: parseFCP7ClipItems(
                         ci,
                         trackIndex: trackIndex + ti,

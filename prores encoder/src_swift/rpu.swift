@@ -3,6 +3,15 @@
 import Foundation
 import AVFoundation
 
+struct HEVCHDR10Metadata: Sendable {
+    let masteringDisplayColorVolume: Data?
+    let contentLightLevelInfo: Data?
+
+    var hasAnyPayload: Bool {
+        masteringDisplayColorVolume?.count == 24 || contentLightLevelInfo?.count == 4
+    }
+}
+
 final class DolbyVisionRPUProvider: @unchecked Sendable {
     private let task: Task<[Data], Error>
     private let expectedFrameCount: Int64
@@ -48,18 +57,112 @@ private func generateDolbyVisionRPUNALUnits(
     profile: DolbyVisionHEVCProfile
 ) throws -> [Data] {
     let toolURL = try resolveDoviToolExecutableURL()
-    let tempURL = FileManager.default.temporaryDirectory
+    let generatedURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("prores_encoder_rpu_\(UUID().uuidString).bin")
-    defer { try? FileManager.default.removeItem(at: tempURL) }
+    defer { try? FileManager.default.removeItem(at: generatedURL) }
 
+    try runDoviTool(
+        toolURL,
+        arguments: [
+            "generate",
+            "--xml", xmlURL.path,
+            "--profile", profile.doviToolProfileArgument,
+            "--rpu-out", generatedURL.path
+        ],
+        operation: "RPU generation")
+
+    switch profile {
+    case .profile81:
+        return try addProfile81Level4IfNeeded(
+            toolURL: toolURL,
+            generatedRPUURL: generatedURL)
+    }
+}
+
+private func addProfile81Level4IfNeeded(
+    toolURL: URL,
+    generatedRPUURL: URL
+) throws -> [Data] {
+    let generatedRPUs = try parseDoviToolRPUFile(generatedRPUURL)
+    guard !generatedRPUs.isEmpty else { return generatedRPUs }
+
+    let tempDirectory = FileManager.default.temporaryDirectory
+    let generatorJSONURL = tempDirectory
+        .appendingPathComponent("prores_encoder_l4_generate_\(UUID().uuidString).json")
+    let l4ReferenceURL = tempDirectory
+        .appendingPathComponent("prores_encoder_l4_reference_\(UUID().uuidString).bin")
+    let editorJSONURL = tempDirectory
+        .appendingPathComponent("prores_encoder_l4_edit_\(UUID().uuidString).json")
+    let editedURL = tempDirectory
+        .appendingPathComponent("prores_encoder_rpu_l4_\(UUID().uuidString).bin")
+    defer {
+        try? FileManager.default.removeItem(at: generatorJSONURL)
+        try? FileManager.default.removeItem(at: l4ReferenceURL)
+        try? FileManager.default.removeItem(at: editorJSONURL)
+        try? FileManager.default.removeItem(at: editedURL)
+    }
+
+    let generatorConfig: [String: Any] = [
+        "cm_version": "V40",
+        "profile": DolbyVisionHEVCProfile.profile81.doviToolProfileArgument,
+        "length": generatedRPUs.count,
+        "level6": [
+            "max_display_mastering_luminance": 1000,
+            "min_display_mastering_luminance": 1,
+            "max_content_light_level": 1000,
+            "max_frame_average_light_level": 400
+        ],
+        "default_metadata_blocks": [
+            [
+                "Level4": [
+                    "anchor_pq": 0,
+                    "anchor_power": 0
+                ]
+            ]
+        ]
+    ]
+    let generatorData = try JSONSerialization.data(
+        withJSONObject: generatorConfig,
+        options: [.prettyPrinted, .sortedKeys])
+    try generatorData.write(to: generatorJSONURL, options: .atomic)
+    try runDoviTool(
+        toolURL,
+        arguments: [
+            "generate",
+            "--json", generatorJSONURL.path,
+            "--rpu-out", l4ReferenceURL.path
+        ],
+        operation: "Profile 8.1 Level4 reference generation")
+
+    let editorConfig: [String: Any] = [
+        "source_rpu": l4ReferenceURL.path,
+        "rpu_levels": [4]
+    ]
+    let editorData = try JSONSerialization.data(
+        withJSONObject: editorConfig,
+        options: [.prettyPrinted, .sortedKeys])
+    try editorData.write(to: editorJSONURL, options: .atomic)
+    try runDoviTool(
+        toolURL,
+        arguments: [
+            "editor",
+            "-i", generatedRPUURL.path,
+            "-j", editorJSONURL.path,
+            "-o", editedURL.path
+        ],
+        operation: "Profile 8.1 Level4 RPU merge")
+
+    return try parseDoviToolRPUFile(editedURL)
+}
+
+private func runDoviTool(
+    _ toolURL: URL,
+    arguments: [String],
+    operation: String
+) throws {
     let process = Process()
     process.executableURL = toolURL
-    process.arguments = [
-        "generate",
-        "--xml", xmlURL.path,
-        "--profile", profile.doviToolProfileArgument,
-        "--rpu-out", tempURL.path
-    ]
+    process.arguments = arguments
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
     process.standardOutput = stdoutPipe
@@ -78,12 +181,10 @@ private func generateDolbyVisionRPUNALUnits(
             domain: "DolbyVisionRPU",
             code: Int(process.terminationStatus),
             userInfo: [NSLocalizedDescriptionKey:
-                "dovi_tool RPU generation failed.\(detail.isEmpty ? "" : "\n\(detail)")"
+                "dovi_tool \(operation) failed.\(detail.isEmpty ? "" : "\n\(detail)")"
             ]
         )
     }
-
-    return try parseDoviToolRPUFile(tempURL)
 }
 
 private func resolveDoviToolExecutableURL() throws -> URL {
@@ -232,7 +333,8 @@ private func copySampleAttachments(from source: CMSampleBuffer, to destination: 
 
 func sampleBufferByInjectingHEVCRPU(
     _ sampleBuffer: CMSampleBuffer,
-    rpuNALUnit: Data
+    rpuNALUnit: Data,
+    hdr10Metadata: HEVCHDR10Metadata? = nil
 ) throws -> CMSampleBuffer {
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
           let data = compressedData(from: sampleBuffer) else {
@@ -245,9 +347,11 @@ func sampleBufferByInjectingHEVCRPU(
 
     let lengthSize = hevcNALUnitLengthSize(from: sampleBuffer)
     var output = Data()
-    output.reserveCapacity(data.count + rpuNALUnit.count + lengthSize)
+    let hdr10SEINALUnit = makeHEVCPrefixSEINALUnit(metadata: hdr10Metadata)
+    output.reserveCapacity(data.count + rpuNALUnit.count + (hdr10SEINALUnit?.count ?? 0) + (lengthSize * 2))
 
     var cursor = 0
+    var insertedHDR10SEI = hdr10SEINALUnit == nil
     while cursor + lengthSize <= data.count {
         let nalLength = readLengthPrefix(data, at: cursor, byteCount: lengthSize)
         cursor += lengthSize
@@ -263,8 +367,21 @@ func sampleBufferByInjectingHEVCRPU(
         if hevcNALType(nalu) == 62 {
             continue
         }
+        if !insertedHDR10SEI,
+           let nalType = hevcNALType(nalu),
+           nalType <= 31,
+           let hdr10SEINALUnit {
+            output.append(lengthPrefixData(hdr10SEINALUnit.count, byteCount: lengthSize))
+            output.append(hdr10SEINALUnit)
+            insertedHDR10SEI = true
+        }
         output.append(lengthPrefixData(nalLength, byteCount: lengthSize))
         output.append(nalu)
+    }
+
+    if !insertedHDR10SEI, let hdr10SEINALUnit {
+        output.append(lengthPrefixData(hdr10SEINALUnit.count, byteCount: lengthSize))
+        output.append(hdr10SEINALUnit)
     }
 
     output.append(lengthPrefixData(rpuNALUnit.count, byteCount: lengthSize))
@@ -336,6 +453,58 @@ func sampleBufferByInjectingHEVCRPU(
     }
     copySampleAttachments(from: sampleBuffer, to: injectedSample)
     return injectedSample
+}
+
+private func makeHEVCPrefixSEINALUnit(metadata: HEVCHDR10Metadata?) -> Data? {
+    guard let metadata, metadata.hasAnyPayload else { return nil }
+    var rbsp = Data()
+    if let masteringDisplay = metadata.masteringDisplayColorVolume,
+       masteringDisplay.count == 24 {
+        appendSEIMessage(payloadType: 137, payload: masteringDisplay, to: &rbsp)
+    }
+    if let contentLight = metadata.contentLightLevelInfo,
+       contentLight.count == 4 {
+        appendSEIMessage(payloadType: 144, payload: contentLight, to: &rbsp)
+    }
+    guard !rbsp.isEmpty else { return nil }
+    rbsp.append(0x80)
+    var nalu = Data([0x4e, 0x01])
+    nalu.append(hevcEBSP(from: rbsp))
+    return nalu
+}
+
+private func appendSEIMessage(payloadType: Int, payload: Data, to rbsp: inout Data) {
+    appendSEIEncodedInteger(payloadType, to: &rbsp)
+    appendSEIEncodedInteger(payload.count, to: &rbsp)
+    rbsp.append(payload)
+}
+
+private func appendSEIEncodedInteger(_ value: Int, to data: inout Data) {
+    var remainder = value
+    while remainder >= 255 {
+        data.append(255)
+        remainder -= 255
+    }
+    data.append(UInt8(remainder))
+}
+
+private func hevcEBSP(from rbsp: Data) -> Data {
+    var output = Data()
+    output.reserveCapacity(rbsp.count)
+    var zeroCount = 0
+    for byte in rbsp {
+        if zeroCount >= 2, byte <= 0x03 {
+            output.append(0x03)
+            zeroCount = 0
+        }
+        output.append(byte)
+        if byte == 0 {
+            zeroCount += 1
+        } else {
+            zeroCount = 0
+        }
+    }
+    return output
 }
 
 private extension OSStatus {

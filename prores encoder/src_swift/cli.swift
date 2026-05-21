@@ -312,7 +312,7 @@ enum ProResEncoderCLI {
             }
             print("[XML] Sequence '\(desc.name)' parsed: \(desc.clips.count) clips")
             let builder = CompositionBuilder()
-            guard let comp = try? builder.build(from: desc) else {
+            guard let comp = try? await builder.buildAsync(from: desc) else {
                 print("[Error] Failed to build AVMutableComposition."); exit(1)
             }
             let outName = desc.name.isEmpty ? xmlURL.deletingPathExtension().lastPathComponent : desc.name
@@ -343,7 +343,7 @@ enum ProResEncoderCLI {
             }
             print("[AAF] Sequence '\(desc.name)' parsed: \(desc.clips.count) clips")
             let builder = CompositionBuilder()
-            guard let comp = try? builder.build(from: desc) else {
+            guard let comp = try? await builder.buildAsync(from: desc) else {
                 print("[Error] Failed to build AVMutableComposition from AAF."); exit(1)
             }
 
@@ -792,9 +792,18 @@ private func exportTimelineComposition(
         print("[Timeline] pass-through is not possible for rendered timelines; falling back to ProRes bounce.")
     }
 
-    let supportedPresets = Set(AVAssetExportSession.exportPresets(compatibleWith: composition))
-    guard let preset = timelineExportPresetCandidates(for: requestedQuality)
-        .first(where: { supportedPresets.contains($0) }),
+    var selectedPreset: String?
+    for candidate in timelineExportPresetCandidates(for: requestedQuality) {
+        if await AVAssetExportSession.compatibility(
+            ofExportPreset: candidate,
+            with: composition,
+            outputFileType: nil
+        ) {
+            selectedPreset = candidate
+            break
+        }
+    }
+    guard let preset = selectedPreset,
           let session = AVAssetExportSession(asset: composition, presetName: preset) else {
         print("[Timeline] No compatible export preset found for rendered timeline.")
         return false

@@ -56,6 +56,23 @@ struct SourceColorSpace: Sendable {
     let mxfPrimaries: Data?
     let mxfTransfer:  Data?
     let mxfMatrix:    Data?
+
+    static func hevcHDR10(
+        basedOn source: SourceColorSpace?,
+        masteringDisplayColorVolume fallbackMasteringDisplay: Data? = nil,
+        contentLightLevelInfo fallbackContentLight: Data? = nil
+    ) -> SourceColorSpace {
+        SourceColorSpace(
+            primaries: kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String,
+            transfer: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String,
+            matrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String,
+            masteringDisplayColorVolume: source?.masteringDisplayColorVolume ?? fallbackMasteringDisplay,
+            contentLightLevelInfo: source?.contentLightLevelInfo ?? fallbackContentLight,
+            mxfPrimaries: MXFColorUL.primariesBT2020,
+            mxfTransfer: MXFColorUL.transferST2084,
+            mxfMatrix: MXFColorUL.matrixBT2020
+        )
+    }
 }
 
 enum DolbyVisionHEVCProfile: String, Sendable {
@@ -658,6 +675,9 @@ final class ProResSession: @unchecked Sendable {
     private var session: VTCompressionSession!
     private let rc = VTCallbackRefcon()
     private(set) var outputChannel: AsyncChannel<SendableSampleBuffer>?
+    private let isHEVCSession: Bool
+    private let hevcMasteringDisplayColorVolume: Data?
+    private let hevcContentLightLevelInfo: Data?
 
     init(width: Int, height: Int, codecType: CMVideoCodecType,
          fpsHint: Int, colorSpace: SourceColorSpace?,
@@ -665,6 +685,9 @@ final class ProResSession: @unchecked Sendable {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
+        isHEVCSession = isHEVC
+        hevcMasteringDisplayColorVolume = colorSpace?.masteringDisplayColorVolume
+        hevcContentLightLevelInfo = colorSpace?.contentLightLevelInfo
         let encoderSpecification = isHEVC
             ? hevcHardwareEncoderSpecification()
             : proResHardwareEncoderSpecification()
@@ -722,18 +745,12 @@ final class ProResSession: @unchecked Sendable {
                               userInfo: [NSLocalizedDescriptionKey:
                                 "HEVC encode requires bitrate options."])
             }
-            if colorSpace?.primaries == nil {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
-                                     value: kCMFormatDescriptionColorPrimaries_ITU_R_2020)
-            }
-            if colorSpace?.transfer == nil {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
-                                     value: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ)
-            }
-            if colorSpace?.matrix == nil {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
-                                     value: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020)
-            }
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
+                                 value: kCMFormatDescriptionColorPrimaries_ITU_R_2020)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
+                                 value: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ)
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                                 value: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020)
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_HDRMetadataInsertionMode,
                                  value: kVTHDRMetadataInsertionMode_Auto)
             if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
@@ -785,6 +802,7 @@ final class ProResSession: @unchecked Sendable {
 
     /// Encode one pixel buffer synchronously. Returns compressed CMSampleBuffer.
     func encode(pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
+        attachHEVCMetadataIfNeeded(to: pixelBuffer)
         rc.syncLock.lock(); rc.sample = nil; rc.syncLock.unlock()
         let st = VTCompressionSessionEncodeFrame(
             session, imageBuffer: pixelBuffer,
@@ -802,6 +820,7 @@ final class ProResSession: @unchecked Sendable {
     /// Submit a frame to VT without waiting. VT delivers the result to `outputChannel`.
     @discardableResult
     func submit(pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) -> Bool {
+        attachHEVCMetadataIfNeeded(to: pixelBuffer)
         if outputChannel != nil {
             rc.willSubmitAsyncFrame()
         }
@@ -828,6 +847,39 @@ final class ProResSession: @unchecked Sendable {
 
     func invalidate() {
         if session != nil { VTCompressionSessionInvalidate(session); session = nil }
+    }
+
+    private func attachHEVCMetadataIfNeeded(to pixelBuffer: CVPixelBuffer) {
+        guard isHEVCSession else { return }
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_ITU_R_2020,
+            .shouldPropagate)
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+            .shouldPropagate)
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            .shouldPropagate)
+        if let hevcMasteringDisplayColorVolume {
+            CVBufferSetAttachment(
+                pixelBuffer,
+                kCVImageBufferMasteringDisplayColorVolumeKey,
+                hevcMasteringDisplayColorVolume as CFData,
+                .shouldPropagate)
+        }
+        if let hevcContentLightLevelInfo {
+            CVBufferSetAttachment(
+                pixelBuffer,
+                kCVImageBufferContentLightLevelInfoKey,
+                hevcContentLightLevelInfo as CFData,
+                .shouldPropagate)
+        }
     }
     deinit { invalidate() }
 }
@@ -913,7 +965,7 @@ final class MXFAudioContext: @unchecked Sendable {
             let floatCount = len / MemoryLayout<Float>.size
             let prev = ring.count
             ring.append(contentsOf: repeatElement(Float(0), count: floatCount))
-            ring.withUnsafeMutableBufferPointer { ptr in
+            _ = ring.withUnsafeMutableBufferPointer { ptr in
                 CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len,
                     destination: UnsafeMutableRawPointer(ptr.baseAddress! + prev))
             }
@@ -996,7 +1048,7 @@ extension CMSampleBuffer {
         guard let bb = CMSampleBufferGetDataBuffer(self) else { return nil }
         let len = CMBlockBufferGetDataLength(bb)
         var data = Data(count: len)
-        data.withUnsafeMutableBytes { ptr in
+        _ = data.withUnsafeMutableBytes { ptr in
             CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len,
                                        destination: ptr.baseAddress!)
         }

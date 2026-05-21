@@ -471,7 +471,6 @@ private class CFBWriter {
     /// Insert a new sibling into the directory tree (simplified sorted insertion)
     private func insertSibling(parent parentID: Int, newID: Int) {
         let parent = entries[parentID]
-        let rootChildID = Int(parent.childID)
         // Simple approach: build sorted list, then create balanced tree
         var ids = collectSiblings(Int(parent.childID))
         ids.append(newID)
@@ -584,7 +583,6 @@ private class CFBWriter {
         // 4. Write directory entries to sectors
         let dirData = serializeDirectoryEntries()
         let dirStart = writeChain(dirData)
-        let dirSectorCount = UInt32((dirData.count + CFB.sectorSize - 1) / CFB.sectorSize)
 
         // 5. Write FAT sectors
         // FAT needs to include itself (FAT sectors marked as FATSECT)
@@ -1025,15 +1023,15 @@ func generateAAFSequence(clips: [AAFClipInfo], outputPath: String) -> Bool {
 
     // DataDefinitions set
     let dataDefsID = cfb.createStorage(name: "DataDefinitions", parentID: dictID)
-    let ddPicture = createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 0,
-                                            classAUID: AAFClass.dataDefinition,
-                                            ident: DataDef.picture, name: "Picture")
-    let ddSound = createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 1,
-                                          classAUID: AAFClass.dataDefinition,
-                                          ident: DataDef.sound, name: "Sound")
-    let ddTimecode = createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 2,
-                                             classAUID: AAFClass.dataDefinition,
-                                             ident: DataDef.timecode, name: "Timecode")
+    createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 0,
+                           classAUID: AAFClass.dataDefinition,
+                           ident: DataDef.picture, name: "Picture")
+    createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 1,
+                           classAUID: AAFClass.dataDefinition,
+                           ident: DataDef.sound, name: "Sound")
+    createDefinitionObject(cfb: cfb, parentID: dataDefsID, localKey: 2,
+                           classAUID: AAFClass.dataDefinition,
+                           ident: DataDef.timecode, name: "Timecode")
     cfb.createStream(name: "DataDefinitions index", parentID: dataDefsID,
                      data: encodeStrongRefSetIndex_AUID(
                         entries: [(0, DataDef.picture), (1, DataDef.sound), (2, DataDef.timecode)],

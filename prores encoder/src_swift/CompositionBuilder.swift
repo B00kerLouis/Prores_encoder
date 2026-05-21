@@ -54,8 +54,10 @@ public final class CompositionBuilder {
                 let assetForClip = AVURLAsset(url: clip.sourceURL)
 
                 // Resolve the correct source track on the asset
-                guard let sourceTrack = try? assetForClip
-                        .tracks(withMediaType: mediaType).first else {
+                guard let sourceTrack = loadTracksSynchronously(
+                    from: assetForClip,
+                    mediaType: mediaType
+                ).first else {
                     print("[CompositionBuilder] Warning: no \(mediaType.rawValue) track in \(clip.sourceURL.lastPathComponent), skipping clip.")
                     continue
                 }
@@ -68,7 +70,8 @@ public final class CompositionBuilder {
                         composition: composition,
                         lanes: &lanes)
                     if mediaType == .video, !lanes[laneIndex].inheritedVideoTransform {
-                        lanes[laneIndex].track.preferredTransform = sourceTrack.preferredTransform
+                        lanes[laneIndex].track.preferredTransform = loadPreferredTransformSynchronously(
+                            from: sourceTrack)
                         lanes[laneIndex].inheritedVideoTransform = true
                     }
                     try lanes[laneIndex].track.insertTimeRange(
@@ -126,7 +129,8 @@ public final class CompositionBuilder {
                         composition: composition,
                         lanes: &lanes)
                     if mediaType == .video, !lanes[laneIndex].inheritedVideoTransform {
-                        lanes[laneIndex].track.preferredTransform = sourceTrack.preferredTransform
+                        lanes[laneIndex].track.preferredTransform =
+                            (try? await sourceTrack.load(.preferredTransform)) ?? .identity
                         lanes[laneIndex].inheritedVideoTransform = true
                     }
                     try lanes[laneIndex].track.insertTimeRange(
@@ -195,4 +199,35 @@ public final class CompositionBuilder {
         }
         return lhs.sourceURL.path < rhs.sourceURL.path
     }
+}
+
+private func loadTracksSynchronously(
+    from asset: AVAsset,
+    mediaType: AVMediaType
+) -> [AVAssetTrack] {
+    let semaphore = DispatchSemaphore(value: 0)
+    let assetRef = SendableRef(asset)
+    let box = SynchronousResultBox<[AVAssetTrack]>()
+    Task {
+        box.value = (try? await assetRef.value.loadTracks(withMediaType: mediaType)) ?? []
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value ?? []
+}
+
+private func loadPreferredTransformSynchronously(from track: AVAssetTrack) -> CGAffineTransform {
+    let semaphore = DispatchSemaphore(value: 0)
+    let trackRef = SendableRef(track)
+    let box = SynchronousResultBox<CGAffineTransform>()
+    Task {
+        box.value = (try? await trackRef.value.load(.preferredTransform)) ?? .identity
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value ?? .identity
+}
+
+private final class SynchronousResultBox<T>: @unchecked Sendable {
+    var value: T?
 }

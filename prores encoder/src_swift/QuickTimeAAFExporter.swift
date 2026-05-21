@@ -514,12 +514,11 @@ private final class QuickTimeLinkedTimelineAAFWriter {
 
     private func audioChannelEstimate(for url: URL) -> Int {
         let asset = AVURLAsset(url: url)
-        guard let audioTrack = try? asset.tracks(withMediaType: .audio).first,
-              let description = audioTrack.formatDescriptions.first else {
+        guard let audioTrack = quickTimeAAFLoadAudioTracksSynchronously(from: asset).first,
+              let description = quickTimeAAFLoadFormatDescriptionsSynchronously(from: audioTrack).first else {
             return 2
         }
-        let formatDescription = description as! CMAudioFormatDescription
-        guard let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+        guard let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(description) else {
             return 2
         }
         return Int(streamDescription.pointee.mChannelsPerFrame)
@@ -580,6 +579,36 @@ private final class QuickTimeLinkedTimelineAAFWriter {
     private func gcd(_ a: Int, _ b: Int) -> Int {
         b == 0 ? a : gcd(b, a % b)
     }
+}
+
+private func quickTimeAAFLoadAudioTracksSynchronously(from asset: AVAsset) -> [AVAssetTrack] {
+    let semaphore = DispatchSemaphore(value: 0)
+    let assetRef = SendableRef(asset)
+    let box = QuickTimeAAFSynchronousResultBox<[AVAssetTrack]>()
+    Task {
+        box.value = (try? await assetRef.value.loadTracks(withMediaType: .audio)) ?? []
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value ?? []
+}
+
+private func quickTimeAAFLoadFormatDescriptionsSynchronously(
+    from track: AVAssetTrack
+) -> [CMFormatDescription] {
+    let semaphore = DispatchSemaphore(value: 0)
+    let trackRef = SendableRef(track)
+    let box = QuickTimeAAFSynchronousResultBox<[CMFormatDescription]>()
+    Task {
+        box.value = (try? await trackRef.value.load(.formatDescriptions)) ?? []
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value ?? []
+}
+
+private final class QuickTimeAAFSynchronousResultBox<T>: @unchecked Sendable {
+    var value: T?
 }
 
 private enum QuickTimeAAFExportError: LocalizedError {

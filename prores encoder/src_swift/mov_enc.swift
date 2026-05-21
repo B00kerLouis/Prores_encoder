@@ -299,9 +299,54 @@ private enum DolbyVisionColorPrimaries {
     case p3
 }
 
+private enum DolbyVisionSignalEncoding {
+    case ycbcrBT2020Video
+    case rgbComputer
+
+    var colorSpaceXML: String {
+        switch self {
+        case .ycbcrBT2020Video: return "ycbcr_bt2020"
+        case .rgbComputer: return "rgb"
+        }
+    }
+
+    var signalRangeXML: String {
+        switch self {
+        case .ycbcrBT2020Video: return "video"
+        case .rgbComputer: return "computer"
+        }
+    }
+
+    var legacyChromaFormatXML: String {
+        switch self {
+        case .ycbcrBT2020Video: return "422"
+        case .rgbComputer: return "444"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .ycbcrBT2020Video: return "YCbCr/video"
+        case .rgbComputer: return "RGB/full"
+        }
+    }
+}
+
 private struct DolbyVisionVideoColorProfile {
     let primaries: DolbyVisionColorPrimaries
     let label: String
+    let signalEncoding: DolbyVisionSignalEncoding
+
+    func withSignalEncoding(_ signalEncoding: DolbyVisionSignalEncoding) -> DolbyVisionVideoColorProfile {
+        DolbyVisionVideoColorProfile(
+            primaries: primaries,
+            label: label,
+            signalEncoding: signalEncoding)
+    }
+
+    var displayLabel: String {
+        "\(label), \(signalEncoding.label)"
+    }
 
     var integratedColorEncodingXML: String {
         switch primaries {
@@ -317,8 +362,8 @@ private struct DolbyVisionVideoColorProfile {
         <PeakBrightness>10000</PeakBrightness>
         <MinimumBrightness>0</MinimumBrightness>
         <Encoding>pq</Encoding>
-        <ColorSpace>ycbcr_bt2020</ColorSpace>
-        <SignalRange>video</SignalRange>
+        <ColorSpace>\(signalEncoding.colorSpaceXML)</ColorSpace>
+        <SignalRange>\(signalEncoding.signalRangeXML)</SignalRange>
       </ColorEncoding>
 """
         case .p3:
@@ -333,8 +378,8 @@ private struct DolbyVisionVideoColorProfile {
         <PeakBrightness>10000</PeakBrightness>
         <MinimumBrightness>0</MinimumBrightness>
         <Encoding>pq</Encoding>
-        <ColorSpace>rgb</ColorSpace>
-        <SignalRange>computer</SignalRange>
+        <ColorSpace>\(signalEncoding.colorSpaceXML)</ColorSpace>
+        <SignalRange>\(signalEncoding.signalRangeXML)</SignalRange>
       </ColorEncoding>
 """
         }
@@ -354,10 +399,10 @@ private struct DolbyVisionVideoColorProfile {
     <MinimumBrightness>0</MinimumBrightness>
     <PeakBrightness>10000</PeakBrightness>
     <Encoding>pq</Encoding>
-    <ColorSpace>ycbcr_bt2020</ColorSpace>
-    <SignalRange>video</SignalRange>
+    <ColorSpace>\(signalEncoding.colorSpaceXML)</ColorSpace>
+    <SignalRange>\(signalEncoding.signalRangeXML)</SignalRange>
     <BitDepth>10</BitDepth>
-    <ChromaFormat>422</ChromaFormat>
+    <ChromaFormat>\(signalEncoding.legacyChromaFormatXML)</ChromaFormat>
   </ColorEncoding>
 """
         case .p3:
@@ -372,10 +417,10 @@ private struct DolbyVisionVideoColorProfile {
     <MinimumBrightness>0</MinimumBrightness>
     <PeakBrightness>10000</PeakBrightness>
     <Encoding>pq</Encoding>
-    <ColorSpace>rgb</ColorSpace>
-    <SignalRange>computer</SignalRange>
+    <ColorSpace>\(signalEncoding.colorSpaceXML)</ColorSpace>
+    <SignalRange>\(signalEncoding.signalRangeXML)</SignalRange>
     <BitDepth>10</BitDepth>
-    <ChromaFormat>422</ChromaFormat>
+    <ChromaFormat>\(signalEncoding.legacyChromaFormatXML)</ChromaFormat>
   </ColorEncoding>
 """
         }
@@ -405,10 +450,15 @@ private struct DolbyVisionShot {
     let recordIn: Int
     let duration: Int
     let sourceIn: Int?
-    let xml: String
+    let baseXML: String
+    let frameOverrideXMLByOffset: [Int: String]
 
     func contains(frameNumber: Int) -> Bool {
         frameNumber >= recordIn && frameNumber < recordIn + duration
+    }
+
+    func xml(for frameNumber: Int) -> String {
+        frameOverrideXMLByOffset[frameNumber - recordIn] ?? baseXML
     }
 }
 
@@ -421,6 +471,8 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
     let frameCount: Int
     let editRate: DolbyVisionEditRate
     let explicitStartTimecode: String?
+    let masteringDisplayColorVolume: Data?
+    let contentLightLevelInfo: Data?
 
     private let style: DolbyVisionMDFStyle
     private let schemaURL: String
@@ -492,6 +544,8 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         explicitStartTimecode = firstExplicitTimecodeString(in: root)
         trackName = track.attribute(forName: "name")?.stringValue?.trimmedNonEmpty
             ?? textForXPath("./*[local-name()='TrackName']", in: track)
+        masteringDisplayColorVolume = Self.parseMasteringDisplayColorVolume(from: track)
+        contentLightLevelInfo = Self.parseContentLightLevelInfo(from: track)
 
         switch style {
         case .legacy205:
@@ -630,7 +684,8 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
     }
 
     private func sampleXML(frameNumber: Int) -> String {
-        let shotXML = shots.first(where: { $0.contains(frameNumber: frameNumber) })?.xml ?? shots[0].xml
+        let shot = shots.first(where: { $0.contains(frameNumber: frameNumber) }) ?? shots[0]
+        let shotXML = shot.xml(for: frameNumber)
         switch style {
         case .legacy205:
             return """
@@ -733,6 +788,58 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
             return DolbyVisionEditRate(numerator: Int(fps.rounded()), denominator: 1)
         }
         return nil
+    }
+
+    private static func parseContentLightLevelInfo(from track: XMLElement) -> Data? {
+        guard let maxCLLText = textForXPath("./*[local-name()='Level6']/*[local-name()='MaxCLL']", in: track)
+                ?? textForXPath(".//*[local-name()='Level6']/*[local-name()='MaxCLL']", in: track),
+              let maxFALLText = textForXPath("./*[local-name()='Level6']/*[local-name()='MaxFALL']", in: track)
+                ?? textForXPath(".//*[local-name()='Level6']/*[local-name()='MaxFALL']", in: track),
+              let maxCLL = Double(maxCLLText.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let maxFALL = Double(maxFALLText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        var data = Data()
+        data.append(uint16BEData(Self.scaledUInt16(maxCLL, multiplier: 1)))
+        data.append(uint16BEData(Self.scaledUInt16(maxFALL, multiplier: 1)))
+        return data
+    }
+
+    private static func parseMasteringDisplayColorVolume(from track: XMLElement) -> Data? {
+        guard let display = firstElementForXPath(
+            "./*[local-name()='PluginNode']//*[local-name()='DVGlobalData']/*[local-name()='MasteringDisplay']",
+            in: track
+        ) ?? firstElementForXPath(".//*[local-name()='MasteringDisplay']", in: track) else {
+            return nil
+        }
+        let red = parseNumberList(textForXPath("./*[local-name()='Primaries']/*[local-name()='Red']", in: display))
+        let green = parseNumberList(textForXPath("./*[local-name()='Primaries']/*[local-name()='Green']", in: display))
+        let blue = parseNumberList(textForXPath("./*[local-name()='Primaries']/*[local-name()='Blue']", in: display))
+        let white = parseNumberList(textForXPath("./*[local-name()='WhitePoint']", in: display))
+        guard red.count >= 2, green.count >= 2, blue.count >= 2, white.count >= 2,
+              let peak = textForXPath("./*[local-name()='PeakBrightness']", in: display).flatMap(Double.init),
+              let minimum = textForXPath("./*[local-name()='MinimumBrightness']", in: display).flatMap(Double.init) else {
+            return nil
+        }
+
+        var data = Data()
+        for primary in [green, blue, red] {
+            data.append(uint16BEData(Self.scaledUInt16(primary[0], multiplier: 50_000)))
+            data.append(uint16BEData(Self.scaledUInt16(primary[1], multiplier: 50_000)))
+        }
+        data.append(uint16BEData(Self.scaledUInt16(white[0], multiplier: 50_000)))
+        data.append(uint16BEData(Self.scaledUInt16(white[1], multiplier: 50_000)))
+        data.append(uint32BEData(Self.scaledUInt32(peak, multiplier: 10_000)))
+        data.append(uint32BEData(Self.scaledUInt32(minimum, multiplier: 10_000)))
+        return data
+    }
+
+    private static func scaledUInt16(_ value: Double, multiplier: Double) -> UInt16 {
+        UInt16(max(0, min(Double(UInt16.max), (value * multiplier).rounded())))
+    }
+
+    private static func scaledUInt32(_ value: Double, multiplier: Double) -> UInt32 {
+        UInt32(max(0, min(Double(UInt32.max), (value * multiplier).rounded())))
     }
 
     private static func validateShotCoverage(shots: [DolbyVisionShot], expectedFrameCount: Int64) throws {
@@ -871,21 +978,163 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
             }
             let recordIn = Int(textForXPath("./*[local-name()='Record']/*[local-name()='In']", in: shot) ?? "0") ?? 0
             let sourceIn = textForXPath("./*[local-name()='Source']/*[local-name()='In']", in: shot).flatMap(Int.init)
-            let xml: String
+            let baseXML: String
+            let frameElements = (try? shot.nodes(forXPath: "./*[local-name()='Frame']"))?
+                .compactMap { $0 as? XMLElement } ?? []
+            var frameOverrideXMLByOffset: [Int: String] = [:]
             switch style {
             case .legacy205:
-                let content = childXML(of: shot, skippingElementNames: ["Source"], replacingColorEncodingWith: nil)
-                xml = indentMultiline(content, spaces: 2)
+                let content = childXML(of: shot, skippingElementNames: ["Source", "Frame"], replacingColorEncodingWith: nil)
+                baseXML = indentMultiline(content, spaces: 2)
+                for frame in frameElements {
+                    guard let offset = Self.frameEditOffset(frame) else { continue }
+                    let overrideContent = Self.childXMLApplyingFrameOverride(
+                        of: shot,
+                        skippingElementNames: ["Source", "Frame"],
+                        replacingColorEncodingWith: nil,
+                        applyingFrameOverride: frame)
+                    frameOverrideXMLByOffset[offset] = indentMultiline(overrideContent, spaces: 2)
+                }
             case .integrated:
-                let content = childXML(of: shot, skippingElementNames: [], replacingColorEncodingWith: nil)
-                xml = """
+                let content = childXML(of: shot, skippingElementNames: ["Frame"], replacingColorEncodingWith: nil)
+                baseXML = """
     <dvmd-int:Shot xmlns="\(schemaURL)">
 \(indentMultiline(content, spaces: 6))
     </dvmd-int:Shot>
 """
+                for frame in frameElements {
+                    guard let offset = Self.frameEditOffset(frame) else { continue }
+                    let overrideContent = Self.childXMLApplyingFrameOverride(
+                        of: shot,
+                        skippingElementNames: ["Frame"],
+                        replacingColorEncodingWith: nil,
+                        applyingFrameOverride: frame)
+                    frameOverrideXMLByOffset[offset] = """
+    <dvmd-int:Shot xmlns="\(schemaURL)">
+\(indentMultiline(overrideContent, spaces: 6))
+    </dvmd-int:Shot>
+"""
+                }
             }
-            return DolbyVisionShot(recordIn: recordIn, duration: duration, sourceIn: sourceIn, xml: xml)
+            return DolbyVisionShot(
+                recordIn: recordIn,
+                duration: duration,
+                sourceIn: sourceIn,
+                baseXML: baseXML,
+                frameOverrideXMLByOffset: frameOverrideXMLByOffset)
         }
+    }
+
+    private static func frameEditOffset(_ frame: XMLElement) -> Int? {
+        textForXPath("./*[local-name()='EditOffset']", in: frame).flatMap(Int.init)
+    }
+
+    private static func childXMLApplyingFrameOverride(
+        of element: XMLElement,
+        skippingElementNames: Set<String>,
+        replacingColorEncodingWith colorEncodingXML: String?,
+        applyingFrameOverride frame: XMLElement
+    ) -> String {
+        var parts: [String] = []
+        for child in element.children ?? [] {
+            if child.kind == .element, let childElement = child as? XMLElement {
+                let localName = xmlLocalName(childElement)
+                if skippingElementNames.contains(localName) { continue }
+                if localName == "ColorEncoding", let colorEncodingXML {
+                    parts.append(colorEncodingXML)
+                    continue
+                }
+                if localName == "PluginNode",
+                   let merged = mergedPluginNodeXML(shotPluginNode: childElement, frame: frame) {
+                    parts.append(merged)
+                    continue
+                }
+            }
+            parts.append(child.xmlString(options: [.nodePrettyPrint]))
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private static func mergedPluginNodeXML(
+        shotPluginNode: XMLElement,
+        frame: XMLElement
+    ) -> String? {
+        guard let framePluginNode = firstElementForXPath("./*[local-name()='PluginNode']", in: frame) else {
+            return nil
+        }
+        guard let shotDynamicData = firstElementForXPath("./*[local-name()='DVDynamicData']", in: shotPluginNode),
+              let frameDynamicData = firstElementForXPath("./*[local-name()='DVDynamicData']", in: framePluginNode) else {
+            return framePluginNode.xmlString(options: [.nodePrettyPrint])
+        }
+        let mergedDynamicData = mergedDVDynamicDataXML(
+            defaultDynamicData: shotDynamicData,
+            frameDynamicData: frameDynamicData)
+
+        var children: [String] = []
+        var replacedDynamicData = false
+        for child in shotPluginNode.children ?? [] {
+            if child.kind == .element,
+               let childElement = child as? XMLElement,
+               xmlLocalName(childElement) == "DVDynamicData" {
+                children.append(mergedDynamicData)
+                replacedDynamicData = true
+            } else {
+                children.append(child.xmlString(options: [.nodePrettyPrint]))
+            }
+        }
+        if !replacedDynamicData {
+            children.append(mergedDynamicData)
+        }
+        return """
+<PluginNode>
+\(indentMultiline(children.joined(separator: "\n"), spaces: 2))
+</PluginNode>
+"""
+    }
+
+    private static func mergedDVDynamicDataXML(
+        defaultDynamicData: XMLElement,
+        frameDynamicData: XMLElement
+    ) -> String {
+        let frameElementChildren = (frameDynamicData.children ?? [])
+            .compactMap { $0 as? XMLElement }
+        var frameElementsByKey: [String: XMLElement] = [:]
+        for child in frameElementChildren {
+            frameElementsByKey[dynamicMetadataKey(child)] = child
+        }
+
+        var usedFrameKeys = Set<String>()
+        var children: [String] = []
+        for child in defaultDynamicData.children ?? [] {
+            if child.kind == .element, let childElement = child as? XMLElement {
+                let key = dynamicMetadataKey(childElement)
+                if let overrideElement = frameElementsByKey[key] {
+                    children.append(overrideElement.xmlString(options: [.nodePrettyPrint]))
+                    usedFrameKeys.insert(key)
+                    continue
+                }
+            }
+            children.append(child.xmlString(options: [.nodePrettyPrint]))
+        }
+        for child in frameElementChildren {
+            let key = dynamicMetadataKey(child)
+            if !usedFrameKeys.contains(key) {
+                children.append(child.xmlString(options: [.nodePrettyPrint]))
+            }
+        }
+
+        return """
+<DVDynamicData>
+\(indentMultiline(children.joined(separator: "\n"), spaces: 2))
+</DVDynamicData>
+"""
+    }
+
+    private static func dynamicMetadataKey(_ element: XMLElement) -> String {
+        let localName = xmlLocalName(element)
+        let level = element.attribute(forName: "level")?.stringValue ?? ""
+        let targetID = textForXPath("./*[local-name()='TID']", in: element) ?? ""
+        return "\(localName)|\(level)|\(targetID)"
     }
 }
 
@@ -1324,11 +1573,17 @@ private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) asyn
     }
 
     if primaries == (kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String) {
-        return DolbyVisionVideoColorProfile(primaries: .rec2020, label: "Rec.2020 PQ")
+        return DolbyVisionVideoColorProfile(
+            primaries: .rec2020,
+            label: "Rec.2020 PQ",
+            signalEncoding: .ycbcrBT2020Video)
     }
     if primaries == (kCMFormatDescriptionColorPrimaries_P3_D65 as String)
         || primaries == (kCMFormatDescriptionColorPrimaries_DCI_P3 as String) {
-        return DolbyVisionVideoColorProfile(primaries: .p3, label: "P3 PQ")
+        return DolbyVisionVideoColorProfile(
+            primaries: .p3,
+            label: "P3 PQ",
+            signalEncoding: .rgbComputer)
     }
 
     throw NSError(
@@ -1634,11 +1889,31 @@ private struct MOVSizeFieldPatch {
     let newValue: UInt64
 }
 
+private struct MOVByteRange {
+    let offset: UInt64
+    let length: UInt64
+}
+
 private func sizeFieldPatch(for atom: MOVAtomDescriptor, growingBy delta: UInt64) -> MOVSizeFieldPatch {
     if atom.headerSize == 16 {
         return MOVSizeFieldPatch(offset: atom.offset + 8, byteCount: 8, newValue: atom.size + delta)
     }
     return MOVSizeFieldPatch(offset: atom.offset, byteCount: 4, newValue: atom.size + delta)
+}
+
+private func sizeFieldPatch(for atom: MOVAtomDescriptor, shrinkingBy delta: UInt64) -> MOVSizeFieldPatch {
+    let newSize = atom.size > delta ? atom.size - delta : atom.headerSize
+    if atom.headerSize == 16 {
+        return MOVSizeFieldPatch(offset: atom.offset + 8, byteCount: 8, newValue: newSize)
+    }
+    return MOVSizeFieldPatch(offset: atom.offset, byteCount: 4, newValue: newSize)
+}
+
+private func uint16BEData(_ value: UInt16) -> Data {
+    Data([
+        UInt8((value >> 8) & 0xff),
+        UInt8(value & 0xff)
+    ])
 }
 
 private func uint32BEData(_ value: UInt32) -> Data {
@@ -1720,6 +1995,34 @@ private func makeDolbyVisionHEVCConfigurationBox(
     box.append(contentsOf: [0x01, 0x00, byte2, byte3, byte4])
     box.append(Data(repeating: 0, count: 19))
     return box
+}
+
+private func makeMOVBox(type: String, payload: Data) -> Data {
+    var box = Data()
+    box.append(uint32BEData(UInt32(payload.count + 8)))
+    box.append(Data(type.utf8))
+    box.append(payload)
+    return box
+}
+
+private func makeStaticHDRSampleEntryBoxes(
+    masteringDisplayColorVolume: Data?,
+    contentLightLevelInfo: Data?,
+    includeMDCV: Bool,
+    includeCLLI: Bool
+) -> Data {
+    var boxes = Data()
+    if includeMDCV,
+       let masteringDisplayColorVolume,
+       masteringDisplayColorVolume.count == 24 {
+        boxes.append(makeMOVBox(type: "mdcv", payload: masteringDisplayColorVolume))
+    }
+    if includeCLLI,
+       let contentLightLevelInfo,
+       contentLightLevelInfo.count == 4 {
+        boxes.append(makeMOVBox(type: "clli", payload: contentLightLevelInfo))
+    }
+    return boxes
 }
 
 private func findHEVCSampleEntryPatchTargets(
@@ -1824,6 +2127,220 @@ private func findHEVCSampleEntryPatchTargets(
     return nil
 }
 
+private func findHEVCStaticHDRSampleEntryRemovalTargets(
+    in movieURL: URL
+) throws -> (ranges: [MOVByteRange], sizePatches: [MOVSizeFieldPatch])? {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+
+    let fileSize = try handle.seekToEnd()
+    try handle.seek(toOffset: 0)
+
+    var topLevelAtoms: [MOVAtomDescriptor] = []
+    var topLevelCursor: UInt64 = 0
+    while topLevelCursor < fileSize {
+        guard let atom = try readAtomDescriptor(from: handle, at: topLevelCursor, limit: fileSize) else {
+            break
+        }
+        topLevelAtoms.append(atom)
+        topLevelCursor += atom.size
+    }
+
+    guard let moov = topLevelAtoms.first(where: { $0.type == "moov" }) else {
+        return nil
+    }
+    if topLevelAtoms.contains(where: { $0.type == "mdat" && $0.offset > moov.offset }) {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Cannot remove HEVC static HDR sample entry boxes from a front-moov file without rewriting chunk offsets."
+            ]
+        )
+    }
+
+    var moovCursor = moov.offset + moov.headerSize
+    let moovLimit = moov.offset + moov.size
+    while moovCursor < moovLimit {
+        guard let trak = try readAtomDescriptor(from: handle, at: moovCursor, limit: moovLimit) else {
+            break
+        }
+        defer { moovCursor += trak.size }
+        guard trak.type == "trak",
+              let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stsd = try findChildAtom(named: "stsd", in: stbl, handle: handle)
+        else {
+            continue
+        }
+
+        let handlerTypeData = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize + 8,
+            count: 4
+        )
+        let handlerType = String(data: handlerTypeData, encoding: .isoLatin1) ?? ""
+        guard handlerType == "vide" else { continue }
+
+        let entryCountData = try readExactData(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 4,
+            count: 4
+        )
+        guard readUInt32BE(from: entryCountData) >= 1 else { continue }
+
+        guard let entry = try readAtomDescriptor(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 8,
+            limit: stsd.offset + stsd.size
+        ), ["hvc1", "hev1", "dvh1", "dvhe"].contains(entry.type) else {
+            continue
+        }
+
+        let childStart = entry.offset + 86
+        let entryLimit = entry.offset + entry.size
+        guard childStart < entryLimit else { continue }
+
+        var ranges: [MOVByteRange] = []
+        var childCursor = childStart
+        while childCursor < entryLimit {
+            guard let child = try readAtomDescriptor(from: handle, at: childCursor, limit: entryLimit) else {
+                break
+            }
+            if child.type == "mdcv" || child.type == "clli" {
+                ranges.append(MOVByteRange(offset: child.offset, length: child.size))
+            }
+            childCursor += child.size
+        }
+
+        guard !ranges.isEmpty else { continue }
+        let delta = ranges.reduce(UInt64(0)) { $0 + $1.length }
+        let patches = [moov, trak, mdia, minf, stbl, stsd, entry].map {
+            sizeFieldPatch(for: $0, shrinkingBy: delta)
+        }
+        return (ranges, patches)
+    }
+
+    return nil
+}
+
+private func findProResStaticHDRSampleEntryPatchTargets(
+    in movieURL: URL,
+    masteringDisplayColorVolume: Data?,
+    contentLightLevelInfo: Data?
+) throws -> (insertOffset: UInt64, insertionData: Data, sizePatches: [MOVSizeFieldPatch])? {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+
+    let fileSize = try handle.seekToEnd()
+    try handle.seek(toOffset: 0)
+
+    var topLevelAtoms: [MOVAtomDescriptor] = []
+    var topLevelCursor: UInt64 = 0
+    while topLevelCursor < fileSize {
+        guard let atom = try readAtomDescriptor(from: handle, at: topLevelCursor, limit: fileSize) else {
+            break
+        }
+        topLevelAtoms.append(atom)
+        topLevelCursor += atom.size
+    }
+
+    guard let moov = topLevelAtoms.first(where: { $0.type == "moov" }) else {
+        return nil
+    }
+    if topLevelAtoms.contains(where: { $0.type == "mdat" && $0.offset > moov.offset }) {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Cannot insert ProRes static HDR sample entry boxes into a front-moov file without rewriting chunk offsets."
+            ]
+        )
+    }
+
+    var moovCursor = moov.offset + moov.headerSize
+    let moovLimit = moov.offset + moov.size
+    while moovCursor < moovLimit {
+        guard let trak = try readAtomDescriptor(from: handle, at: moovCursor, limit: moovLimit) else {
+            break
+        }
+        defer { moovCursor += trak.size }
+        guard trak.type == "trak",
+              let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stsd = try findChildAtom(named: "stsd", in: stbl, handle: handle)
+        else {
+            continue
+        }
+
+        let handlerTypeData = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize + 8,
+            count: 4
+        )
+        let handlerType = String(data: handlerTypeData, encoding: .isoLatin1) ?? ""
+        guard handlerType == "vide" else { continue }
+
+        let entryCountData = try readExactData(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 4,
+            count: 4
+        )
+        guard readUInt32BE(from: entryCountData) >= 1 else { continue }
+
+        guard let entry = try readAtomDescriptor(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 8,
+            limit: stsd.offset + stsd.size
+        ), ["apco", "apcs", "apcn", "apch", "ap4h", "ap4x"].contains(entry.type) else {
+            continue
+        }
+
+        let childStart = entry.offset + 86
+        let entryLimit = entry.offset + entry.size
+        guard childStart <= entryLimit else { continue }
+
+        var insertOffset = entryLimit
+        var hasMDCV = false
+        var hasCLLI = false
+        var childCursor = childStart
+        while childCursor < entryLimit {
+            guard let child = try readAtomDescriptor(from: handle, at: childCursor, limit: entryLimit) else {
+                break
+            }
+            if child.type == "mdcv" {
+                hasMDCV = true
+                insertOffset = child.offset + child.size
+            } else if child.type == "clli" {
+                hasCLLI = true
+                insertOffset = child.offset + child.size
+            } else if child.type == "colr" {
+                insertOffset = child.offset + child.size
+            }
+            childCursor += child.size
+        }
+
+        let insertionData = makeStaticHDRSampleEntryBoxes(
+            masteringDisplayColorVolume: masteringDisplayColorVolume,
+            contentLightLevelInfo: contentLightLevelInfo,
+            includeMDCV: !hasMDCV,
+            includeCLLI: !hasCLLI)
+        guard !insertionData.isEmpty else { return nil }
+
+        let delta = UInt64(insertionData.count)
+        let patches = [moov, trak, mdia, minf, stbl, stsd, entry].map {
+            sizeFieldPatch(for: $0, growingBy: delta)
+        }
+        return (insertOffset, insertionData, patches)
+    }
+
+    return nil
+}
+
 private func copyBytes(
     from input: FileHandle,
     to output: FileHandle,
@@ -1899,6 +2416,85 @@ private func rewriteMovieFile(
     try fm.moveItem(at: tempURL, to: movieURL)
 }
 
+private func rewriteMovieFileRemovingRanges(
+    movieURL: URL,
+    removalRanges: [MOVByteRange],
+    sizePatches: [MOVSizeFieldPatch]
+) throws {
+    guard !removalRanges.isEmpty else { return }
+
+    let fm = FileManager.default
+    let tempURL = movieURL.deletingLastPathComponent()
+        .appendingPathComponent(".\(movieURL.lastPathComponent).hdrtrim.\(UUID().uuidString).tmp")
+    defer { try? fm.removeItem(at: tempURL) }
+
+    let input = try FileHandle(forReadingFrom: movieURL)
+    fm.createFile(atPath: tempURL.path, contents: nil)
+    let output = try FileHandle(forWritingTo: tempURL)
+    defer {
+        try? input.close()
+        try? output.close()
+    }
+
+    let fileSize = try input.seekToEnd()
+    try input.seek(toOffset: 0)
+
+    let sortedPatches = try sizePatches
+        .map { ($0.offset, try data(for: $0)) }
+        .sorted { $0.0 < $1.0 }
+    let sortedRanges = removalRanges.sorted { $0.offset < $1.offset }
+
+    var cursor: UInt64 = 0
+    var patchIndex = 0
+    var rangeIndex = 0
+
+    while patchIndex < sortedPatches.count || rangeIndex < sortedRanges.count {
+        let nextPatchOffset = patchIndex < sortedPatches.count
+            ? sortedPatches[patchIndex].0
+            : UInt64.max
+        let nextRangeOffset = rangeIndex < sortedRanges.count
+            ? sortedRanges[rangeIndex].offset
+            : UInt64.max
+
+        if nextPatchOffset <= nextRangeOffset {
+            let (offset, patchData) = sortedPatches[patchIndex]
+            guard offset >= cursor else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Overlapping MOV size patch while trimming HEVC HDR boxes."]
+                )
+            }
+            try copyBytes(from: input, to: output, count: offset - cursor)
+            output.write(patchData)
+            try input.seek(toOffset: offset + UInt64(patchData.count))
+            cursor = offset + UInt64(patchData.count)
+            patchIndex += 1
+        } else {
+            let range = sortedRanges[rangeIndex]
+            guard range.offset >= cursor,
+                  range.offset + range.length <= fileSize else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid MOV byte range while trimming HEVC HDR boxes."]
+                )
+            }
+            try copyBytes(from: input, to: output, count: range.offset - cursor)
+            try input.seek(toOffset: range.offset + range.length)
+            cursor = range.offset + range.length
+            rangeIndex += 1
+        }
+    }
+
+    try copyBytes(from: input, to: output, count: fileSize - cursor)
+
+    try output.close()
+    try input.close()
+    try fm.removeItem(at: movieURL)
+    try fm.moveItem(at: tempURL, to: movieURL)
+}
+
 private func patchDolbyVisionHEVCConfigurationAtom(
     in movieURL: URL,
     profile: DolbyVisionHEVCProfile,
@@ -1923,6 +2519,36 @@ private func patchDolbyVisionHEVCConfigurationAtom(
     )
 }
 
+private func removeHEVCStaticHDRSampleEntryBoxes(in movieURL: URL) throws {
+    guard let targets = try findHEVCStaticHDRSampleEntryRemovalTargets(in: movieURL) else {
+        return
+    }
+    try rewriteMovieFileRemovingRanges(
+        movieURL: movieURL,
+        removalRanges: targets.ranges,
+        sizePatches: targets.sizePatches
+    )
+}
+
+private func patchProResStaticHDRSampleEntryBoxes(
+    in movieURL: URL,
+    masteringDisplayColorVolume: Data?,
+    contentLightLevelInfo: Data?
+) throws {
+    guard let targets = try findProResStaticHDRSampleEntryPatchTargets(
+        in: movieURL,
+        masteringDisplayColorVolume: masteringDisplayColorVolume,
+        contentLightLevelInfo: contentLightLevelInfo) else {
+        return
+    }
+    try rewriteMovieFile(
+        movieURL: movieURL,
+        insertionOffset: targets.insertOffset,
+        insertionData: targets.insertionData,
+        sizePatches: targets.sizePatches
+    )
+}
+
 // MARK: - Pump drivers
 
 /// Drives a plain passthrough pump (audio / timecode / metadata).
@@ -1942,15 +2568,19 @@ private func startPassthroughPump(
     }
 
     let once = OnceGuard()
-    pair.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .userInitiated)) {
+    let pairRef = SendableRef(pair)
+    let writerRef = SendableRef(writer)
+    let readerRef = SendableRef(reader)
+    pairRef.value.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .userInitiated)) {
+        let pair = pairRef.value
         while pair.input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
                 guard let buf = pair.output.copyNextSampleBuffer() else { return .finished }
                 guard pair.input.append(buf) else {
                     return .failed(makeWriterFailure(
                         stage: "\(trackLabel) append failed",
-                        writer: writer,
-                        reader: reader
+                        writer: writerRef.value,
+                        reader: readerRef.value
                     ))
                 }
                 progress?.increment()
@@ -1988,15 +2618,19 @@ private func startTimedMetadataPump(
     }
 
     let once = OnceGuard()
-    pair.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .utility)) {
+    let pairRef = SendableRef(pair)
+    let writerRef = SendableRef(writer)
+    let readerRef = SendableRef(reader)
+    pairRef.value.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .utility)) {
+        let pair = pairRef.value
         while pair.input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
                 guard let group = pair.readerAdaptor.nextTimedMetadataGroup() else { return .finished }
                 guard pair.writerAdaptor.append(group) else {
                     return .failed(makeWriterFailure(
                         stage: "\(trackLabel) append failed",
-                        writer: writer,
-                        reader: reader
+                        writer: writerRef.value,
+                        reader: readerRef.value
                     ))
                 }
                 return .appended
@@ -2031,7 +2665,10 @@ private func startDolbyVisionMetadataPump(
 
     let once = OnceGuard()
     let counter = DolbyVisionFrameCounter()
-    pair.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .utility)) {
+    let pairRef = SendableRef(pair)
+    let writerRef = SendableRef(writer)
+    pairRef.value.input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .utility)) {
+        let pair = pairRef.value
         while pair.input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
                 guard let frameNumber = counter.next(limit: pair.metadata.frameCount) else { return .finished }
@@ -2041,7 +2678,7 @@ private func startDolbyVisionMetadataPump(
                 guard pair.writerAdaptor.append(group) else {
                     return .failed(makeWriterFailure(
                         stage: "Dolby Vision metadata append failed",
-                        writer: writer))
+                        writer: writerRef.value))
                 }
                 return .appended
             }
@@ -2077,12 +2714,17 @@ private func startVideoSourcePump(
     }
 
     let once = OnceGuard()
-    input.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .userInitiated)) {
+    let sourceRef = SendableRef(source)
+    let inputRef = SendableRef(input)
+    let writerRef = SendableRef(writer)
+    inputRef.value.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .userInitiated)) {
+        let source = sourceRef.value
+        let input = inputRef.value
         while input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
                 guard let buf = source.next() else { return .finished }
                 guard input.append(buf) else {
-                    return .failed(makeWriterFailure(stage: "Video append failed", writer: writer))
+                    return .failed(makeWriterFailure(stage: "Video append failed", writer: writerRef.value))
                 }
                 progress?.increment()
                 return .appended
@@ -2122,6 +2764,9 @@ func encodeMOV(
 
     let isPassthrough = (quality == "pass")
     let isHEVC = isHEVCQuality(quality)
+    var effectiveColorSpace = isHEVC
+        ? SourceColorSpace.hevcHDR10(basedOn: colorSpace)
+        : colorSpace
     guard !audioReplace || extraAudioURL != nil else {
         print("[Error] --audio-replace requires -aa <audio_file>.")
         return false
@@ -2150,9 +2795,17 @@ func encodeMOV(
         }
         if let dolbyVisionXMLURL {
             let videoColorProfile = try await validateDolbyVisionVideoColorProfile(from: videoTrack)
+            let metadataColorProfile = videoColorProfile.withSignalEncoding(
+                is4444FamilyQuality(quality) ? .rgbComputer : .ycbcrBT2020Video)
             let metadata = try DolbyVisionMetadataSource(
                 xmlURL: dolbyVisionXMLURL,
-                videoColorProfile: videoColorProfile)
+                videoColorProfile: metadataColorProfile)
+            if isHEVC {
+                effectiveColorSpace = SourceColorSpace.hevcHDR10(
+                    basedOn: effectiveColorSpace,
+                    masteringDisplayColorVolume: metadata.masteringDisplayColorVolume,
+                    contentLightLevelInfo: metadata.contentLightLevelInfo)
+            }
             let sourceTimecodeInfo: QuickTimeTimecodeInfo?
             if let timecodeTrack {
                 sourceTimecodeInfo = try await readQuickTimeTimecodeInfo(asset: asset, track: timecodeTrack)
@@ -2190,7 +2843,7 @@ func encodeMOV(
                     profile: profile,
                     expectedFrameCount: estimatedFrames)
             } else {
-                print("[DoVi] Embedding metadata \(metadata.version) as \(metadata.metadataKeyValue) (\(metadata.frameCount) frames, \(videoColorProfile.label))")
+                print("[DoVi] Embedding metadata \(metadata.version) as \(metadata.metadataKeyValue) (\(metadata.frameCount) frames, \(metadataColorProfile.displayLabel))")
                 dolbyVisionMetadata = metadata
                 dolbyVisionRPUProvider = nil
             }
@@ -2304,7 +2957,7 @@ func encodeMOV(
                 width: width, height: height,
                 codecType: proResCodecType(quality),
                 fpsHint: Int(fpsInfo.fps.rounded()),
-                colorSpace: colorSpace,
+                colorSpace: effectiveColorSpace,
                 hevcOptions: hevcOptions)
         }
 
@@ -2604,6 +3257,12 @@ func encodeMOV(
             let vtRef = SendableRef(vtSession!)
             let fpsInfoRef = SendableRef(fpsInfo)
             let rpuProviderRef = dolbyVisionRPUProvider.map(SendableRef.init)
+            let hdr10Metadata = isHEVC
+                ? HEVCHDR10Metadata(
+                    masteringDisplayColorVolume: effectiveColorSpace?.masteringDisplayColorVolume,
+                    contentLightLevelInfo: effectiveColorSpace?.contentLightLevelInfo)
+                : nil
+            let hdr10MetadataRef = hdr10Metadata.map(SendableRef.init)
 
             await withTaskGroup(of: Void.self) { group in
                 // Stage 1 — Reader
@@ -2666,7 +3325,8 @@ func encodeMOV(
                                 let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
                                 sampleToAppend = try sampleBufferByInjectingHEVCRPU(
                                     wrapped.buf,
-                                    rpuNALUnit: rpu
+                                    rpuNALUnit: rpu,
+                                    hdr10Metadata: hdr10MetadataRef?.value
                                 )
                             } catch {
                                 failureBox.store(error)
@@ -2797,6 +3457,17 @@ func encodeMOV(
                 height: height,
                 fps: fpsInfo.fps
             )
+            try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)
+        }
+        if !isHEVC {
+            let masteringDisplay = dolbyVisionMetadata?.masteringDisplayColorVolume
+                ?? effectiveColorSpace?.masteringDisplayColorVolume
+            let contentLight = dolbyVisionMetadata?.contentLightLevelInfo
+                ?? effectiveColorSpace?.contentLightLevelInfo
+            try patchProResStaticHDRSampleEntryBoxes(
+                in: outputURL,
+                masteringDisplayColorVolume: masteringDisplay,
+                contentLightLevelInfo: contentLight)
         }
         if isPassthrough,
            dolbyVisionMetadata == nil,

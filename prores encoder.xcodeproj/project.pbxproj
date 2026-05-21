@@ -272,6 +272,7 @@
 					VideoToolbox,
 					"-framework",
 					swiftaaf_Framework,
+					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -310,6 +311,7 @@
 					VideoToolbox,
 					"-framework",
 					swiftaaf_Framework,
+					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

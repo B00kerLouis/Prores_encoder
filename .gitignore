@@ -5,6 +5,7 @@ build/
 build/*
 !build/Release/
 !build/Release/**
+Build/Release/.DS_Store
 DerivedData/
 dist/
 *.dSYM/
