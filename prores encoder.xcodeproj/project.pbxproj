@@ -261,6 +261,11 @@
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
 					"$(SRCROOT)/prores\\ encoder/src_cpp",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -272,6 +277,7 @@
 					VideoToolbox,
 					"-framework",
 					swiftaaf_Framework,
+					"-lSvtAv1Enc",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -300,6 +306,11 @@
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
 					"$(SRCROOT)/prores\\ encoder/src_cpp",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -311,6 +322,7 @@
 					VideoToolbox,
 					"-framework",
 					swiftaaf_Framework,
+					"-lSvtAv1Enc",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -850,7 +850,7 @@ private func encodeVersion(major: UInt8, minor: UInt8) -> Data {
 private func encodeProductVersion() -> Data {
     var d = Data(count: 10)
     writeU16LE(&d, offset: 0, value: 1)  // major
-    writeU16LE(&d, offset: 2, value: 0)  // minor
+    writeU16LE(&d, offset: 2, value: 1)  // minor
     writeU16LE(&d, offset: 4, value: 0)  // tertiary
     writeU16LE(&d, offset: 6, value: 0)  // patchLevel
     writeU16LE(&d, offset: 8, value: 1)  // type: kAAFVersionReleased
@@ -1436,7 +1436,7 @@ func generateAAFSequence(clips: [AAFClipInfo], outputPath: String) -> Bool {
         PropEntry(pid: PID.productVersion, format: SF.data.rawValue,
                   data: encodeProductVersion()),
         PropEntry(pid: PID.prodVerString, format: SF.data.rawValue,
-                  data: encodeUTF16LE("1.0.0")),
+                  data: encodeUTF16LE("1.1.0")),
         PropEntry(pid: PID.productID, format: SF.data.rawValue,
                   data: encodeAUID(AUID("97e04c67-dbe6-4d11-bcd7-3a3a4253a2ef"))),
         PropEntry(pid: PID.identDate, format: SF.data.rawValue,

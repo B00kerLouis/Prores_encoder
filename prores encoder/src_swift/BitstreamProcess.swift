@@ -77,11 +77,14 @@ struct SourceColorSpace: Sendable {
 
 enum DolbyVisionHEVCProfile: String, Sendable {
     case profile81 = "81"
+    case profile101 = "101"
 
     init?(argument: String) {
         switch argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "81", "8.1":
             self = .profile81
+        case "10":
+            self = .profile101
         default:
             return nil
         }
@@ -90,12 +93,14 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     var doviToolProfileArgument: String {
         switch self {
         case .profile81: return "8.1"
+        case .profile101: return "8.1"
         }
     }
 
     var displayName: String {
         switch self {
         case .profile81: return "8.1"
+        case .profile101: return "10.1"
         }
     }
 }
@@ -258,7 +263,7 @@ func videoSize(from asset: AVAsset) async -> (width: Int, height: Int) {
 // MARK: - ProRes codec type mapping
 
 let supportedProResQualities: Set<String> = [
-    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "hevc"
+    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "hevc", "av1"
 ]
 
 func normalizedProResQuality(_ quality: String) -> String {
@@ -273,7 +278,7 @@ func proResQualityValidationError(_ quality: String) -> String? {
     if normalized == "xq" {
         return "Unsupported quality '\(quality)'. Use '4444xq' explicitly."
     }
-    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc."
+    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc, av1."
 }
 
 func isHEVCQuality(_ quality: String) -> Bool {
@@ -287,7 +292,7 @@ func is4444FamilyQuality(_ quality: String) -> Bool {
 
 func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
     let pixelFormat: OSType
-    if isHEVCQuality(quality) {
+    if isCompressedHDRQuality(quality) {
         pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     } else if is4444FamilyQuality(quality) {
         pixelFormat = kCVPixelFormatType_32BGRA
@@ -300,6 +305,7 @@ func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
 func proResCodecType(_ quality: String) -> CMVideoCodecType {
     switch normalizedProResQuality(quality) {
     case "hevc":    return kCMVideoCodecType_HEVC
+    case "av1":     return kCMVideoCodecType_AV1
     case "proxy":   return kCMVideoCodecType_AppleProRes422Proxy
     case "422lt":   return kCMVideoCodecType_AppleProRes422LT
     case "422":     return kCMVideoCodecType_AppleProRes422
@@ -319,7 +325,7 @@ func proResVariantInt(_ quality: String) -> Int {
 }
 
 func proResPipelineChannelCapacity(width: Int, height: Int, quality: String) -> Int {
-    let bytesPerPixel = isHEVCQuality(quality) ? 2 : 4
+    let bytesPerPixel = isCompressedHDRQuality(quality) ? 2 : 4
     let frameBytes = max(width * height * bytesPerPixel, 1)
     let targetBufferedBytes = 128 * 1024 * 1024
     let memoryLimited = max(4, min(targetBufferedBytes / frameBytes, 8))
@@ -338,7 +344,7 @@ private func fourCCString(_ code: FourCharCode) -> String {
 }
 
 private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
-    if codecType == kCMVideoCodecType_HEVC {
+    if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_AV1 {
         return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     }
     switch codecType {

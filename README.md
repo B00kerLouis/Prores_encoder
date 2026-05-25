@@ -11,6 +11,7 @@ This project is licensed under the GNU Affero General Public License v3.0. See [
 - macOS with the standard command-line build tools installed
 - Xcode project build support
 - The bundled `Frameworks/swiftaaf_Framework.framework` directory kept next to the project file
+- Self-contained runtime with no external `ffmpeg` or `dovi_tool` dependency
 
 ## Build
 
@@ -26,11 +27,19 @@ The Release binary is written to:
 Build/Release/prores encoder
 ```
 
+The only non-system build inputs are the bundled `swiftaaf_Framework.framework` and the repo-local SVT-AV1 static library under `ThirdParty/SVT-AV1/lib/`.
+
 Optional local install:
 
 ```bash
-cp "Build/Release/prores encoder" /opt/homebrew/bin/proresencoder
+cp "Build/Release/prores encoder" ~/bin/proresencoder
 ```
+
+## Native Pipeline Architecture
+
+- AV1 encode uses the bundled SVT-AV1 static library.
+- ProRes source decode for AV1 feeds uses `VTDecompressionSession` plus native pixel conversion and chroma downsampling.
+- Dolby Vision RPU generation and writing are implemented in native Swift, then packaged into HEVC NAL units or AV1 metadata OBUs.
 
 ## Basic Usage
 

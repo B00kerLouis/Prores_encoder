@@ -45,6 +45,7 @@ struct CLIConfig: Sendable {
     let audioReplace:   Bool
     let dolbyVisionXMLURL: URL?
     let hevcOptions:    HEVCEncodeOptions?
+    let av1Options:     AV1EncodeOptions?
 }
 
 // MARK: - Entry Point
@@ -68,8 +69,8 @@ enum ProResEncoderCLI {
         var audioCHperFile  = 1
         var audioReplace    = false
         var dolbyVisionXMLPath = ""
-        var hevcBitrateMbps: Double? = nil
-        var hevcDVProfile: DolbyVisionHEVCProfile? = nil
+        var videoBitrateMbps: Double? = nil
+        var dolbyVisionProfile: DolbyVisionHEVCProfile? = nil
         var transformMode: TransformMode? = nil
         var mediaSearchPaths: [String] = []
 
@@ -115,14 +116,14 @@ enum ProResEncoderCLI {
                     print("[Error] --bitrate / -b must be a positive number in Mb/s.")
                     exit(1)
                 }
-                hevcBitrateMbps = parsed
+                videoBitrateMbps = parsed
             case "-dp", "--dv-profile":
                 let raw = requireValue(for: args[idx])
                 guard let parsed = DolbyVisionHEVCProfile(argument: raw) else {
-                    print("[Error] --dv-profile / -dp currently supports only 81 for Dolby Vision Profile 8.1.")
+                    print("[Error] --dv-profile / -dp supports 81 for HEVC Profile 8.1, and 10 for AV1 Profile 10.1 (-q av1 only).")
                     exit(1)
                 }
-                hevcDVProfile = parsed
+                dolbyVisionProfile = parsed
             case "-ef", "-export-format", "--export-format":
                 exportFormat = requireValue(for: args[idx]).lowercased()
             case "-ea", "-export-aaf", "--export-aaf", "--aaf":
@@ -218,34 +219,45 @@ enum ProResEncoderCLI {
             exit(1)
         }
         let wantsHEVC = isHEVCQuality(quality)
-        if wantsHEVC {
+        let wantsAV1 = isAV1Quality(quality)
+        let wantsCompressedHDR = wantsHEVC || wantsAV1
+        if wantsCompressedHDR {
             guard exportFormat == "mov" else {
-                print("[Error] -q hevc is supported only with MOV output.")
+                print("[Error] -q \(quality) is supported only with MOV output.")
                 exit(1)
             }
             guard inputXMLPath.isEmpty && inputAAFPath.isEmpty else {
-                print("[Error] -q hevc currently supports single-file or folder media input, not timeline XML/AAF bounce.")
+                print("[Error] -q \(quality) currently supports single-file or folder media input, not timeline XML/AAF bounce.")
                 exit(1)
             }
-            guard let bitrate = hevcBitrateMbps, bitrate > 0 else {
-                print("[Error] -q hevc requires --bitrate / -b <Mb/s>.")
+            guard let bitrate = videoBitrateMbps, bitrate > 0 else {
+                print("[Error] -q \(quality) requires --bitrate / -b <Mb/s>.")
                 exit(1)
             }
-            if hevcDVProfile != nil && dolbyVisionXMLPath.isEmpty {
+            if dolbyVisionProfile != nil && dolbyVisionXMLPath.isEmpty {
                 print("[Error] --dv-profile / -dp requires -dovi / --dolby-vision-xml.")
                 exit(1)
             }
-            if !dolbyVisionXMLPath.isEmpty && hevcDVProfile == nil {
-                print("[Error] -q hevc with -dovi requires --dv-profile 81 / -dp 81.")
+            if wantsHEVC, let profile = dolbyVisionProfile, profile != .profile81 {
+                print("[Error] -q hevc with -dovi supports only --dv-profile 81 / -dp 81.")
+                exit(1)
+            }
+            if wantsAV1, let profile = dolbyVisionProfile, profile != .profile101 {
+                print("[Error] -q av1 with -dovi supports only --dv-profile 10 / -dp 10.")
+                exit(1)
+            }
+            if !dolbyVisionXMLPath.isEmpty && dolbyVisionProfile == nil {
+                let required = wantsAV1 ? "10 / -dp 10" : "81 / -dp 81"
+                print("[Error] -q \(quality) with -dovi requires --dv-profile \(required).")
                 exit(1)
             }
         } else {
-            if hevcBitrateMbps != nil {
-                print("[Error] --bitrate / -b is available only with -q hevc.")
+            if videoBitrateMbps != nil {
+                print("[Error] --bitrate / -b is available only with -q hevc or -q av1.")
                 exit(1)
             }
-            if hevcDVProfile != nil {
-                print("[Error] --dv-profile / -dp is available only with -q hevc.")
+            if dolbyVisionProfile != nil {
+                print("[Error] --dv-profile / -dp is available only with -q hevc or -q av1.")
                 exit(1)
             }
         }
@@ -276,15 +288,20 @@ enum ProResEncoderCLI {
         }
 
         let hevcOptions = wantsHEVC ? HEVCEncodeOptions(
-            bitrateMbps: hevcBitrateMbps ?? 0,
-            dvProfile: hevcDVProfile
+            bitrateMbps: videoBitrateMbps ?? 0,
+            dvProfile: dolbyVisionProfile
+        ) : nil
+        let av1Options = wantsAV1 ? AV1EncodeOptions(
+            bitrateMbps: videoBitrateMbps ?? 0,
+            dvProfile: dolbyVisionProfile
         ) : nil
 
         let config = CLIConfig(quality: quality, exportFormat: exportFormat,
                                audioCHperFile: audioCHperFile, aafMode: aafMode,
                                audioReplace: audioReplace,
                                dolbyVisionXMLURL: dolbyVisionXMLURL,
-                               hevcOptions: hevcOptions)
+                               hevcOptions: hevcOptions,
+                               av1Options: av1Options)
         let fm = FileManager.default
         let outputURL = URL(fileURLWithPath: outputPath)
         let isOutFile = !outputURL.pathExtension.isEmpty
@@ -439,6 +456,9 @@ private func processSingleVideo(
     } else if isHEVCQuality(config.quality), let hevcOptions = config.hevcOptions {
         let dvSuffix = hevcOptions.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
         status = "-> Encoding HDR10 HEVC \(String(format: "%.2f", hevcOptions.bitrateMbps)) Mb/s\(dvSuffix)"
+    } else if isAV1Quality(config.quality), let av1Options = config.av1Options {
+        let dvSuffix = av1Options.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
+        status = "-> Encoding HDR10 AV1 \(String(format: "%.2f", av1Options.bitrateMbps)) Mb/s\(dvSuffix)"
     } else {
         status = "-> Encoding ProRes \(config.quality.uppercased())"
     }
@@ -567,6 +587,7 @@ private func processSingleVideo(
         audioReplace: config.audioReplace,
         dolbyVisionXMLURL: config.dolbyVisionXMLURL,
         hevcOptions: config.hevcOptions,
+        av1Options: config.av1Options,
         colorSpace: cs, fpsInfo: fpsI)
 
     guard success else {
@@ -904,12 +925,12 @@ private func printUsage() {
         opatom          MXF OP-Atom (direct VT→MXF)
 
     Options:
-      -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc>  Output codec/quality (default: 422hq)
-      -b, --bitrate <Mb/s>           HEVC bitrate in Mb/s (required with -q hevc)
-      -dp, --dv-profile <81>         Dolby Vision HEVC profile; currently only 81 / Profile 8.1
+      -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc|av1>  Output codec/quality (default: 422hq)
+      -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
+      -dp, --dv-profile <81|10>      Dolby Vision profile: 81 for HEVC (-q hevc only); 10 for AV1 Profile 10.1 (-q av1 only)
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
-      -dovi, --dolby-vision-xml <file> MOV only; embed ProRes PHDR metadata, or generate HEVC RPU with -q hevc -dp 81
+      -dovi, --dolby-vision-xml <file> MOV only; embed ProRes PHDR metadata, or generate RPU for -q hevc/-q av1
       --audio-ch-per-file <N>         Channels per OP-Atom audio MXF (default: 1)
       -ea, --export-aaf               Generate one AAF for all clips (MXF modes only)
       -ea-all, --export-aaf-all       Generate one AAF per clip (MXF modes only)

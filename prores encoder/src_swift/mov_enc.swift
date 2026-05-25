@@ -446,7 +446,7 @@ private struct QuickTimeTimecodeInfo {
     let stringValue: String
 }
 
-private struct DolbyVisionShot {
+struct DolbyVisionShot {
     let recordIn: Int
     let duration: Int
     let sourceIn: Int?
@@ -462,17 +462,18 @@ private struct DolbyVisionShot {
     }
 }
 
-private final class DolbyVisionMetadataSource: @unchecked Sendable {
-    let version: String
-    let versionToken: String
-    let metadataKeyValue: String
-    let metadataIdentifier: AVMetadataIdentifier
-    let trackName: String?
-    let frameCount: Int
-    let editRate: DolbyVisionEditRate
-    let explicitStartTimecode: String?
-    let masteringDisplayColorVolume: Data?
-    let contentLightLevelInfo: Data?
+final class DolbyVisionMetadataSource: @unchecked Sendable {
+    let rawXMLData: Data
+    fileprivate let version: String
+    fileprivate let versionToken: String
+    fileprivate let metadataKeyValue: String
+    fileprivate let metadataIdentifier: AVMetadataIdentifier
+    fileprivate let trackName: String?
+    fileprivate let frameCount: Int
+    fileprivate let editRate: DolbyVisionEditRate
+    fileprivate let explicitStartTimecode: String?
+    fileprivate let masteringDisplayColorVolume: Data?
+    fileprivate let contentLightLevelInfo: Data?
 
     private let style: DolbyVisionMDFStyle
     private let schemaURL: String
@@ -480,8 +481,9 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
     private let globalXML: String
     private let shots: [DolbyVisionShot]
 
-    init(xmlURL: URL, videoColorProfile: DolbyVisionVideoColorProfile) throws {
+    fileprivate init(xmlURL: URL, videoColorProfile: DolbyVisionVideoColorProfile) throws {
         let data = try Data(contentsOf: xmlURL)
+        rawXMLData = data
         let doc = try XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever])
         guard let root = doc.rootElement(),
               xmlLocalName(root) == "DolbyLabsMDF" else {
@@ -580,7 +582,7 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         frameCount = parsedShots.map { $0.recordIn + $0.duration }.max() ?? 0
     }
 
-    func validateAgainstSource(
+    fileprivate func validateAgainstSource(
         fpsInfo: FramerateInfo,
         estimatedFrames: Int64,
         sourceTimecode: QuickTimeTimecodeInfo?
@@ -634,7 +636,7 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
-    func makeFormatDescription() throws -> CMMetadataFormatDescription {
+    fileprivate func makeFormatDescription() throws -> CMMetadataFormatDescription {
         var desc: CMMetadataFormatDescription?
         let keyData = metadataKeyValue.data(using: .utf8)! as CFData
         let key: [CFString: Any] = [
@@ -659,7 +661,7 @@ private final class DolbyVisionMetadataSource: @unchecked Sendable {
         return desc
     }
 
-    func timedMetadataGroup(frameNumber: Int, fpsInfo: FramerateInfo) -> AVTimedMetadataGroup {
+    fileprivate func timedMetadataGroup(frameNumber: Int, fpsInfo: FramerateInfo) -> AVTimedMetadataGroup {
         let item = AVMutableMetadataItem()
         item.identifier = metadataIdentifier
         item.dataType = kCMMetadataBaseDataType_RawData as String
@@ -1894,6 +1896,11 @@ private struct MOVByteRange {
     let length: UInt64
 }
 
+private struct MOVDataPatch {
+    let offset: UInt64
+    let data: Data
+}
+
 private func sizeFieldPatch(for atom: MOVAtomDescriptor, growingBy delta: UInt64) -> MOVSizeFieldPatch {
     if atom.headerSize == 16 {
         return MOVSizeFieldPatch(offset: atom.offset + 8, byteCount: 8, newValue: atom.size + delta)
@@ -1983,8 +1990,54 @@ private func makeDolbyVisionHEVCConfigurationBox(
     case .profile81:
         dvProfile = 8
         compatibilityID = 1
+    case .profile101:
+        dvProfile = 10
+        compatibilityID = 1
     }
     let dvLevel = dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
+    let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
+    let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
+    let byte4 = compatibilityID << 4
+
+    var box = Data()
+    box.append(uint32BEData(32))
+    box.append(Data("dvvC".utf8))
+    box.append(contentsOf: [0x01, 0x00, byte2, byte3, byte4])
+    box.append(Data(repeating: 0, count: 19))
+    return box
+}
+
+private func dolbyVisionAV1Level(width: Int, height: Int, fps: Double) -> UInt8 {
+    let pixels = width * height
+    if pixels >= 3840 * 2160 {
+        if fps > 60.0 { return 9 }
+        if fps > 30.0 { return 8 }
+        if fps > 24.0 { return 7 }
+        return 6
+    }
+    if pixels >= 1920 * 1080 {
+        return fps > 30.0 ? 6 : 4
+    }
+    return 3
+}
+
+private func makeDolbyVisionAV1ConfigurationBox(
+    profile: DolbyVisionHEVCProfile,
+    width: Int,
+    height: Int,
+    fps: Double
+) -> Data {
+    let dvProfile: UInt8
+    let compatibilityID: UInt8
+    switch profile {
+    case .profile101:
+        dvProfile = 10
+        compatibilityID = 1
+    case .profile81:
+        dvProfile = 8
+        compatibilityID = 1
+    }
+    let dvLevel = dolbyVisionAV1Level(width: width, height: height, fps: fps)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
     let byte4 = compatibilityID << 4
@@ -2127,6 +2180,108 @@ private func findHEVCSampleEntryPatchTargets(
     return nil
 }
 
+private func findAV1SampleEntryPatchTargets(
+    in movieURL: URL
+) throws -> (insertOffset: UInt64, sizePatches: [MOVSizeFieldPatch], dataPatches: [MOVDataPatch])? {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+
+    let fileSize = try handle.seekToEnd()
+    try handle.seek(toOffset: 0)
+
+    var topLevelAtoms: [MOVAtomDescriptor] = []
+    var topLevelCursor: UInt64 = 0
+    while topLevelCursor < fileSize {
+        guard let atom = try readAtomDescriptor(from: handle, at: topLevelCursor, limit: fileSize) else {
+            break
+        }
+        topLevelAtoms.append(atom)
+        topLevelCursor += atom.size
+    }
+
+    guard let moov = topLevelAtoms.first(where: { $0.type == "moov" }) else {
+        return nil
+    }
+    if topLevelAtoms.contains(where: { $0.type == "mdat" && $0.offset > moov.offset }) {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Cannot insert Dolby Vision dvvC into a front-moov AV1 file without rewriting chunk offsets."
+            ]
+        )
+    }
+
+    var moovCursor = moov.offset + moov.headerSize
+    let moovLimit = moov.offset + moov.size
+    while moovCursor < moovLimit {
+        guard let trak = try readAtomDescriptor(from: handle, at: moovCursor, limit: moovLimit) else {
+            break
+        }
+        defer { moovCursor += trak.size }
+        guard trak.type == "trak",
+              let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stsd = try findChildAtom(named: "stsd", in: stbl, handle: handle)
+        else {
+            continue
+        }
+
+        let handlerTypeData = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize + 8,
+            count: 4
+        )
+        let handlerType = String(data: handlerTypeData, encoding: .isoLatin1) ?? ""
+        guard handlerType == "vide" else { continue }
+
+        let entryCountData = try readExactData(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 4,
+            count: 4
+        )
+        guard readUInt32BE(from: entryCountData) >= 1 else { continue }
+
+        guard let entry = try readAtomDescriptor(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 8,
+            limit: stsd.offset + stsd.size
+        ), ["av01", "dav1"].contains(entry.type) else {
+            continue
+        }
+
+        let childStart = entry.offset + 86
+        let entryLimit = entry.offset + entry.size
+        guard childStart < entryLimit else { continue }
+
+        var childCursor = childStart
+        var insertOffset: UInt64?
+        while childCursor < entryLimit {
+            guard let child = try readAtomDescriptor(from: handle, at: childCursor, limit: entryLimit) else {
+                break
+            }
+            if child.type == "dvvC" || child.type == "dvcC" {
+                return nil
+            }
+            if child.type == "av1C" || child.type == "colr" {
+                insertOffset = child.offset + child.size
+            }
+            childCursor += child.size
+        }
+
+        guard let insertOffset else { continue }
+        let delta = UInt64(32)
+        let patches = [moov, trak, mdia, minf, stbl, stsd, entry].map {
+            sizeFieldPatch(for: $0, growingBy: delta)
+        }
+        return (insertOffset, patches, [])
+    }
+
+    return nil
+}
+
 private func findHEVCStaticHDRSampleEntryRemovalTargets(
     in movieURL: URL
 ) throws -> (ranges: [MOVByteRange], sizePatches: [MOVSizeFieldPatch])? {
@@ -2210,6 +2365,105 @@ private func findHEVCStaticHDRSampleEntryRemovalTargets(
                 break
             }
             if child.type == "mdcv" || child.type == "clli" {
+                ranges.append(MOVByteRange(offset: child.offset, length: child.size))
+            }
+            childCursor += child.size
+        }
+
+        guard !ranges.isEmpty else { continue }
+        let delta = ranges.reduce(UInt64(0)) { $0 + $1.length }
+        let patches = [moov, trak, mdia, minf, stbl, stsd, entry].map {
+            sizeFieldPatch(for: $0, shrinkingBy: delta)
+        }
+        return (ranges, patches)
+    }
+
+    return nil
+}
+
+private func findAV1StaticHDRSampleEntryRemovalTargets(
+    in movieURL: URL
+) throws -> (ranges: [MOVByteRange], sizePatches: [MOVSizeFieldPatch])? {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+
+    let fileSize = try handle.seekToEnd()
+    try handle.seek(toOffset: 0)
+
+    var topLevelAtoms: [MOVAtomDescriptor] = []
+    var topLevelCursor: UInt64 = 0
+    while topLevelCursor < fileSize {
+        guard let atom = try readAtomDescriptor(from: handle, at: topLevelCursor, limit: fileSize) else {
+            break
+        }
+        topLevelAtoms.append(atom)
+        topLevelCursor += atom.size
+    }
+
+    guard let moov = topLevelAtoms.first(where: { $0.type == "moov" }) else {
+        return nil
+    }
+    if topLevelAtoms.contains(where: { $0.type == "mdat" && $0.offset > moov.offset }) {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Cannot remove AV1 static HDR sample entry boxes from a front-moov file without rewriting chunk offsets."
+            ]
+        )
+    }
+
+    var moovCursor = moov.offset + moov.headerSize
+    let moovLimit = moov.offset + moov.size
+    while moovCursor < moovLimit {
+        guard let trak = try readAtomDescriptor(from: handle, at: moovCursor, limit: moovLimit) else {
+            break
+        }
+        defer { moovCursor += trak.size }
+        guard trak.type == "trak",
+              let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stsd = try findChildAtom(named: "stsd", in: stbl, handle: handle)
+        else {
+            continue
+        }
+
+        let handlerTypeData = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize + 8,
+            count: 4
+        )
+        let handlerType = String(data: handlerTypeData, encoding: .isoLatin1) ?? ""
+        guard handlerType == "vide" else { continue }
+
+        let entryCountData = try readExactData(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 4,
+            count: 4
+        )
+        guard readUInt32BE(from: entryCountData) >= 1 else { continue }
+
+        guard let entry = try readAtomDescriptor(
+            from: handle,
+            at: stsd.offset + stsd.headerSize + 8,
+            limit: stsd.offset + stsd.size
+        ), ["av01", "dav1"].contains(entry.type) else {
+            continue
+        }
+
+        let childStart = entry.offset + 86
+        let entryLimit = entry.offset + entry.size
+        guard childStart < entryLimit else { continue }
+
+        var ranges: [MOVByteRange] = []
+        var childCursor = childStart
+        while childCursor < entryLimit {
+            guard let child = try readAtomDescriptor(from: handle, at: childCursor, limit: entryLimit) else {
+                break
+            }
+            if child.type == "clli" {
                 ranges.append(MOVByteRange(offset: child.offset, length: child.size))
             }
             childCursor += child.size
@@ -2366,7 +2620,8 @@ private func rewriteMovieFile(
     movieURL: URL,
     insertionOffset: UInt64,
     insertionData: Data,
-    sizePatches: [MOVSizeFieldPatch]
+    sizePatches: [MOVSizeFieldPatch],
+    dataPatches: [MOVDataPatch] = []
 ) throws {
     let fm = FileManager.default
     let tempURL = movieURL.deletingLastPathComponent()
@@ -2384,8 +2639,8 @@ private func rewriteMovieFile(
     let fileSize = try input.seekToEnd()
     try input.seek(toOffset: 0)
 
-    let sortedPatches = try sizePatches
-        .map { ($0.offset, try data(for: $0)) }
+    let sortedPatches = try (sizePatches
+        .map { ($0.offset, try data(for: $0)) } + dataPatches.map { ($0.offset, $0.data) })
         .sorted { $0.0 < $1.0 }
     var cursor: UInt64 = 0
 
@@ -2519,8 +2774,44 @@ private func patchDolbyVisionHEVCConfigurationAtom(
     )
 }
 
+private func patchDolbyVisionAV1ConfigurationAtom(
+    in movieURL: URL,
+    profile: DolbyVisionHEVCProfile,
+    width: Int,
+    height: Int,
+    fps: Double
+) throws {
+    guard let targets = try findAV1SampleEntryPatchTargets(in: movieURL) else {
+        return
+    }
+    let box = makeDolbyVisionAV1ConfigurationBox(
+        profile: profile,
+        width: width,
+        height: height,
+        fps: fps
+    )
+    try rewriteMovieFile(
+        movieURL: movieURL,
+        insertionOffset: targets.insertOffset,
+        insertionData: box,
+        sizePatches: targets.sizePatches,
+        dataPatches: targets.dataPatches
+    )
+}
+
 private func removeHEVCStaticHDRSampleEntryBoxes(in movieURL: URL) throws {
     guard let targets = try findHEVCStaticHDRSampleEntryRemovalTargets(in: movieURL) else {
+        return
+    }
+    try rewriteMovieFileRemovingRanges(
+        movieURL: movieURL,
+        removalRanges: targets.ranges,
+        sizePatches: targets.sizePatches
+    )
+}
+
+private func removeAV1StaticHDRSampleEntryBoxes(in movieURL: URL) throws {
+    guard let targets = try findAV1StaticHDRSampleEntryRemovalTargets(in: movieURL) else {
         return
     }
     try rewriteMovieFileRemovingRanges(
@@ -2758,13 +3049,16 @@ func encodeMOV(
     audioReplace: Bool,
     dolbyVisionXMLURL: URL?,
     hevcOptions: HEVCEncodeOptions?,
+    av1Options: AV1EncodeOptions?,
     colorSpace: SourceColorSpace?,
     fpsInfo: FramerateInfo
 ) async -> Bool {
 
     let isPassthrough = (quality == "pass")
     let isHEVC = isHEVCQuality(quality)
-    var effectiveColorSpace = isHEVC
+    let isAV1 = isAV1Quality(quality)
+    let isCompressedHDR = isHEVC || isAV1
+    var effectiveColorSpace = isCompressedHDR
         ? SourceColorSpace.hevcHDR10(basedOn: colorSpace)
         : colorSpace
     guard !audioReplace || extraAudioURL != nil else {
@@ -2779,16 +3073,17 @@ func encodeMOV(
     let timecodeTrack  = try? await asset.loadTracks(withMediaType: .timecode).first
     let sourceMetadataTracks = (try? await asset.loadTracks(withMediaType: .metadata)) ?? []
     let estimatedFrames = await estimateFrameCount(asset: asset)
+    let sourceIsProRes = isAV1 ? await isSourceProRes(videoTrack) : false
 
     let dolbyVisionMetadata: DolbyVisionMetadataSource?
     let dolbyVisionRPUProvider: DolbyVisionRPUProvider?
     do {
-        if isHEVC {
-            guard hevcOptions != nil else {
+        if isCompressedHDR {
+            guard (isHEVC && hevcOptions != nil) || (isAV1 && av1Options != nil) else {
                 throw NSError(
-                    domain: "HEVCEncode",
+                    domain: "CompressedHDR",
                     code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "HEVC encode requires --bitrate / -b options."]
+                    userInfo: [NSLocalizedDescriptionKey: "\(quality.uppercased()) encode requires --bitrate / -b options."]
                 )
             }
             try await validateHDR10HEVCVideoColorProfile(from: videoTrack)
@@ -2800,7 +3095,7 @@ func encodeMOV(
             let metadata = try DolbyVisionMetadataSource(
                 xmlURL: dolbyVisionXMLURL,
                 videoColorProfile: metadataColorProfile)
-            if isHEVC {
+            if isCompressedHDR {
                 effectiveColorSpace = SourceColorSpace.hevcHDR10(
                     basedOn: effectiveColorSpace,
                     masteringDisplayColorVolume: metadata.masteringDisplayColorVolume,
@@ -2827,7 +3122,7 @@ func encodeMOV(
             }
             print("[DoVi] XML edit rate \(metadata.editRate.label) matches source \(fpsInfo.numerator) \(fpsInfo.denominator); shot coverage is continuous for \(metadata.frameCount) frames.")
             if isHEVC {
-                guard let profile = hevcOptions?.dvProfile else {
+                guard let profile = hevcOptions?.dvProfile, profile == .profile81 else {
                     throw NSError(
                         domain: "DolbyVisionRPU",
                         code: 1,
@@ -2839,7 +3134,23 @@ func encodeMOV(
                 print("[DoVi] Generating Profile \(profile.displayName) RPU from XML \(metadata.version) (\(metadata.frameCount) frames) while VT encodes HEVC.")
                 dolbyVisionMetadata = nil
                 dolbyVisionRPUProvider = DolbyVisionRPUProvider(
-                    xmlURL: dolbyVisionXMLURL,
+                    metadataSource: metadata,
+                    profile: profile,
+                    expectedFrameCount: estimatedFrames)
+            } else if isAV1 {
+                guard let profile = av1Options?.dvProfile, profile == .profile101 else {
+                    throw NSError(
+                        domain: "DolbyVisionRPU",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "AV1 Dolby Vision encode requires --dv-profile 10 / -dp 10."
+                        ]
+                    )
+                }
+                print("[DoVi] Generating Profile \(profile.displayName) RPU from XML \(metadata.version) (\(metadata.frameCount) frames) while SVT encodes AV1.")
+                dolbyVisionMetadata = nil
+                dolbyVisionRPUProvider = DolbyVisionRPUProvider(
+                    metadataSource: metadata,
                     profile: profile,
                     expectedFrameCount: estimatedFrames)
             } else {
@@ -2879,6 +3190,9 @@ func encodeMOV(
 
     // Dimensions
     let (width, height) = await videoSize(from: asset)
+    let av1NativeDecodeReason = (isAV1 && sourceIsProRes)
+        ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
+        : nil
 
     // Extra audio
     var extraAudioReader: AVAssetReader? = nil
@@ -2901,8 +3215,11 @@ func encodeMOV(
     do {
         // ── Reader ──
         let reader = try AVAssetReader(asset: asset)
+        let useAV1NativeDecode = av1NativeDecodeReason != nil
 
-        let vidSettings: [String: Any]? = isPassthrough ? nil : proResReaderOutputSettings(quality)
+        let vidSettings: [String: Any]? = isPassthrough
+            ? nil
+            : (useAV1NativeDecode ? nil : proResReaderOutputSettings(quality))
         let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: vidSettings)
         videoOut.alwaysCopiesSampleData = false
         if reader.canAdd(videoOut) { reader.add(videoOut) }
@@ -2950,15 +3267,78 @@ func encodeMOV(
             if eaReader.canAdd(extraAudioOut!) { eaReader.add(extraAudioOut!) }
         }
 
-        // ── VT Session (if re-encoding) ──
+        // ── Compression session (if re-encoding) ──
         var vtSession: ProResSession? = nil
+        var av1Bridge: AV1Bridge? = nil
+        var av1FormatDescription: CMFormatDescription? = nil
+        var av1DecodeSession: ProResNativeDecodeSession? = nil
         if !isPassthrough {
-            vtSession = try ProResSession(
-                width: width, height: height,
-                codecType: proResCodecType(quality),
-                fpsHint: Int(fpsInfo.fps.rounded()),
-                colorSpace: effectiveColorSpace,
-                hevcOptions: hevcOptions)
+            if isAV1 {
+                guard let av1Options else {
+                    throw NSError(
+                        domain: "AV1Encode",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "AV1 encode requires --bitrate / -b options."]
+                    )
+                }
+                let bridge = AV1Bridge()
+                let bridgeConfig = makeAV1BridgeConfig(
+                    width: width,
+                    height: height,
+                    fpsInfo: fpsInfo,
+                    options: av1Options,
+                    colorSpace: effectiveColorSpace
+                )
+                guard bridge.open(with: bridgeConfig) else {
+                    throw NSError(
+                        domain: "AV1Encode",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            bridge.lastError ?? "SVT-AV1 encoder failed to open."
+                        ]
+                    )
+                }
+                guard let av1C = bridge.codecConfigurationRecord else {
+                    throw NSError(
+                        domain: "AV1Encode",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "SVT-AV1 did not return an av1C configuration record."]
+                    )
+                }
+                av1Bridge = bridge
+                av1FormatDescription = try makeAV1FormatDescription(
+                    width: width,
+                    height: height,
+                    codecConfigurationRecord: av1C,
+                    colorSpace: effectiveColorSpace
+                )
+                if let av1NativeDecodeReason {
+                    guard let sourceFormatDescription = try await videoTrack.load(.formatDescriptions).first else {
+                        throw NSError(
+                            domain: "AV1Encode",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "Native ProRes decode requires a readable source video format description."
+                            ]
+                        )
+                    }
+                    print("[AV1] \(av1NativeDecodeReason) Falling back to native ProRes decode for the video track.")
+                    av1DecodeSession = try ProResNativeDecodeSession(
+                        asset: asset,
+                        videoTrack: videoTrack,
+                        formatDescription: sourceFormatDescription,
+                        width: width,
+                        height: height
+                    )
+                }
+            } else {
+                vtSession = try ProResSession(
+                    width: width, height: height,
+                    codecType: proResCodecType(quality),
+                    fpsHint: Int(fpsInfo.fps.rounded()),
+                    colorSpace: effectiveColorSpace,
+                    hevcOptions: hevcOptions)
+            }
         }
 
         // For passthrough, keep VideoFrameSource for the DispatchQueue pump.
@@ -2969,13 +3349,16 @@ func encodeMOV(
 
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let writer = try AVAssetWriter(
+            outputURL: outputURL,
+            fileType: isAV1 ? .mp4 : .mov
+        )
         writer.shouldOptimizeForNetworkUse = false
 
         // Video input: nil outputSettings = passthrough of compressed data.
         let vFmtDesc = isPassthrough
             ? (try? await videoTrack.load(.formatDescriptions).first)
-            : nil
+            : av1FormatDescription
         let videoIn = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: vFmtDesc)
         videoIn.expectsMediaDataInRealTime = false
@@ -2986,21 +3369,75 @@ func encodeMOV(
             videoTrack.trackID: videoIn
         ]
 
+        var sourceAudioFormatHint: CMFormatDescription? = nil
+        if let aTrack = audioTrack {
+            sourceAudioFormatHint = try? await aTrack.load(.formatDescriptions).first
+        }
+
+        var extraAudioFormatHint: CMFormatDescription? = nil
+        if let eaTrack = extraAudioTrack {
+            extraAudioFormatHint = try? await eaTrack.load(.formatDescriptions).first
+        }
+
         var audioIn: AVAssetWriterInput? = nil
         if audioOut != nil, let aTrack = audioTrack {
-            audioIn = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
-            audioIn!.expectsMediaDataInRealTime = false
-            if writer.canAdd(audioIn!) {
-                writer.add(audioIn!)
-                sourceTrackInputMap[aTrack.trackID] = audioIn!
+            guard let sourceAudioFormatHint else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Source audio track format description is not readable for passthrough."
+                    ]
+                )
             }
+            let input = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: nil,
+                sourceFormatHint: sourceAudioFormatHint
+            )
+            input.expectsMediaDataInRealTime = false
+            guard writer.canAdd(input) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Writer cannot add the source audio track as passthrough for this output."
+                    ]
+                )
+            }
+            writer.add(input)
+            audioIn = input
+            sourceTrackInputMap[aTrack.trackID] = input
         }
 
         var extraAudioIn: AVAssetWriterInput? = nil
         if extraAudioOut != nil {
-            extraAudioIn = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
-            extraAudioIn!.expectsMediaDataInRealTime = false
-            if writer.canAdd(extraAudioIn!) { writer.add(extraAudioIn!) }
+            guard let extraAudioFormatHint else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Injected audio track format description is not readable for passthrough."
+                    ]
+                )
+            }
+            let input = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: nil,
+                sourceFormatHint: extraAudioFormatHint
+            )
+            input.expectsMediaDataInRealTime = false
+            guard writer.canAdd(input) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Writer cannot add the injected audio track as passthrough for this output."
+                    ]
+                )
+            }
+            writer.add(input)
+            extraAudioIn = input
         }
 
         var tcIn: AVAssetWriterInput? = nil
@@ -3253,6 +3690,233 @@ func encodeMOV(
             let compressedChannel = AsyncChannel<SendableSampleBuffer>(capacity: pipelineCapacity)
             let videoOutRef = SendableRef(videoOut)
 
+            if isAV1 {
+                guard let av1Bridge, let av1FormatDescription else {
+                    failureBox.store(NSError(
+                        domain: "AV1Encode",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "SVT-AV1 bridge was not initialized."]
+                    ))
+                    pixelChannel.finish()
+                    compressedChannel.finish()
+                    return false
+                }
+                let av1Ref = SendableRef(av1Bridge)
+                let av1FormatRef = SendableRef(av1FormatDescription)
+                let fpsInfoRef = SendableRef(fpsInfo)
+                let rpuProviderRef = dolbyVisionRPUProvider.map(SendableRef.init)
+                let av1DecodeSessionRef = av1DecodeSession.map(SendableRef.init)
+
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask(priority: .userInitiated) {
+                        if let decodeSession = av1DecodeSessionRef?.value {
+                            do {
+                                var decodedFrames: Int64 = 0
+                                while (estFrames <= 0 || decodedFrames < estFrames),
+                                      let pixelBuffer = try decodeSession.nextPixelBuffer() {
+                                    await pixelChannel.sendAsync(SendablePixelBuffer(buf: pixelBuffer))
+                                    decodedFrames += 1
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                            pixelChannel.finish()
+                            return
+                        }
+
+                        let vOut = videoOutRef.value
+                        while true {
+                            let wrapped: SendablePixelBuffer? = autoreleasepool {
+                                guard let sample = vOut.copyNextSampleBuffer(),
+                                      let pb = CMSampleBufferGetImageBuffer(sample) else { return nil }
+                                return SendablePixelBuffer(buf: pb)
+                            }
+                            guard let wrapped else { break }
+                            await pixelChannel.sendAsync(wrapped)
+                        }
+                        pixelChannel.finish()
+                    }
+
+                    group.addTask(priority: .userInitiated) {
+                        let bridge = av1Ref.value
+                        let formatDescription = av1FormatRef.value
+                        let fi = fpsInfoRef.value
+                        var frameIdx: Int64 = 0
+                        for await spb in pixelChannel {
+                            guard let packets = bridge.encode(
+                                spb.buf,
+                                presentationIndex: frameIdx
+                            ) else {
+                                failureBox.store(NSError(
+                                    domain: "AV1Encode",
+                                    code: 1,
+                                    userInfo: [NSLocalizedDescriptionKey:
+                                        bridge.lastError ?? "SVT-AV1 encode failed."
+                                    ]
+                                ))
+                                compressedChannel.finish()
+                                return
+                            }
+                            do {
+                                for packet in packets {
+                                    let sample = try makeAV1SampleBuffer(
+                                        packet: packet,
+                                        formatDescription: formatDescription,
+                                        fpsInfo: fi
+                                    )
+                                    await compressedChannel.sendAsync(SendableSampleBuffer(buf: sample))
+                                }
+                            } catch {
+                                failureBox.store(error)
+                                compressedChannel.finish()
+                                return
+                            }
+                            frameIdx += 1
+                        }
+                        guard let tailPackets = bridge.finish() else {
+                            failureBox.store(NSError(
+                                domain: "AV1Encode",
+                                code: 1,
+                                userInfo: [NSLocalizedDescriptionKey:
+                                    bridge.lastError ?? "SVT-AV1 final drain failed."
+                                ]
+                            ))
+                            compressedChannel.finish()
+                            return
+                        }
+                        do {
+                            for packet in tailPackets {
+                                let sample = try makeAV1SampleBuffer(
+                                    packet: packet,
+                                    formatDescription: formatDescription,
+                                    fpsInfo: fi
+                                )
+                                await compressedChannel.sendAsync(SendableSampleBuffer(buf: sample))
+                            }
+                        } catch {
+                            failureBox.store(error)
+                        }
+                        compressedChannel.finish()
+                    }
+
+                    group.addTask(priority: .userInitiated) {
+                        let vIn = videoInRef.value
+                        var frameIndex: Int64 = 0
+                        for await wrapped in compressedChannel {
+                            let sampleToAppend: CMSampleBuffer
+                            if let rpuProvider = rpuProviderRef?.value {
+                                do {
+                                    let pts = CMSampleBufferGetPresentationTimeStamp(wrapped.buf)
+                                    let seconds = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : .nan
+                                    let rpuFrameIndex = seconds.isFinite
+                                        ? max(0, Int64((seconds * fpsInfoRef.value.fps).rounded()))
+                                        : frameIndex
+                                    let rpu = try await rpuProvider.rpu(forFrame: rpuFrameIndex)
+                                    sampleToAppend = try sampleBufferByInjectingAV1RPU(
+                                        wrapped.buf,
+                                        rpuNALUnit: rpu
+                                    )
+                                } catch {
+                                    failureBox.store(error)
+                                    compressedChannel.finish()
+                                    vIn.markAsFinished()
+                                    return
+                                }
+                            } else {
+                                sampleToAppend = wrapped.buf
+                            }
+
+                            while !vIn.isReadyForMoreMediaData {
+                                await Task.yield()
+                            }
+                            guard vIn.append(sampleToAppend) else {
+                                failureBox.store(makeWriterFailure(stage: "AV1 video append failed", writer: writerRef.value, reader: readerRef.value))
+                                compressedChannel.finish()
+                                vIn.markAsFinished()
+                                return
+                            }
+                            progress?.increment()
+                            frameIndex += 1
+                        }
+                        vIn.markAsFinished()
+                    }
+
+                    if let pair = audioPair {
+                        group.addTask(priority: .userInitiated) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startPassthroughPump(pair, queueLabel: "enc.audioQ",
+                                                         trackLabel: "Audio track",
+                                                         writer: writerRef.value,
+                                                         reader: readerRef.value,
+                                                         cont: cont)
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
+                    if let pair = extraAudioPair {
+                        group.addTask(priority: .userInitiated) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startPassthroughPump(pair, queueLabel: "enc.extraAudioQ",
+                                                         trackLabel: extraAudioTrackLabel,
+                                                         writer: writerRef.value,
+                                                         reader: extraAudioReaderRef!.value,
+                                                         cont: cont)
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
+                    if let pair = tcPair {
+                        group.addTask(priority: .utility) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startPassthroughPump(pair, queueLabel: "enc.tcQ",
+                                                         trackLabel: "Timecode track",
+                                                         writer: writerRef.value,
+                                                         reader: readerRef.value,
+                                                         cont: cont)
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
+                    for (idx, pair) in metaPairs.enumerated() {
+                        group.addTask(priority: .utility) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startTimedMetadataPump(pair, queueLabel: "enc.metaQ\(idx)",
+                                                           trackLabel: "Metadata track \(idx + 1)",
+                                                           writer: writerRef.value,
+                                                           reader: readerRef.value,
+                                                           cont: cont)
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
+                    if let pair = dolbyVisionPair {
+                        group.addTask(priority: .utility) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startDolbyVisionMetadataPump(pair,
+                                                                 queueLabel: "enc.doviQ",
+                                                                 writer: writerRef.value,
+                                                                 cont: cont)
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
+                }
+            } else {
             vtSession!.enableAsyncMode(channelCapacity: pipelineCapacity)
             let vtRef = SendableRef(vtSession!)
             let fpsInfoRef = SendableRef(fpsInfo)
@@ -3431,6 +4095,7 @@ func encodeMOV(
                 }
             }
             vtSession?.invalidate()
+            }
         }
 
         progress?.finish()
@@ -3459,7 +4124,20 @@ func encodeMOV(
             )
             try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)
         }
-        if !isHEVC {
+        if let profile = av1Options?.dvProfile,
+           dolbyVisionRPUProvider != nil {
+            let rpuCount = try await dolbyVisionRPUProvider?.waitForCompletion() ?? 0
+            print("[DoVi] Injected \(rpuCount) RPU frames; patching AV1 sample description with dvvC Profile \(profile.displayName).")
+            try patchDolbyVisionAV1ConfigurationAtom(
+                in: outputURL,
+                profile: profile,
+                width: width,
+                height: height,
+                fps: fpsInfo.fps
+            )
+            try removeAV1StaticHDRSampleEntryBoxes(in: outputURL)
+        }
+        if !isHEVC && !isAV1 {
             let masteringDisplay = dolbyVisionMetadata?.masteringDisplayColorVolume
                 ?? effectiveColorSpace?.masteringDisplayColorVolume
             let contentLight = dolbyVisionMetadata?.contentLightLevelInfo
