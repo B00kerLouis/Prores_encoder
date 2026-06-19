@@ -29,7 +29,6 @@ This project is licensed under the GNU Affero General Public License v3.0. See [
 - macOS with the standard command-line build tools installed
 - Xcode project build support
 - The bundled `Frameworks/swiftaaf_Framework.framework` directory kept next to the project file
-- Self-contained runtime with no external `ffmpeg` or `dovi_tool` dependency
 
 ## Build
 
