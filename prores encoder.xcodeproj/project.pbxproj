@@ -6,9 +6,24 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C9169E582FC6F7A1008FA3E8 /* libSvtAv1Enc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */; };
+		C9F100022FE0000100000001 /* libSvtAv1Enc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
-		C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = swiftaaf_Framework.framework; path = Frameworks/swiftaaf_Framework.framework; sourceTree = "<group>"; };
+		C9169E4B2FC6F7A1008FA3E8 /* EbConfigMacros.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbConfigMacros.h; sourceTree = "<group>"; };
+		C9169E4C2FC6F7A1008FA3E8 /* EbDebugMacros.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbDebugMacros.h; sourceTree = "<group>"; };
+		C9169E4D2FC6F7A1008FA3E8 /* EbSvtAv1.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbSvtAv1.h; sourceTree = "<group>"; };
+		C9169E4E2FC6F7A1008FA3E8 /* EbSvtAv1Enc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbSvtAv1Enc.h; sourceTree = "<group>"; };
+		C9169E4F2FC6F7A1008FA3E8 /* EbSvtAv1Formats.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbSvtAv1Formats.h; sourceTree = "<group>"; };
+		C9169E502FC6F7A1008FA3E8 /* EbSvtAv1Metadata.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbSvtAv1Metadata.h; sourceTree = "<group>"; };
+		C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libSvtAv1Enc.a; sourceTree = "<group>"; };
+		C9169E542FC6F7A1008FA3E8 /* LICENSE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = LICENSE.md; sourceTree = "<group>"; };
+		C9169E552FC6F7A1008FA3E8 /* LICENSE-BSD2.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "LICENSE-BSD2.md"; sourceTree = "<group>"; };
 		C96311CE2F73E1A4005C254E /* prores encoder */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "prores encoder"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = swiftaaf_Framework.framework; path = Frameworks/swiftaaf_Framework.framework; sourceTree = "<group>"; };
+		C9F100012FE0000100000001 /* ProResEncoderFramework.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = ProResEncoderFramework.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -24,19 +39,78 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C9169E582FC6F7A1008FA3E8 /* libSvtAv1Enc.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9F100042FE0000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C9F100022FE0000100000001 /* libSvtAv1Enc.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		C9169E512FC6F7A1008FA3E8 /* include */ = {
+			isa = PBXGroup;
+			children = (
+				C9169E4B2FC6F7A1008FA3E8 /* EbConfigMacros.h */,
+				C9169E4C2FC6F7A1008FA3E8 /* EbDebugMacros.h */,
+				C9169E4D2FC6F7A1008FA3E8 /* EbSvtAv1.h */,
+				C9169E4E2FC6F7A1008FA3E8 /* EbSvtAv1Enc.h */,
+				C9169E4F2FC6F7A1008FA3E8 /* EbSvtAv1Formats.h */,
+				C9169E502FC6F7A1008FA3E8 /* EbSvtAv1Metadata.h */,
+			);
+			path = include;
+			sourceTree = "<group>";
+		};
+		C9169E532FC6F7A1008FA3E8 /* lib */ = {
+			isa = PBXGroup;
+			children = (
+				C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */,
+			);
+			path = lib;
+			sourceTree = "<group>";
+		};
+		C9169E562FC6F7A1008FA3E8 /* SVT-AV1 */ = {
+			isa = PBXGroup;
+			children = (
+				C9169E512FC6F7A1008FA3E8 /* include */,
+				C9169E532FC6F7A1008FA3E8 /* lib */,
+				C9169E542FC6F7A1008FA3E8 /* LICENSE.md */,
+				C9169E552FC6F7A1008FA3E8 /* LICENSE-BSD2.md */,
+			);
+			path = "SVT-AV1";
+			sourceTree = "<group>";
+		};
+		C9169E572FC6F7A1008FA3E8 /* ThirdParty */ = {
+			isa = PBXGroup;
+			children = (
+				C9169E562FC6F7A1008FA3E8 /* SVT-AV1 */,
+			);
+			path = ThirdParty;
+			sourceTree = "<group>";
+		};
 		C96311C52F73E1A4005C254E = {
 			isa = PBXGroup;
 			children = (
+				C9169E572FC6F7A1008FA3E8 /* ThirdParty */,
 				C96311D02F73E1A4005C254E /* prores encoder */,
 				C9AAF0022F8A000100000001 /* Frameworks */,
 				C96311CF2F73E1A4005C254E /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		C96311CF2F73E1A4005C254E /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C96311CE2F73E1A4005C254E /* prores encoder */,
+				C9F100012FE0000100000001 /* ProResEncoderFramework.framework */,
+			);
+			name = Products;
 			sourceTree = "<group>";
 		};
 		C9AAF0022F8A000100000001 /* Frameworks */ = {
@@ -45,14 +119,6 @@
 				C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		C96311CF2F73E1A4005C254E /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				C96311CE2F73E1A4005C254E /* prores encoder */,
-			);
-			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -79,6 +145,27 @@
 			productReference = C96311CE2F73E1A4005C254E /* prores encoder */;
 			productType = "com.apple.product-type.tool";
 		};
+		C9F100052FE0000100000001 /* ProResEncoderFramework */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C9F100062FE0000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderFramework" */;
+			buildPhases = (
+				C9F100032FE0000100000001 /* Sources */,
+				C9F100042FE0000100000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C96311D02F73E1A4005C254E /* prores encoder */,
+			);
+			name = ProResEncoderFramework;
+			packageProductDependencies = (
+			);
+			productName = ProResEncoderFramework;
+			productReference = C9F100012FE0000100000001 /* ProResEncoderFramework.framework */;
+			productType = "com.apple.product-type.framework";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -90,6 +177,9 @@
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					C96311CD2F73E1A4005C254E = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					C9F100052FE0000100000001 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
@@ -109,12 +199,20 @@
 			projectRoot = "";
 			targets = (
 				C96311CD2F73E1A4005C254E /* prores encoder */,
+				C9F100052FE0000100000001 /* ProResEncoderFramework */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
 		C96311CA2F73E1A4005C254E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9F100032FE0000100000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -179,9 +277,9 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
-				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = YES;
+				MTL_FAST_MATH = NO;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
+				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -238,7 +336,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MTL_ENABLE_DEBUG_INFO = NO;
-				MTL_FAST_MATH = YES;
+				MTL_FAST_MATH = NO;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -263,14 +361,14 @@
 					"$(SRCROOT)/prores\\ encoder/src_cpp",
 					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited)";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
-				);
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
+					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -282,12 +380,12 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) PRORES_ENCODER_CLI";
 				SWIFT_FORCE_STATIC_LINK_STDLIB = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				SYMROOT = "$(SRCROOT)/Build";
-				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 			};
 			name = Debug;
 		};
@@ -308,14 +406,14 @@
 					"$(SRCROOT)/prores\\ encoder/src_cpp",
 					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited)";
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
-				);
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
+					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-framework",
@@ -327,12 +425,130 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) PRORES_ENCODER_CLI";
 				SWIFT_FORCE_STATIC_LINK_STDLIB = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				SYMROOT = "$(SRCROOT)/Build";
+			};
+			name = Release;
+		};
+		C9F100072FE0000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/src_cpp",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
+				);
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
+					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					swiftaaf_Framework,
+					"-lSvtAv1Enc",
+					"-Wl,-no_warn_duplicate_libraries",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.framework;
+				PRODUCT_MODULE_NAME = ProResEncoderFramework;
+				PRODUCT_NAME = ProResEncoderFramework;
+				SKIP_INSTALL = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				SYMROOT = "$(SRCROOT)/Build";
+			};
+			name = Debug;
+		};
+		C9F100082FE0000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/src_cpp",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
+				);
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/SVT-AV1/lib",
+					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					swiftaaf_Framework,
+					"-lSvtAv1Enc",
+					"-Wl,-no_warn_duplicate_libraries",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.framework;
+				PRODUCT_MODULE_NAME = ProResEncoderFramework;
+				PRODUCT_NAME = ProResEncoderFramework;
+				SKIP_INSTALL = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "prores encoder/include/prores_encoder-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				SYMROOT = "$(SRCROOT)/Build";
 			};
 			name = Release;
 		};
@@ -353,6 +569,15 @@
 			buildConfigurations = (
 				C96311D62F73E1A4005C254E /* Debug */,
 				C96311D72F73E1A4005C254E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C9F100062FE0000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderFramework" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9F100072FE0000100000001 /* Debug */,
+				C9F100082FE0000100000001 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

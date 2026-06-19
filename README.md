@@ -25,6 +25,7 @@ The Release binary is written to:
 
 ```bash
 Build/Release/prores encoder
+Build/Release/default.metallib
 ```
 
 The only non-system build inputs are the bundled `swiftaaf_Framework.framework` and the repo-local SVT-AV1 static library under `ThirdParty/SVT-AV1/lib/`.
@@ -33,13 +34,73 @@ Optional local install:
 
 ```bash
 cp "Build/Release/prores encoder" ~/bin/proresencoder
+cp "Build/Release/default.metallib" ~/bin/default.metallib
 ```
+
+Keep `default.metallib` next to the executable; it contains the Metal-only color conversion and tone-mapping kernels.
+
+## Framework
+
+The `ProResEncoderFramework` target builds the same native Swift/C++/Metal
+encoding pipeline as the CLI:
+
+```bash
+xcodebuild -project "prores encoder.xcodeproj" \
+  -scheme ProResEncoderFramework \
+  -configuration Release build
+```
+
+The framework is written to:
+
+```text
+Build/Release/ProResEncoderFramework.framework
+```
+
+Its public API supports MOV, MXF OP-1a, and MXF OP-Atom output, including the
+same Metal gamut, transfer-function, and peak-luminance conversion used by the
+CLI:
+
+```swift
+import ProResEncoderFramework
+
+let encoder = ProResEncoder()
+let options = ProResEncodeOptions(
+    quality: "422hq",
+    forcedOutputStartTimecode: "01:00:00:00",
+    colorConversion: ProResColorConversion(
+        gamut: .rec709,
+        transferFunction: .gamma24,
+        targetPeakNits: 100
+    )
+)
+
+try await encoder.encode(
+    inputURL: inputURL,
+    outputURL: outputURL,
+    options: options
+)
+```
+
+`default.metallib` is embedded in the framework Resources directory, so
+framework clients do not need to copy the Metal library separately.
+Set `ProResEncodeOptions.useDolbyVisionCodecTag` to `true` for the Framework
+equivalent of CLI `--dv-flag`; its default is `false`.
 
 ## Native Pipeline Architecture
 
 - AV1 encode uses the bundled SVT-AV1 static library.
 - ProRes source decode for AV1 feeds uses `VTDecompressionSession` plus native pixel conversion and chroma downsampling.
 - Dolby Vision RPU generation and writing are implemented in native Swift, then packaged into HEVC NAL units or AV1 metadata OBUs.
+
+Final compressed samples are inspected before the file is accepted:
+
+- HEVC uses the Dolby Verifier-compatible `hvc1` sample entry by default,
+  including streams carrying RPU and `dvvC`.
+- AV1 similarly uses `av01` by default.
+- Pass `--dv-flag` / `-df` to explicitly use `dvh1` for HEVC or `dav1` for
+  AV1 when a downstream workflow requires those codec identifiers.
+- A requested Dolby Vision encode fails instead of returning a file if the
+  finalized stream contains no RPU.
 
 ## Basic Usage
 
@@ -66,12 +127,92 @@ Use `pass` when you want a stream copy where supported:
 proresencoder -i input.mov -q pass -o output.mov
 ```
 
+## Metal Color Conversion and Tone Mapping
+
+The three target-color options are atomic: all three must be present, or encoding is refused.
+
+```bash
+proresencoder -i hdr.mov -o sdr.mov -q 422hq \
+  --gamunt rec709 \
+  --oetf gamma2.4 \
+  --nit 100
+```
+
+Supported targets:
+
+- `--gamunt rec709|rec2020|p3d65`
+- `--oetf gamma2.4|gamma2.6|pq|hlg`
+- `--nit <target peak nits>`, from 1 through 10000
+
+The source gamut and transfer function are read from the input video metadata. Rec.709, Rec.2020, and P3-D65 sources with Gamma 2.4, Gamma 2.6, PQ, or HLG are supported. Pixel processing runs in Metal before ProRes/HEVC/AV1 submission; there is no CPU color-conversion fallback.
+
+`--nit` controls the actual pixel luminance mapping. Already-mastered programme material is mapped with the display-referred ITU-R BT.2446 Method A EETF, using its matched inverse for range expansion. This provides one monotonic mapping for HDR-to-SDR, SDR-to-HDR, HDR-to-HDR, and SDR-to-SDR conversions. Equal source/target peaks remain colorimetric; different peaks preserve tonal separation while mapping the detected source peak to the requested target peak.
+
+When these options are omitted, the encoder keeps its previous behavior and does not perform color conversion or tone mapping.
+
+## CMU Analysis and Inclusion
+
+Generate a Metal-analyzed MDF-like XML sidecar:
+
+```bash
+proresencoder -i hdr.mov -o prores.mov -q 422hq --cmu 1000
+```
+
+CMU analysis writes only the `.cmu.xml` sidecar; it does not create JSON or
+Markdown log files.
+
+Add `--cmu-include` to use the generated XML directly as the native Dolby
+Vision metadata source. Do not also pass `-dovi`; no external XML is required:
+
+```bash
+# ProRes MOV: losslessly remux the encoded video with a PHDR metadata track
+proresencoder -i hdr.mov -o prores_dv.mov -q 422hq \
+  --cmu 1000 --cmu-include
+
+# HEVC Profile 8.1: generate and inject one RPU per frame
+proresencoder -i hdr.mov -o hevc_dv.mov -q hevc -b 50 -dp 81 \
+  --cmu 1000 --cmu-include
+
+# AV1 Profile 10.1: generate and inject one RPU metadata OBU per frame
+proresencoder -i hdr.mov -o av1_dv.mov -q av1 -b 50 -dp 10 \
+  --cmu 1000 --cmu-include
+```
+
+These commands retain the verifier-compatible `hvc1` and `av01` identifiers.
+Add `--dv-flag` (or `-df`) only when `dvh1` or `dav1` is explicitly required:
+
+```bash
+proresencoder -i hdr.mov -o hevc_dv.mov -q hevc -b 50 -dp 81 \
+  -dovi metadata.xml --dv-flag
+proresencoder -i hdr.mov -o av1_dv.mp4 -q av1 -b 50 -dp 10 \
+  -dovi metadata.xml -df
+```
+
+`--cmu` and `-dovi` / `--dolby-vision-xml` are mutually exclusive.
+`--cmu-include` requires `--cmu`, supports MOV output only, and requires the
+matching `-dp` value for HEVC or AV1. For HEVC/AV1, the internally generated
+XML is converted to one native RPU per frame and injected during the encode;
+for ProRes it is embedded as a PHDR metadata track.
+
 ## Output Formats
 
 MOV:
 
 ```bash
 proresencoder -i input.mov -ef mov -q 422hq -o output.mov
+```
+
+MOV timecode behavior:
+
+- If the source already contains a QuickTime TC track, the output MOV keeps that source timecode.
+- If the source has no QuickTime TC track, the output MOV now writes a synthetic QuickTime TC track.
+- The default synthetic start timecode is `01:00:00:00`.
+- Use `-ffoa` to override that synthetic start value when needed.
+
+Example:
+
+```bash
+proresencoder -i input.mov -ef mov -q 422hq -ffoa 10:00:00:00 -o output.mov
 ```
 
 MXF OP-1a:

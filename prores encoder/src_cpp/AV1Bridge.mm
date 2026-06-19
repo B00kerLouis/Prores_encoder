@@ -349,9 +349,11 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     _config.profile = MAIN_PROFILE;
     _config.level = 0;
     _config.tier = 0;
-    _config.color_primaries = EB_CICP_CP_BT_2020;
-    _config.transfer_characteristics = EB_CICP_TC_SMPTE_2084;
-    _config.matrix_coefficients = EB_CICP_MC_BT_2020_NCL;
+    _config.color_primaries = static_cast<EbColorPrimaries>(config.colorPrimaries);
+    _config.transfer_characteristics =
+        static_cast<EbTransferCharacteristics>(config.transferCharacteristics);
+    _config.matrix_coefficients =
+        static_cast<EbMatrixCoefficients>(config.matrixCoefficients);
     _config.color_range = EB_CR_STUDIO_RANGE;
     _config.chroma_sample_position = EB_CSP_VERTICAL;
     _config.rate_control_mode = SVT_AV1_RC_MODE_VBR;

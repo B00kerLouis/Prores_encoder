@@ -426,9 +426,11 @@ private struct NativeDolbyVisionVdrDmData {
 
 private struct NativeDolbyVisionRPUBuilder {
     private let config: NativeDolbyVisionConfig
+    private let profile: DolbyVisionHEVCProfile
 
-    init(config: NativeDolbyVisionConfig) {
+    init(config: NativeDolbyVisionConfig, profile: DolbyVisionHEVCProfile) {
         self.config = config
+        self.profile = profile
     }
 
     func generate() throws -> [Data] {
@@ -465,7 +467,7 @@ private struct NativeDolbyVisionRPUBuilder {
         var writer = NativeDolbyVisionBitWriter()
         writer.write(0x19, bits: 8)
         writeHeader(to: &writer)
-        writeStaticMapping(to: &writer)
+        writeMapping(to: &writer)
         dmData.write(to: &writer)
         writer.byteAlignZero()
         let crc = nativeDolbyVisionCRC32(writer.data.dropFirst())
@@ -522,8 +524,16 @@ private struct NativeDolbyVisionRPUBuilder {
             return nil
         } ?? initialLevel6
 
-        var sourceMinPQ = config.sourceMinPQ ?? 0
-        var sourceMaxPQ = config.sourceMaxPQ ?? 0
+        // Match dovi_tool generation: Profile 8.4 starts from its HLG defaults,
+        // then explicit source levels from the authoring metadata override them.
+        var sourceMinPQ: UInt16 = profile.usesProfile84Mapping ? 62 : 0
+        var sourceMaxPQ: UInt16 = profile.usesProfile84Mapping ? 3079 : 0
+        if let configuredMinPQ = config.sourceMinPQ {
+            sourceMinPQ = configuredMinPQ
+        }
+        if let configuredMaxPQ = config.sourceMaxPQ {
+            sourceMaxPQ = configuredMaxPQ
+        }
         if let level6 {
             let derived = level6.sourceMetaFromLevel6()
             if sourceMinPQ == 0 { sourceMinPQ = derived.0 }
@@ -561,7 +571,15 @@ private struct NativeDolbyVisionRPUBuilder {
         writer.writeBit(false)
     }
 
-    private func writeStaticMapping(to writer: inout NativeDolbyVisionBitWriter) {
+    private func writeMapping(to writer: inout NativeDolbyVisionBitWriter) {
+        if profile.usesProfile84Mapping {
+            writeProfile84Mapping(to: &writer)
+        } else {
+            writeProfile81Mapping(to: &writer)
+        }
+    }
+
+    private func writeProfile81Mapping(to writer: inout NativeDolbyVisionBitWriter) {
         writer.writeUE(0)
         writer.writeUE(0)
         writer.writeUE(0)
@@ -582,6 +600,104 @@ private struct NativeDolbyVisionRPUBuilder {
             writer.write(0, bits: 23)
         }
     }
+
+    private func writeProfile84Mapping(to writer: inout NativeDolbyVisionBitWriter) {
+        writer.writeUE(0) // vdr_rpu_id
+        writer.writeUE(0) // mapping_color_space
+        writer.writeUE(0) // mapping_chroma_format_idc
+
+        writer.writeUE(7)
+        [63, 69, 230, 256, 256, 37, 16, 8, 7].forEach {
+            writer.write(UInt64($0), bits: 10)
+        }
+        for _ in 0..<2 {
+            writer.writeUE(0)
+            writer.write(0, bits: 10)
+            writer.write(1023, bits: 10)
+        }
+
+        writer.writeUE(0) // num_x_partitions_minus1
+        writer.writeUE(0) // num_y_partitions_minus1
+
+        let lumaCoefficientIntegers: [[Int64]] = [
+            [-1, 1, -3],
+            [-1, 1, -2],
+            [0, 0, -1],
+            [0, 0, 0],
+            [0, -2, 1],
+            [6, -14, 8],
+            [13, -30, 16],
+            [28, -62, 34]
+        ]
+        let lumaCoefficients: [[UInt64]] = [
+            [7_978_928, 8_332_855, 4_889_184],
+            [8_269_552, 5_186_604, 3_909_327],
+            [1_317_527, 5_338_528, 7_440_486],
+            [2_119_979, 2_065_496, 2_288_524],
+            [7_982_780, 5_409_990, 1_585_336],
+            [3_460_436, 3_197_328, 615_464],
+            [3_921_968, 6_820_672, 5_546_752],
+            [1_947_392, 1_244_640, 6_094_272]
+        ]
+        for piece in 0..<8 {
+            writer.writeUE(0) // Polynomial mapping
+            writer.writeUE(1) // poly_order_minus1
+            for coefficient in 0..<3 {
+                writer.writeSE(lumaCoefficientIntegers[piece][coefficient])
+                writer.write(lumaCoefficients[piece][coefficient], bits: 23)
+            }
+        }
+
+        writeProfile84ChromaMMR(
+            constantInteger: 1,
+            constant: 1_150_183,
+            coefficientIntegers: [
+                [-1, -2, -5, 2, 5, 9, -12],
+                [-1, -1, 3, -1, -5, -12, 18],
+                [-1, 0, -2, 0, 2, 7, -19]
+            ],
+            coefficients: [
+                [87_355, 6_228_986, 642_500, 1_023_296, 6_569_512, 5_128_216, 4_317_296],
+                [8_299_905, 5_819_931, 2_324_124, 7_273_546, 1_562_484, 3_679_480, 6_357_360],
+                [8_172_981, 3_261_951, 5_970_055, 927_142, 3_525_840, 5_110_348, 6_236_848]
+            ],
+            to: &writer
+        )
+        writeProfile84ChromaMMR(
+            constantInteger: -2,
+            constant: 6_266_112,
+            coefficientIntegers: [
+                [4, 0, 5, -2, -8, -1, 1],
+                [-4, -1, -6, 1, 12, 0, -4],
+                [1, 0, 2, -1, -8, -1, 4]
+            ],
+            coefficients: [
+                [193_104, 5_369_128, 2_553_116, 8_009_648, 2_772_020, 3_122_453, 2_961_581],
+                [6_769_788, 2_565_605, 7_864_496, 4_777_288, 649_616, 7_036_536, 1_666_406],
+                [406_265, 2_901_521, 2_680_224, 146_340, 1_008_052, 4_366_810, 5_080_852]
+            ],
+            to: &writer
+        )
+    }
+
+    private func writeProfile84ChromaMMR(
+        constantInteger: Int64,
+        constant: UInt64,
+        coefficientIntegers: [[Int64]],
+        coefficients: [[UInt64]],
+        to writer: inout NativeDolbyVisionBitWriter
+    ) {
+        writer.writeUE(1) // MMR mapping
+        writer.write(2, bits: 2) // mmr_order_minus1
+        writer.writeSE(constantInteger)
+        writer.write(constant, bits: 23)
+        for order in 0..<3 {
+            for coefficient in 0..<7 {
+                writer.writeSE(coefficientIntegers[order][coefficient])
+                writer.write(coefficients[order][coefficient], bits: 23)
+            }
+        }
+    }
 }
 
 final class DolbyVisionRPUProvider: @unchecked Sendable {
@@ -592,7 +708,7 @@ final class DolbyVisionRPUProvider: @unchecked Sendable {
         self.expectedFrameCount = expectedFrameCount
         task = Task.detached(priority: .userInitiated) {
             let config = try NativeDolbyVisionXMLParser(xmlData: metadataSource.rawXMLData, profile: profile).parse()
-            return try NativeDolbyVisionRPUBuilder(config: config).generate()
+            return try NativeDolbyVisionRPUBuilder(config: config, profile: profile).generate()
         }
     }
 

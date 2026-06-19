@@ -15,7 +15,12 @@ public final class FCP7XMLTimelineWriter {
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try data.write(to: url, options: .atomic)
+            // Atomic Data.write uses a sibling replacement file, which can be
+            // rejected on externally mounted or provenance-protected media.
+            // The XML is already fully materialized in memory, so a direct
+            // write is sufficient and works in the same locations as media
+            // and AAF outputs.
+            try data.write(to: url)
             return true
         } catch {
             print("[XML] Failed to write XML timeline: \(error.localizedDescription)")

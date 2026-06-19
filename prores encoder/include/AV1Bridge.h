@@ -11,6 +11,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) int32_t fpsNum;
 @property (nonatomic) int32_t fpsDen;
 @property (nonatomic) int64_t bitrateBitsPerSecond;
+@property (nonatomic) int32_t colorPrimaries;
+@property (nonatomic) int32_t transferCharacteristics;
+@property (nonatomic) int32_t matrixCoefficients;
 @property (nonatomic, nullable, copy) NSData *masteringDisplayColorVolume;
 @property (nonatomic, nullable, copy) NSData *contentLightLevelInfo;
 @end

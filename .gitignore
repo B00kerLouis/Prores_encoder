@@ -26,3 +26,9 @@ dist/
 *.wav
 *.aif
 *.aiff
+*.h265
+*.obu
+*.bin
+BuildFramework/
+TestOutputs/
+/Build/

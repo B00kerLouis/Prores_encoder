@@ -42,6 +42,9 @@ func makeAV1BridgeConfig(
     config.fpsNum = Int32(fpsInfo.numerator)
     config.fpsDen = Int32(fpsInfo.denominator)
     config.bitrateBitsPerSecond = Int64(options.bitrateBitsPerSecond)
+    config.colorPrimaries = av1ColorPrimaries(from: colorSpace)
+    config.transferCharacteristics = av1TransferCharacteristics(from: colorSpace)
+    config.matrixCoefficients = av1MatrixCoefficients(from: colorSpace)
     // Keep AV1 static HDR signaling at the container/sample-entry layer.
     // In-band hdr_mdcv/clli metadata OBU on key frames trips DV container checks.
     config.masteringDisplayColorVolume = nil
@@ -60,16 +63,19 @@ func makeAV1FormatDescription(
             "av1C": codecConfigurationRecord
         ],
         kCMFormatDescriptionExtension_ColorPrimaries as String:
-            kCMFormatDescriptionColorPrimaries_ITU_R_2020,
+            (colorSpace?.primaries ?? (kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String)),
         kCMFormatDescriptionExtension_TransferFunction as String:
-            kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ,
+            (colorSpace?.transfer ?? (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)),
         kCMFormatDescriptionExtension_YCbCrMatrix as String:
-            kCMFormatDescriptionYCbCrMatrix_ITU_R_2020,
+            (colorSpace?.matrix ?? (kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String)),
         kCMFormatDescriptionExtension_FullRangeVideo as String:
             kCFBooleanFalse as Any
     ]
     if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
         extensions[kCMFormatDescriptionExtension_MasteringDisplayColorVolume as String] = masteringDisplay
+    }
+    if let contentLight = colorSpace?.contentLightLevelInfo {
+        extensions[kCMFormatDescriptionExtension_ContentLightLevelInfo as String] = contentLight
     }
 
     var formatDescription: CMFormatDescription?
@@ -89,6 +95,33 @@ func makeAV1FormatDescription(
         )
     }
     return formatDescription
+}
+
+private func av1ColorPrimaries(from colorSpace: SourceColorSpace?) -> Int32 {
+    if colorSpace?.primaries == (kCMFormatDescriptionColorPrimaries_ITU_R_709_2 as String) {
+        return 1
+    }
+    if colorSpace?.primaries == (kCMFormatDescriptionColorPrimaries_P3_D65 as String) {
+        return 12
+    }
+    return 9
+}
+
+private func av1TransferCharacteristics(from colorSpace: SourceColorSpace?) -> Int32 {
+    if colorSpace?.transfer == (kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String) {
+        return 1
+    }
+    if colorSpace?.transfer == (kCMFormatDescriptionTransferFunction_SMPTE_ST_428_1 as String) {
+        return 17
+    }
+    if colorSpace?.transfer == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String) {
+        return 18
+    }
+    return 16
+}
+
+private func av1MatrixCoefficients(from colorSpace: SourceColorSpace?) -> Int32 {
+    colorSpace?.matrix == (kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2 as String) ? 1 : 9
 }
 
 func makeAV1SampleBuffer(
@@ -336,6 +369,58 @@ func sampleBufferByInjectingAV1RPU(
     }
     copySampleAttachments(from: sampleBuffer, to: injectedSample)
     return injectedSample
+}
+
+func sampleBufferContainsAV1DolbyVisionRPU(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    guard let data = compressedData(from: sampleBuffer) else {
+        return false
+    }
+    var cursor = data.startIndex
+    while cursor < data.endIndex {
+        let header = data[cursor]
+        cursor = data.index(after: cursor)
+
+        let obuType = (header >> 3) & 0x0f
+        let hasExtension = (header & 0x04) != 0
+        let hasSize = (header & 0x02) != 0
+        if hasExtension {
+            guard cursor < data.endIndex else { return false }
+            cursor = data.index(after: cursor)
+        }
+
+        let payloadSize: Int
+        if hasSize {
+            guard let parsedSize = try? readAV1LEB128(in: data, cursor: &cursor) else {
+                return false
+            }
+            payloadSize = parsedSize
+        } else {
+            payloadSize = data.distance(from: cursor, to: data.endIndex)
+        }
+        guard payloadSize >= 0,
+              let payloadEnd = data.index(
+                cursor,
+                offsetBy: payloadSize,
+                limitedBy: data.endIndex
+              ) else {
+            return false
+        }
+
+        if obuType == 5 {
+            var metadataCursor = cursor
+            if let metadataType = try? readAV1LEB128(
+                in: data,
+                cursor: &metadataCursor
+            ),
+               metadataType == 4,
+               metadataCursor < payloadEnd,
+               data[metadataCursor] == 0xb5 {
+                return true
+            }
+        }
+        cursor = payloadEnd
+    }
+    return false
 }
 
 private func av1MetadataInsertionOffset(in data: Data) throws -> Data.Index {

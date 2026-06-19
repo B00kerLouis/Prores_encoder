@@ -6,6 +6,8 @@ import Foundation
 import AVFoundation
 import Metal
 
+#if PRORES_ENCODER_CLI
+
 // MARK: - CLI Config (Sendable, passed by value)
 
 enum AAFMode: Sendable {
@@ -43,9 +45,14 @@ struct CLIConfig: Sendable {
     let audioCHperFile: Int
     let aafMode:        AAFMode
     let audioReplace:   Bool
+    let forcedOutputStartTimecode: String?
     let dolbyVisionXMLURL: URL?
     let hevcOptions:    HEVCEncodeOptions?
     let av1Options:     AV1EncodeOptions?
+    let colorTransform: ColorTransformRequest?
+    let cmuMasteringNits: Float?
+    let cmuInclude:     Bool
+    let dvFlag:         Bool
 }
 
 // MARK: - Entry Point
@@ -68,11 +75,18 @@ enum ProResEncoderCLI {
         var aafMode: AAFMode = .none
         var audioCHperFile  = 1
         var audioReplace    = false
+        var forcedOutputStartTimecode: String? = nil
         var dolbyVisionXMLPath = ""
         var videoBitrateMbps: Double? = nil
         var dolbyVisionProfile: DolbyVisionHEVCProfile? = nil
         var transformMode: TransformMode? = nil
         var mediaSearchPaths: [String] = []
+        var targetGamut: String? = nil
+        var targetOETF: String? = nil
+        var targetNits: String? = nil
+        var cmuMasteringNits: Float? = nil
+        var cmuInclude = false
+        var dvFlag = false
 
         let args = CommandLine.arguments
         var idx = 1
@@ -108,6 +122,8 @@ enum ProResEncoderCLI {
                 extraAudioPath = requireValue(for: args[idx])
             case "-ar", "--audio-replace":
                 audioReplace = true
+            case "-ffoa", "--start-timecode", "--mov-start-timecode":
+                forcedOutputStartTimecode = requireValue(for: args[idx])
             case "-dovi", "--dolby-vision-xml":
                 dolbyVisionXMLPath = requireValue(for: args[idx])
             case "-b", "--bitrate":
@@ -120,15 +136,15 @@ enum ProResEncoderCLI {
             case "-dp", "--dv-profile":
                 let raw = requireValue(for: args[idx])
                 guard let parsed = DolbyVisionHEVCProfile(argument: raw) else {
-                    print("[Error] --dv-profile / -dp supports 81 for HEVC Profile 8.1, and 10 for AV1 Profile 10.1 (-q av1 only).")
+                    print("[Error] --dv-profile / -dp supports HEVC 81/84 and AV1 10/104.")
                     exit(1)
                 }
                 dolbyVisionProfile = parsed
-            case "-ef", "-export-format", "--export-format":
+            case "-ef", "--export-format":
                 exportFormat = requireValue(for: args[idx]).lowercased()
-            case "-ea", "-export-aaf", "--export-aaf", "--aaf":
+            case "-ea", "--export-aaf", "--aaf":
                 aafMode = .sequence
-            case "-ea-all", "-export-aaf-all", "--export-aaf-all":
+            case "-ea-all", "--export-aaf-all":
                 aafMode = .perClip
             case "--audio-ch-per-file":
                 let raw = requireValue(for: args[idx])
@@ -148,6 +164,24 @@ enum ProResEncoderCLI {
                 }
             case "--media-search-path":
                 mediaSearchPaths.append(requireValue(for: args[idx]))
+            case "--gamunt":
+                targetGamut = requireValue(for: args[idx])
+            case "--oetf":
+                targetOETF = requireValue(for: args[idx])
+            case "--nit":
+                targetNits = requireValue(for: args[idx])
+            case "--cmu":
+                let raw = requireValue(for: args[idx])
+                do {
+                    cmuMasteringNits = try cmuParseMasteringBrightness(raw)
+                } catch {
+                    print("[Error] \(error.localizedDescription)")
+                    exit(1)
+                }
+            case "--cmu-include", "-ci":
+                cmuInclude = true
+            case "--dv-flag", "-df":
+                dvFlag = true
             default:
                 print("[Error] Unknown argument: \(args[idx])")
                 printUsage()
@@ -167,8 +201,55 @@ enum ProResEncoderCLI {
             print("[Error] --audio-ch-per-file must be a positive integer.")
             exit(1)
         }
+        if cmuMasteringNits != nil && !dolbyVisionXMLPath.isEmpty {
+            print("[Error] --cmu and -dovi / --dolby-vision-xml are mutually exclusive.")
+            exit(1)
+        }
+        if cmuInclude && cmuMasteringNits == nil {
+            print("[Error] --cmu-include requires --cmu <nits>.")
+            exit(1)
+        }
+        if cmuInclude && exportFormat != "mov" {
+            print("[Error] --cmu-include is supported only with MOV output.")
+            exit(1)
+        }
+
+        let colorArgumentCount = [targetGamut, targetOETF, targetNits]
+            .compactMap { $0 }
+            .count
+        if colorArgumentCount != 0 && colorArgumentCount != 3 {
+            print("[Error] \(ColorTransformError.incompleteArguments.localizedDescription)")
+            exit(1)
+        }
+        let colorTransform: ColorTransformRequest?
+        do {
+            if let targetGamut, let targetOETF, let targetNits {
+                colorTransform = try ColorTransformRequest(
+                    gamut: targetGamut,
+                    oetf: targetOETF,
+                    nits: targetNits
+                )
+            } else {
+                colorTransform = nil
+            }
+        } catch {
+            print("[Error] \(error.localizedDescription)")
+            exit(1)
+        }
 
         if let transformMode {
+            if colorTransform != nil {
+                print("[Error] Color conversion parameters are valid only for encoding, not -trans timeline conversion.")
+                exit(1)
+            }
+            if cmuMasteringNits != nil {
+                print("[Error] --cmu is available only while encoding media, not with -trans timeline conversion.")
+                exit(1)
+            }
+            if dvFlag {
+                print("[Error] --dv-flag / -df is available only while encoding HEVC or AV1 media.")
+                exit(1)
+            }
             guard !inputFilePath.isEmpty,
                   inputFolderPath.isEmpty,
                   inputXMLPath.isEmpty,
@@ -218,9 +299,32 @@ enum ProResEncoderCLI {
             printUsage()
             exit(1)
         }
+        if colorTransform != nil && quality == "pass" {
+            print("[Error] \(ColorTransformError.passthroughNotSupported.localizedDescription)")
+            exit(1)
+        }
+        if colorTransform != nil
+            && !dolbyVisionXMLPath.isEmpty
+            && dolbyVisionProfile?.usesHLGBaseLayer != true {
+            print("[Error] \(ColorTransformError.dolbyVisionNotSupported.localizedDescription)")
+            exit(1)
+        }
         let wantsHEVC = isHEVCQuality(quality)
         let wantsAV1 = isAV1Quality(quality)
         let wantsCompressedHDR = wantsHEVC || wantsAV1
+        let hasDolbyVisionMetadataSource = !dolbyVisionXMLPath.isEmpty || cmuInclude
+        if let profile = dolbyVisionProfile,
+           profile.usesHLGBaseLayer,
+           colorTransform?.isDolbyVisionHLGCompatible != true {
+            print("[Error] -dp \(profile.rawValue) requires --gamunt rec2020, rec2020lm, or p3d65 together with --oetf hlg.")
+            exit(1)
+        }
+        if let profile = dolbyVisionProfile,
+           !profile.usesHLGBaseLayer,
+           colorTransform?.outputOETF == .hlg {
+            print("[Error] -dp \(profile.rawValue) requires a PQ base layer; use -dp 84 for HEVC HLG or -dp 104 for AV1 HLG.")
+            exit(1)
+        }
         if wantsCompressedHDR {
             guard exportFormat == "mov" else {
                 print("[Error] -q \(quality) is supported only with MOV output.")
@@ -234,21 +338,21 @@ enum ProResEncoderCLI {
                 print("[Error] -q \(quality) requires --bitrate / -b <Mb/s>.")
                 exit(1)
             }
-            if dolbyVisionProfile != nil && dolbyVisionXMLPath.isEmpty {
-                print("[Error] --dv-profile / -dp requires -dovi / --dolby-vision-xml.")
+            if dolbyVisionProfile != nil && !hasDolbyVisionMetadataSource {
+                print("[Error] --dv-profile / -dp requires either external -dovi XML or internally generated --cmu <nits> --cmu-include metadata.")
                 exit(1)
             }
-            if wantsHEVC, let profile = dolbyVisionProfile, profile != .profile81 {
-                print("[Error] -q hevc with -dovi supports only --dv-profile 81 / -dp 81.")
+            if wantsHEVC, let profile = dolbyVisionProfile, !profile.isHEVCProfile {
+                print("[Error] -q hevc with Dolby Vision metadata supports --dv-profile 81 or 84.")
                 exit(1)
             }
-            if wantsAV1, let profile = dolbyVisionProfile, profile != .profile101 {
-                print("[Error] -q av1 with -dovi supports only --dv-profile 10 / -dp 10.")
+            if wantsAV1, let profile = dolbyVisionProfile, !profile.isAV1Profile {
+                print("[Error] -q av1 with Dolby Vision metadata supports --dv-profile 10 or 104.")
                 exit(1)
             }
-            if !dolbyVisionXMLPath.isEmpty && dolbyVisionProfile == nil {
-                let required = wantsAV1 ? "10 / -dp 10" : "81 / -dp 81"
-                print("[Error] -q \(quality) with -dovi requires --dv-profile \(required).")
+            if hasDolbyVisionMetadataSource && dolbyVisionProfile == nil {
+                let required = wantsAV1 ? "10 or 104" : "81 or 84"
+                print("[Error] -q \(quality) with Dolby Vision metadata requires --dv-profile \(required).")
                 exit(1)
             }
         } else {
@@ -260,9 +364,17 @@ enum ProResEncoderCLI {
                 print("[Error] --dv-profile / -dp is available only with -q hevc or -q av1.")
                 exit(1)
             }
+            if dvFlag {
+                print("[Error] --dv-flag / -df is available only with -q hevc or -q av1.")
+                exit(1)
+            }
         }
         if exportFormat == "mov" && aafMode != .none {
             print("[Error] AAF (-ea / -ea-all) is only available with MXF output formats (op1a / opatom)."); exit(1)
+        }
+        if forcedOutputStartTimecode != nil && exportFormat != "mov" {
+            print("[Error] -ffoa / --start-timecode is supported only with MOV output.")
+            exit(1)
         }
         if !dolbyVisionXMLPath.isEmpty {
             guard exportFormat == "mov" else {
@@ -299,9 +411,14 @@ enum ProResEncoderCLI {
         let config = CLIConfig(quality: quality, exportFormat: exportFormat,
                                audioCHperFile: audioCHperFile, aafMode: aafMode,
                                audioReplace: audioReplace,
+                               forcedOutputStartTimecode: forcedOutputStartTimecode,
                                dolbyVisionXMLURL: dolbyVisionXMLURL,
                                hevcOptions: hevcOptions,
-                               av1Options: av1Options)
+                               av1Options: av1Options,
+                               colorTransform: colorTransform,
+                               cmuMasteringNits: cmuMasteringNits,
+                               cmuInclude: cmuInclude,
+                               dvFlag: dvFlag)
         let fm = FileManager.default
         let outputURL = URL(fileURLWithPath: outputPath)
         let isOutFile = !outputURL.pathExtension.isEmpty
@@ -382,19 +499,28 @@ enum ProResEncoderCLI {
             }
             let asset = AVURLAsset(url: inputURL)
             let baseName = inputURL.deletingPathExtension().lastPathComponent
+            let movieExtension = wantsAV1
+                || (quality == "pass" && inputURL.pathExtension.lowercased() == "mp4")
+                ? "mp4"
+                : "mov"
             if isOutFile {
-                let finalOut = outputURL.deletingPathExtension().appendingPathExtension("mov")
+                let finalOut = outputURL
+                    .deletingPathExtension()
+                    .appendingPathExtension(movieExtension)
                 _ = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
                                              extraAudioURL: extraAudioURL, assetName: baseName,
                                              config: config)
+                exit(encodingOutputExists(for: finalOut, config: config) ? 0 : 1)
             } else {
                 try? fm.createDirectory(at: outputURL, withIntermediateDirectories: true)
-                let finalOut = outputURL.appendingPathComponent("\(baseName).mov")
+                let finalOut = outputURL.appendingPathComponent(
+                    "\(baseName).\(movieExtension)"
+                )
                 _ = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
                                              extraAudioURL: extraAudioURL, assetName: baseName,
                                              config: config)
+                exit(encodingOutputExists(for: finalOut, config: config) ? 0 : 1)
             }
-            exit(0)
         }
 
         // ── Folder Batch Mode ──
@@ -414,7 +540,13 @@ enum ProResEncoderCLI {
             var sequencedAAFClips: [AAFClipInfo] = []
             for file in videos {
                 let baseName = file.deletingPathExtension().lastPathComponent
-                let finalOut = outputURL.appendingPathComponent("\(baseName).mov")
+                let movieExtension = wantsAV1
+                    || (quality == "pass" && file.pathExtension.lowercased() == "mp4")
+                    ? "mp4"
+                    : "mov"
+                let finalOut = outputURL.appendingPathComponent(
+                    "\(baseName).\(movieExtension)"
+                )
                 let asset    = AVURLAsset(url: file)
                 if let clip = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
                                                        extraAudioURL: nil, assetName: baseName,
@@ -455,10 +587,12 @@ private func processSingleVideo(
         status = "-> Lossless remux (pass-through)"
     } else if isHEVCQuality(config.quality), let hevcOptions = config.hevcOptions {
         let dvSuffix = hevcOptions.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
-        status = "-> Encoding HDR10 HEVC \(String(format: "%.2f", hevcOptions.bitrateMbps)) Mb/s\(dvSuffix)"
+        let colorLabel = config.colorTransform == nil ? "HDR10 HEVC" : "HEVC Main10"
+        status = "-> Encoding \(colorLabel) \(String(format: "%.2f", hevcOptions.bitrateMbps)) Mb/s\(dvSuffix)"
     } else if isAV1Quality(config.quality), let av1Options = config.av1Options {
         let dvSuffix = av1Options.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
-        status = "-> Encoding HDR10 AV1 \(String(format: "%.2f", av1Options.bitrateMbps)) Mb/s\(dvSuffix)"
+        let colorLabel = config.colorTransform == nil ? "HDR10 AV1" : "AV1 Main10"
+        status = "-> Encoding \(colorLabel) \(String(format: "%.2f", av1Options.bitrateMbps)) Mb/s\(dvSuffix)"
     } else {
         status = "-> Encoding ProRes \(config.quality.uppercased())"
     }
@@ -472,6 +606,20 @@ private func processSingleVideo(
 
     let outputDir = outputURL.deletingLastPathComponent()
     try? fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+    if let masteringPeakNits = config.cmuMasteringNits {
+        do {
+            try await cmuPreflight(
+                inputAsset: inputAsset,
+                quality: config.quality,
+                colorTransform: config.colorTransform,
+                masteringPeakNits: masteringPeakNits
+            )
+        } catch {
+            print("[Failed] CMU preflight: \(error.localizedDescription)")
+            return nil
+        }
+    }
 
     // ── MXF path ──
     if isMXF {
@@ -496,12 +644,31 @@ private func processSingleVideo(
             quality: config.quality,
             exportFormat: config.exportFormat,
             audioCHperFile: config.audioCHperFile,
-            audioOverrideURL: config.audioReplace ? extraAudioURL : nil)
+            audioOverrideURL: config.audioReplace ? extraAudioURL : nil,
+            colorTransform: config.colorTransform)
 
         if result.success {
             print("[MXF] Encoded \(result.framesEncoded) frames at " +
                   "\(String(format: "%.1f", result.fps)) fps")
             print("[Success] MXF written for '\(assetName)'.")
+
+            if let masteringPeakNits = config.cmuMasteringNits,
+               let videoPath = result.paths.first(where: { $0.hasSuffix("_v.mxf") })
+                    ?? result.paths.first(where: { $0.hasSuffix(".mxf") }) {
+                do {
+                    try await runCMUAnalysisAfterEncode(
+                        inputAsset: inputAsset,
+                        encodedOutputURL: URL(fileURLWithPath: videoPath),
+                        sidecarBaseURL: outputDir.appendingPathComponent(basename),
+                        quality: config.quality,
+                        masteringPeakNits: masteringPeakNits,
+                        forcedStartTimecode: config.forcedOutputStartTimecode
+                    )
+                } catch {
+                    print("[Failed] CMU analysis: \(error.localizedDescription)")
+                    return nil
+                }
+            }
 
             if config.aafMode != .none && !result.paths.isEmpty {
                 let fpsI = await framerateInfo(from: inputAsset)
@@ -581,19 +748,74 @@ private func processSingleVideo(
     } else { cs = nil }
     let fpsI = await framerateInfo(from: inputAsset)
 
+    var generatedCMUArtifacts: CMUOutputArtifacts? = nil
+    var dolbyVisionXMLURL = config.dolbyVisionXMLURL
+    if config.cmuInclude,
+       let masteringPeakNits = config.cmuMasteringNits,
+       isHEVCQuality(config.quality) || isAV1Quality(config.quality) {
+        do {
+            let artifacts = try await runCMUAnalysisBeforeCompressedEncode(
+                inputAsset: inputAsset,
+                sidecarBaseURL: outputURL,
+                quality: config.quality,
+                masteringPeakNits: masteringPeakNits,
+                forcedStartTimecode: config.forcedOutputStartTimecode
+            )
+            generatedCMUArtifacts = artifacts
+            dolbyVisionXMLURL = artifacts.xmlURL
+        } catch {
+            print("[Failed] CMU analysis: \(error.localizedDescription)")
+            try? fm.removeItem(at: outputURL)
+            return nil
+        }
+    }
+
     let success = await encodeMOV(
         asset: inputAsset, outputURL: outputURL,
         quality: config.quality, extraAudioURL: extraAudioURL,
         audioReplace: config.audioReplace,
-        dolbyVisionXMLURL: config.dolbyVisionXMLURL,
+        forcedOutputStartTimecode: config.forcedOutputStartTimecode,
+        dolbyVisionXMLURL: dolbyVisionXMLURL,
         hevcOptions: config.hevcOptions,
         av1Options: config.av1Options,
-        colorSpace: cs, fpsInfo: fpsI)
+        colorSpace: cs, fpsInfo: fpsI,
+        colorTransform: config.colorTransform,
+        useDolbyVisionCodecTag: config.dvFlag)
 
     guard success else {
         print("[Failed] \(assetName)")
         try? fm.removeItem(at: outputURL)
         return nil
+    }
+    if let masteringPeakNits = config.cmuMasteringNits,
+       generatedCMUArtifacts == nil {
+        do {
+            let artifacts = try await runCMUAnalysisAfterEncode(
+                inputAsset: inputAsset,
+                encodedOutputURL: outputURL,
+                sidecarBaseURL: outputURL,
+                quality: config.quality,
+                masteringPeakNits: masteringPeakNits,
+                forcedStartTimecode: config.forcedOutputStartTimecode
+            )
+            generatedCMUArtifacts = artifacts
+        } catch {
+            print("[Failed] CMU analysis: \(error.localizedDescription)")
+            try? fm.removeItem(at: outputURL)
+            return nil
+        }
+    }
+    if config.cmuInclude,
+       !isHEVCQuality(config.quality),
+       !isAV1Quality(config.quality),
+       let xmlURL = generatedCMUArtifacts?.xmlURL {
+        guard await includeGeneratedCMUXMLInProResMOV(
+            outputURL: outputURL,
+            xmlURL: xmlURL
+        ) else {
+            try? fm.removeItem(at: outputURL)
+            return nil
+        }
     }
     print("[Success] -> \(outputURL.path)")
     return nil
@@ -612,6 +834,31 @@ private func uniqueSearchPaths(for inputURL: URL, explicitPaths: [String]) -> [S
         }
     }
     return result
+}
+
+private func fileHasContent(_ url: URL) -> Bool {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+          let fileSize = attributes[.size] as? NSNumber else {
+        return false
+    }
+    return fileSize.int64Value > 0
+}
+
+private func encodingOutputExists(for requestedURL: URL, config: CLIConfig) -> Bool {
+    guard config.exportFormat != "mov" else {
+        return fileHasContent(requestedURL)
+    }
+    let directory = requestedURL.deletingLastPathComponent()
+    let basename = requestedURL.deletingPathExtension().lastPathComponent
+    let candidates = (try? FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.fileSizeKey]
+    )) ?? []
+    return candidates.contains {
+        $0.pathExtension.lowercased() == "mxf"
+            && $0.deletingPathExtension().lastPathComponent.hasPrefix(basename)
+            && fileHasContent($0)
+    }
 }
 
 private func timelineDescriptor(
@@ -700,106 +947,6 @@ private func timelineExportPresetCandidates(for quality: String) -> [String] {
         return [AVAssetExportPresetAppleProRes422LPCM,
                 AVAssetExportPresetHighestQuality]
     }
-}
-
-func compositionVideoTrackIndex(_ track: AVCompositionTrack) -> Int {
-    let rawValue = Int(track.trackID)
-    if rawValue >= 1001 {
-        return rawValue - 1001
-    }
-    return rawValue
-}
-
-func compositionTrackIsActive(_ track: AVCompositionTrack, over timeRange: CMTimeRange) -> Bool {
-    for segment in track.segments where !segment.isEmpty {
-        let target = segment.timeMapping.target
-        let intersection = CMTimeRangeGetIntersection(target, otherRange: timeRange)
-        if intersection.duration > .zero {
-            return true
-        }
-    }
-    return false
-}
-
-func buildTimelineVideoComposition(
-    composition: AVMutableComposition,
-    descriptor: TimelineDescriptor
-) -> AVMutableVideoComposition {
-    let videoTracks = composition.tracks(withMediaType: .video)
-    let videoComposition = AVMutableVideoComposition()
-    videoComposition.frameDuration = descriptor.frameRate.value > 0 && descriptor.frameRate.timescale > 0
-        ? descriptor.frameRate
-        : CMTime(value: 1, timescale: 24)
-    videoComposition.renderSize = descriptor.resolution.width > 0 && descriptor.resolution.height > 0
-        ? descriptor.resolution
-        : CGSize(width: 1920, height: 1080)
-
-    guard !videoTracks.isEmpty else {
-        videoComposition.instructions = []
-        return videoComposition
-    }
-
-    var boundaries: [CMTime] = [.zero]
-    for track in videoTracks {
-        for segment in track.segments where !segment.isEmpty {
-            boundaries.append(segment.timeMapping.target.start)
-            boundaries.append(segment.timeMapping.target.end)
-        }
-    }
-
-    let sortedBoundaries = boundaries.sorted { lhs, rhs in
-        CMTimeCompare(lhs, rhs) < 0
-    }.reduce(into: [CMTime]()) { partial, time in
-        if let last = partial.last, CMTimeCompare(last, time) == 0 {
-            return
-        }
-        partial.append(time)
-    }
-
-    var instructions: [AVVideoCompositionInstructionProtocol] = []
-    if sortedBoundaries.count >= 2 {
-        for idx in 0..<(sortedBoundaries.count - 1) {
-            let start = sortedBoundaries[idx]
-            let end = sortedBoundaries[idx + 1]
-            guard CMTimeCompare(end, start) > 0 else { continue }
-
-            let timeRange = CMTimeRange(start: start, end: end)
-            let activeTracks = videoTracks
-                .filter { compositionTrackIsActive($0, over: timeRange) }
-                .sorted { lhs, rhs in
-                    compositionVideoTrackIndex(lhs) > compositionVideoTrackIndex(rhs)
-                }
-
-            guard !activeTracks.isEmpty else { continue }
-
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = timeRange
-            instruction.enablePostProcessing = true
-            instruction.layerInstructions = activeTracks.map { track in
-                let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-                layer.setTransform(track.preferredTransform, at: start)
-                return layer
-            }
-            instructions.append(instruction)
-        }
-    }
-
-    if instructions.isEmpty {
-        let fallbackInstruction = AVMutableVideoCompositionInstruction()
-        fallbackInstruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
-        let activeTracks = videoTracks.sorted { lhs, rhs in
-            compositionVideoTrackIndex(lhs) > compositionVideoTrackIndex(rhs)
-        }
-        fallbackInstruction.layerInstructions = activeTracks.map { track in
-            let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-            layer.setTransform(track.preferredTransform, at: .zero)
-            return layer
-        }
-        instructions = [fallbackInstruction]
-    }
-
-    videoComposition.instructions = instructions
-    return videoComposition
 }
 
 private func exportTimelineComposition(
@@ -892,12 +1039,36 @@ private func processTimelineComposition(
         composition: composition,
         descriptor: descriptor,
         outputURL: outputURL,
-        quality: config.quality)
+        quality: config.quality,
+        forcedOutputStartTimecode: config.forcedOutputStartTimecode,
+        colorTransform: config.colorTransform)
 
     guard success else {
         try? fm.removeItem(at: outputURL)
         print("[Failed] \(assetName)")
         return false
+    }
+    var generatedCMUArtifacts: CMUOutputArtifacts? = nil
+    if let masteringPeakNits = config.cmuMasteringNits {
+        do {
+            generatedCMUArtifacts = try await runCMUAnalysisOnOutput(
+                outputURL: outputURL,
+                masteringPeakNits: masteringPeakNits,
+                forcedStartTimecode: config.forcedOutputStartTimecode
+            )
+        } catch {
+            print("[Failed] CMU analysis: \(error.localizedDescription)")
+            return false
+        }
+    }
+    if config.cmuInclude,
+       let xmlURL = generatedCMUArtifacts?.xmlURL {
+        guard await includeGeneratedCMUXMLInProResMOV(
+            outputURL: outputURL,
+            xmlURL: xmlURL
+        ) else {
+            return false
+        }
     }
     print("[Success] -> \(outputURL.path)")
     return true
@@ -927,12 +1098,21 @@ private func printUsage() {
     Options:
       -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc|av1>  Output codec/quality (default: 422hq)
       -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
-      -dp, --dv-profile <81|10>      Dolby Vision profile: 81 for HEVC (-q hevc only); 10 for AV1 Profile 10.1 (-q av1 only)
+      -dp, --dv-profile <81|84|10|104> Dolby Vision profile: HEVC 8.1/8.4 or AV1 10.1/10.4
+      -df, --dv-flag                  Label HEVC as dvh1 or AV1 as dav1; default is verifier-compatible hvc1/av01
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
+      -ffoa, --start-timecode <TC>    MOV only; synthesize QuickTime TC from this start value when the source has no TC (default: 01:00:00:00)
       -dovi, --dolby-vision-xml <file> MOV only; embed ProRes PHDR metadata, or generate RPU for -q hevc/-q av1
+      --gamunt <rec709|rec2020|rec2020lm|p3d65> Target gamut; rec2020lm is Rec.2020 tagged with P3-D65 gamut limiting
+      --oetf <gamma2.4|gamma2.6|pq|hlg> Target opto-electronic transfer function
+      --nit <nits>                     Target peak luminance, 1 <= nits <= 10000
+      --cmu <nits>                     Metal-only HDR analysis and MDF-like XML sidecar; mutually exclusive with -dovi
+      --cmu-include                    Use the internally generated CMU XML directly as ProRes PHDR metadata, or to generate HEVC/AV1 RPU; requires --cmu and no -dovi
       --audio-ch-per-file <N>         Channels per OP-Atom audio MXF (default: 1)
       -ea, --export-aaf               Generate one AAF for all clips (MXF modes only)
       -ea-all, --export-aaf-all       Generate one AAF per clip (MXF modes only)
     """)
 }
+
+#endif

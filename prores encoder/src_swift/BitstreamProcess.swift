@@ -33,6 +33,8 @@ enum MXFColorUL {
                                               0x04,0x01,0x01,0x01,0x01,0x08,0x00,0x00])
     static let transferHLG:     Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
                                               0x04,0x01,0x01,0x01,0x01,0x0e,0x00,0x00])
+    static let transferST428:   Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
+                                              0x04,0x01,0x01,0x01,0x01,0x0b,0x00,0x00])
     static let transferLinear:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
                                               0x04,0x01,0x01,0x01,0x01,0x09,0x00,0x00])
     static let matrixBT709:     Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x01,
@@ -77,14 +79,20 @@ struct SourceColorSpace: Sendable {
 
 enum DolbyVisionHEVCProfile: String, Sendable {
     case profile81 = "81"
+    case profile84 = "84"
     case profile101 = "101"
+    case profile104 = "104"
 
     init?(argument: String) {
         switch argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "81", "8.1":
             self = .profile81
-        case "10":
+        case "84", "8.4":
+            self = .profile84
+        case "10", "101", "10.1":
             self = .profile101
+        case "104", "10.4":
+            self = .profile104
         default:
             return nil
         }
@@ -93,15 +101,43 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     var doviToolProfileArgument: String {
         switch self {
         case .profile81: return "8.1"
+        case .profile84: return "8.4"
         case .profile101: return "8.1"
+        case .profile104: return "8.4"
         }
     }
 
     var displayName: String {
         switch self {
         case .profile81: return "8.1"
+        case .profile84: return "8.4"
         case .profile101: return "10.1"
+        case .profile104: return "10.4"
         }
+    }
+
+    var usesProfile84Mapping: Bool {
+        self == .profile84 || self == .profile104
+    }
+
+    var usesHLGBaseLayer: Bool {
+        usesProfile84Mapping
+    }
+
+    var isHEVCProfile: Bool {
+        self == .profile81 || self == .profile84
+    }
+
+    var isAV1Profile: Bool {
+        self == .profile101 || self == .profile104
+    }
+
+    var containerProfile: UInt8 {
+        isAV1Profile ? 10 : 8
+    }
+
+    var compatibilityID: UInt8 {
+        usesHLGBaseLayer ? 4 : 1
     }
 }
 
@@ -682,6 +718,7 @@ final class ProResSession: @unchecked Sendable {
     private let rc = VTCallbackRefcon()
     private(set) var outputChannel: AsyncChannel<SendableSampleBuffer>?
     private let isHEVCSession: Bool
+    private let hevcColorSpace: SourceColorSpace?
     private let hevcMasteringDisplayColorVolume: Data?
     private let hevcContentLightLevelInfo: Data?
 
@@ -692,6 +729,7 @@ final class ProResSession: @unchecked Sendable {
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
         isHEVCSession = isHEVC
+        hevcColorSpace = colorSpace
         hevcMasteringDisplayColorVolume = colorSpace?.masteringDisplayColorVolume
         hevcContentLightLevelInfo = colorSpace?.contentLightLevelInfo
         let encoderSpecification = isHEVC
@@ -751,12 +789,18 @@ final class ProResSession: @unchecked Sendable {
                               userInfo: [NSLocalizedDescriptionKey:
                                 "HEVC encode requires bitrate options."])
             }
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
-                                 value: kCMFormatDescriptionColorPrimaries_ITU_R_2020)
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
-                                 value: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ)
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
-                                 value: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020)
+            if let p = colorSpace?.primaries {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
+                                     value: p as CFString)
+            }
+            if let t = colorSpace?.transfer {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
+                                     value: t as CFString)
+            }
+            if let m = colorSpace?.matrix {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                                     value: m as CFString)
+            }
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_HDRMetadataInsertionMode,
                                  value: kVTHDRMetadataInsertionMode_Auto)
             if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
@@ -857,21 +901,27 @@ final class ProResSession: @unchecked Sendable {
 
     private func attachHEVCMetadataIfNeeded(to pixelBuffer: CVPixelBuffer) {
         guard isHEVCSession else { return }
-        CVBufferSetAttachment(
-            pixelBuffer,
-            kCVImageBufferColorPrimariesKey,
-            kCVImageBufferColorPrimaries_ITU_R_2020,
-            .shouldPropagate)
-        CVBufferSetAttachment(
-            pixelBuffer,
-            kCVImageBufferTransferFunctionKey,
-            kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
-            .shouldPropagate)
-        CVBufferSetAttachment(
-            pixelBuffer,
-            kCVImageBufferYCbCrMatrixKey,
-            kCVImageBufferYCbCrMatrix_ITU_R_2020,
-            .shouldPropagate)
+        if let p = hevcColorSpace?.primaries {
+            CVBufferSetAttachment(
+                pixelBuffer,
+                kCVImageBufferColorPrimariesKey,
+                p as CFString,
+                .shouldPropagate)
+        }
+        if let t = hevcColorSpace?.transfer {
+            CVBufferSetAttachment(
+                pixelBuffer,
+                kCVImageBufferTransferFunctionKey,
+                t as CFString,
+                .shouldPropagate)
+        }
+        if let m = hevcColorSpace?.matrix {
+            CVBufferSetAttachment(
+                pixelBuffer,
+                kCVImageBufferYCbCrMatrixKey,
+                m as CFString,
+                .shouldPropagate)
+        }
         if let hevcMasteringDisplayColorVolume {
             CVBufferSetAttachment(
                 pixelBuffer,
@@ -1083,7 +1133,8 @@ func encodeMXF(
     quality: String,
     exportFormat: String,
     audioCHperFile: Int,
-    audioOverrideURL: URL?
+    audioOverrideURL: URL?,
+    colorTransform: ColorTransformRequest?
 ) async -> MXFEncodeResult {
 
     let emptyUMID = Data(repeating: 0, count: 32)
@@ -1107,6 +1158,17 @@ func encodeMXF(
     }
 
     let colorSpace = await detectColorSpace(from: videoTrack)
+    let resolvedColorTransform: ResolvedColorTransform?
+    do {
+        resolvedColorTransform = try colorTransform.map {
+            try resolveColorTransform(request: $0, sourceColorSpace: colorSpace)
+        }
+    } catch {
+        return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                               error: error.localizedDescription, sourceAudioChannels: 0,
+                               videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+    }
+    let outputColorSpace = resolvedColorTransform?.outputColorSpace ?? colorSpace
     let fpsInfo    = await framerateInfo(from: asset)
     let (width, height) = await videoSize(from: asset)
     let totalFrames = await estimateFrameCount(asset: asset)
@@ -1137,9 +1199,9 @@ func encodeMXF(
     cfg.startTimecode = timecode
     cfg.totalFrames = totalFrames
     cfg.audioBitDepth = 24; cfg.audioSampleRate = 48000
-    cfg.colorPrimaries = colorSpace.mxfPrimaries
-    cfg.transferFunction = colorSpace.mxfTransfer
-    cfg.codingEquations = colorSpace.mxfMatrix
+    cfg.colorPrimaries = outputColorSpace.mxfPrimaries
+    cfg.transferFunction = outputColorSpace.mxfTransfer
+    cfg.codingEquations = outputColorSpace.mxfMatrix
 
     let audioChannels = sourceAudioCh > 0 ? sourceAudioCh : 0
     let audioChannelsPerFile = max(audioCHperFile, 1)
@@ -1189,8 +1251,17 @@ func encodeMXF(
                 width: width, height: height,
                 codecType: proResCodecType(quality),
                 fpsHint: Int(fpsInfo.fps.rounded()),
-                colorSpace: colorSpace)
+                colorSpace: outputColorSpace)
         }
+        let metalColorPipeline = try resolvedColorTransform.map {
+            try MetalColorPipeline(
+                transform: $0,
+                width: width,
+                height: height,
+                pixelFormat: colorPipelinePixelFormat(for: quality)
+            )
+        }
+        let metalColorPipelineRef = metalColorPipeline.map(SendableRef.init)
 
         // Audio contexts (OP-1a only; OP-Atom audio is separate files)
         var audioCtxs: [MXFAudioContext] = []
@@ -1274,11 +1345,20 @@ func encodeMXF(
             var frameIdx: Int64 = 0
 
             for await spb in pixelChannel {
-                let pb = spb.buf
                 let pts = CMTime(value: CMTimeValue(frameIdx) * CMTimeValue(fpsInfo.denominator),
                                  timescale: CMTimeScale(fpsInfo.numerator))
                 let dur = CMTime(value: CMTimeValue(fpsInfo.denominator),
                                  timescale: CMTimeScale(fpsInfo.numerator))
+                let pb: CVPixelBuffer
+                do {
+                    pb = try metalColorPipelineRef?.value.process(spb.buf, pts: pts) ?? spb.buf
+                } catch {
+                    pixelChannel.finish()
+                    audioChannel.finish()
+                    compressedChannel.finish()
+                    vtRef?.value.flushAsync()
+                    throw error
+                }
                 guard vtRef?.value.submit(pixelBuffer: pb, pts: pts, duration: dur) == true else {
                     pixelChannel.finish()
                     audioChannel.finish()

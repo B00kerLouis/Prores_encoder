@@ -54,6 +54,27 @@ private func hevcNALType(_ nalu: Data) -> UInt8? {
     return (first >> 1) & 0x3f
 }
 
+func sampleBufferContainsHEVCDolbyVisionRPU(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    guard let data = compressedData(from: sampleBuffer) else {
+        return false
+    }
+    let lengthSize = hevcNALUnitLengthSize(from: sampleBuffer)
+    var cursor = 0
+    while cursor + lengthSize <= data.count {
+        let nalLength = readLengthPrefix(data, at: cursor, byteCount: lengthSize)
+        cursor += lengthSize
+        guard nalLength > 0, cursor + nalLength <= data.count else {
+            return false
+        }
+        let nalu = Data(data[cursor..<(cursor + nalLength)])
+        if hevcNALType(nalu) == 62 {
+            return true
+        }
+        cursor += nalLength
+    }
+    return false
+}
+
 func compressedData(from sampleBuffer: CMSampleBuffer) -> Data? {
     guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
         return nil
