@@ -1,6 +1,24 @@
-# ProRes Encoder
+# ProRes Encoder 1.2.0
 
-Native macOS command-line encoder for ProRes media workflows. The tool supports single-file conversion, folder batches, MOV output, MXF OP-1a / OP-Atom output, linked AAF generation, XML timeline bounce, and external audio replacement.
+Native macOS CLI and Framework for ProRes, HEVC, AV1, Dolby Vision, HDR color
+conversion, CMU analysis, MOV/MXF mastering, linked AAF, and timeline workflows.
+All MOV codecs—including AV1—are muxed as QuickTime `.mov`; the encoder does
+not create MP4 containers or elementary-stream output files.
+
+## What’s New in 1.2.0
+
+- Native SVT-AV1 Main 10 encoding in QuickTime MOV.
+- Native HEVC Main 10 encoding with configurable bitrate.
+- Dolby Vision Profiles 8.1/8.4 for HEVC and 10.1/10.4 for AV1.
+- Final-stream RPU detection and failure when requested RPU injection is absent.
+- Verifier-compatible `hvc1`/`av01` defaults with optional
+  `--dv-flag` / `-df` for `dvh1`/`dav1`.
+- Metal HDR gamut, transfer-function, and luminance conversion.
+- Metal CMU analysis with XML-only sidecar output and optional PHDR/RPU inclusion.
+- Synthetic or preserved QuickTime timecode.
+- MOV, MXF OP-1a, MXF OP-Atom, AAF, XML/FCPXML timeline, folder batch, and
+  external audio workflows.
+- Public `ProResEncoderFramework` target with CLI feature parity.
 
 ## License
 
@@ -89,6 +107,7 @@ equivalent of CLI `--dv-flag`; its default is `false`.
 ## Native Pipeline Architecture
 
 - AV1 encode uses the bundled SVT-AV1 static library.
+- AV1, HEVC, and ProRes MOV outputs always use the QuickTime MOV container.
 - ProRes source decode for AV1 feeds uses `VTDecompressionSession` plus native pixel conversion and chroma downsampling.
 - Dolby Vision RPU generation and writing are implemented in native Swift, then packaged into HEVC NAL units or AV1 metadata OBUs.
 
@@ -118,7 +137,7 @@ proresencoder -i input.mov -q 4444xq -o output.mov
 Supported quality values:
 
 ```text
-proxy, 422lt, 422, 422hq, 4444, 4444xq, pass
+proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc, av1
 ```
 
 Use `pass` when you want a stream copy where supported:
@@ -184,7 +203,7 @@ Add `--dv-flag` (or `-df`) only when `dvh1` or `dav1` is explicitly required:
 ```bash
 proresencoder -i hdr.mov -o hevc_dv.mov -q hevc -b 50 -dp 81 \
   -dovi metadata.xml --dv-flag
-proresencoder -i hdr.mov -o av1_dv.mp4 -q av1 -b 50 -dp 10 \
+proresencoder -i hdr.mov -o av1_dv.mov -q av1 -b 50 -dp 10 \
   -dovi metadata.xml -df
 ```
 
@@ -200,7 +219,13 @@ MOV:
 
 ```bash
 proresencoder -i input.mov -ef mov -q 422hq -o output.mov
+proresencoder -i input.mov -ef mov -q hevc -b 50 -o output_hevc.mov
+proresencoder -i input.mov -ef mov -q av1 -b 50 -o output_av1.mov
 ```
+
+The CLI normalizes every MOV encode filename to `.mov`. The Framework requires
+an output URL ending in `.mov` for AV1. Neither interface emits MP4 or raw
+HEVC/AV1 elementary streams.
 
 MOV timecode behavior:
 

@@ -182,6 +182,8 @@ public enum ProResEncoderError: LocalizedError, Sendable {
 }
 
 public final class ProResEncoder: Sendable {
+    public static let version = "1.2.0"
+
     public init() {
         // Match the CLI startup path before any asynchronous work leaves the
         // caller's thread. Professional ProRes encoders can otherwise remain
@@ -346,10 +348,9 @@ public final class ProResEncoder: Sendable {
 
         switch format {
         case .mov:
-            if wantsAV1,
-               outputURL.pathExtension.lowercased() != "mp4" {
+            if outputURL.pathExtension.lowercased() != "mov" {
                 throw ProResEncoderError.invalidOption(
-                    "AV1 ISO BMFF output requires an .mp4 outputURL."
+                    "QuickTime MOV output requires a .mov outputURL; MP4 output is not supported."
                 )
             }
             return try await encodeMOVFile(

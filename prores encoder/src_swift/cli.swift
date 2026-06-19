@@ -8,6 +8,8 @@ import Metal
 
 #if PRORES_ENCODER_CLI
 
+private let proResEncoderCLIVersion = "1.2.0"
+
 // MARK: - CLI Config (Sendable, passed by value)
 
 enum AAFMode: Sendable {
@@ -105,6 +107,9 @@ enum ProResEncoderCLI {
             switch args[idx] {
             case "-h", "--help":
                 printUsage()
+                exit(0)
+            case "-v", "--version":
+                print("prores encoder \(proResEncoderCLIVersion)")
                 exit(0)
             case "-i", "--input":
                 inputFilePath = requireValue(for: args[idx])
@@ -499,10 +504,7 @@ enum ProResEncoderCLI {
             }
             let asset = AVURLAsset(url: inputURL)
             let baseName = inputURL.deletingPathExtension().lastPathComponent
-            let movieExtension = wantsAV1
-                || (quality == "pass" && inputURL.pathExtension.lowercased() == "mp4")
-                ? "mp4"
-                : "mov"
+            let movieExtension = "mov"
             if isOutFile {
                 let finalOut = outputURL
                     .deletingPathExtension()
@@ -540,10 +542,7 @@ enum ProResEncoderCLI {
             var sequencedAAFClips: [AAFClipInfo] = []
             for file in videos {
                 let baseName = file.deletingPathExtension().lastPathComponent
-                let movieExtension = wantsAV1
-                    || (quality == "pass" && file.pathExtension.lowercased() == "mp4")
-                    ? "mp4"
-                    : "mov"
+                let movieExtension = "mov"
                 let finalOut = outputURL.appendingPathComponent(
                     "\(baseName).\(movieExtension)"
                 )
@@ -1096,6 +1095,7 @@ private func printUsage() {
         opatom          MXF OP-Atom (direct VT→MXF)
 
     Options:
+      -v, --version                    Print version and exit
       -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc|av1>  Output codec/quality (default: 422hq)
       -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
       -dp, --dv-profile <81|84|10|104> Dolby Vision profile: HEVC 8.1/8.4 or AV1 10.1/10.4

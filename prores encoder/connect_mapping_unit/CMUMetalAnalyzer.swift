@@ -327,7 +327,7 @@ final class CMUMetalAnalyzer {
             generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
             author: "Dolby Laboratories",
             software: "Connect Mapping Unit",
-            softwareVersion: "1.0.0",
+            softwareVersion: "1.2.0",
             analysisSource: source,
             media: descriptor,
             masteringPeakNits: masteringPeakNits,

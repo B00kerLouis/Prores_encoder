@@ -547,7 +547,7 @@ static inline std::vector<uint8_t> mk_ident(const UUID16& uid) {
     std::vector<uint8_t> b;
     lt_uuid(b,0x3c0a,uid); lt_uuid(b,0x3c09,make_uuid());
     lt_item(b,0x3c01,utf16("Prores_encoder")); lt_item(b,0x3c02,utf16("mxf_enc"));
-    lt_pversion(b,0x3c03,1,1,0,0,0); lt_item(b,0x3c04,utf16("1.1.0"));
+    lt_pversion(b,0x3c03,1,2,0,0,0); lt_item(b,0x3c04,utf16("1.2.0"));
     static const UUID16 PID = {0x6d,0x78,0x66,0x5f,0x65,0x6e,0x63,0x20,
                                 0x70,0x72,0x6f,0x72,0x65,0x73,0x5f,0x65};
     lt_uuid(b,0x3c05,PID); lt_ts(b,0x3c06,now_ts());

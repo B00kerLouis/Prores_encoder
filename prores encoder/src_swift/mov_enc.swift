@@ -289,7 +289,7 @@ private func addMetadataReferentAssociations(
     }
 }
 
-private func mp4AudioReaderSettings(channelCount: Int) -> [String: Any] {
+private func av1AudioReaderSettings(channelCount: Int) -> [String: Any] {
     [
         AVFormatIDKey: kAudioFormatLinearPCM,
         AVSampleRateKey: 48_000,
@@ -301,7 +301,7 @@ private func mp4AudioReaderSettings(channelCount: Int) -> [String: Any] {
     ]
 }
 
-private func mp4AACWriterSettings(channelCount: Int) -> [String: Any] {
+private func av1AACWriterSettings(channelCount: Int) -> [String: Any] {
     let channels = max(channelCount, 1)
     return [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -3561,6 +3561,11 @@ func encodeMOV(
     useDolbyVisionCodecTag: Bool = false
 ) async -> Bool {
 
+    guard outputURL.pathExtension.lowercased() == "mov" else {
+        print("[Error] MOV encoding requires a .mov output path; MP4 output is not supported.")
+        return false
+    }
+
     let isPassthrough = (quality == "pass")
     let isHEVC = isHEVCQuality(quality)
     let isAV1 = isAV1Quality(quality)
@@ -3599,7 +3604,7 @@ func encodeMOV(
     let passthroughIsAV1 = isPassthrough && sourceVideoSubtype.map {
         $0 == 0x61763031 || $0 == 0x64617631 // av01 / dav1
     } == true
-    let writesAV1Container = isAV1 || passthroughIsAV1
+    let writesAV1Video = isAV1 || passthroughIsAV1
     let audioTrack     = audioReplace ? nil : (try? await asset.loadTracks(withMediaType: .audio).first)
     let sourceAudioChannelCount = audioTrack == nil
         ? 0
@@ -3611,14 +3616,12 @@ func encodeMOV(
     let timecodePlan: MOVTimecodePlan
     let sourceTimecodeInfo: QuickTimeTimecodeInfo?
     do {
-        timecodePlan = writesAV1Container
-            ? .none
-            : try await resolveMOVTimecodePlan(
-                asset: asset,
-                fpsInfo: fpsInfo,
-                estimatedFrames: estimatedFrames,
-                forcedStartTimecode: forcedOutputStartTimecode
-            )
+        timecodePlan = try await resolveMOVTimecodePlan(
+            asset: asset,
+            fpsInfo: fpsInfo,
+            estimatedFrames: estimatedFrames,
+            forcedStartTimecode: forcedOutputStartTimecode
+        )
         switch timecodePlan {
         case .none:
             sourceTimecodeInfo = nil
@@ -3812,8 +3815,8 @@ func encodeMOV(
         if let aTrack = audioTrack {
             let output = AVAssetReaderTrackOutput(
                 track: aTrack,
-                outputSettings: writesAV1Container
-                    ? mp4AudioReaderSettings(channelCount: sourceAudioChannelCount)
+                outputSettings: writesAV1Video
+                    ? av1AudioReaderSettings(channelCount: sourceAudioChannelCount)
                     : nil
             )
             guard reader.canAdd(output) else {
@@ -3864,8 +3867,8 @@ func encodeMOV(
         if let eaReader = extraAudioReader, let eaTrack = extraAudioTrack {
             let output = AVAssetReaderTrackOutput(
                 track: eaTrack,
-                outputSettings: writesAV1Container
-                    ? mp4AudioReaderSettings(channelCount: extraAudioChannelCount)
+                outputSettings: writesAV1Video
+                    ? av1AudioReaderSettings(channelCount: extraAudioChannelCount)
                     : nil
             )
             guard eaReader.canAdd(output) else {
@@ -3963,10 +3966,7 @@ func encodeMOV(
 
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
-        let writer = try AVAssetWriter(
-            outputURL: outputURL,
-            fileType: writesAV1Container ? .mp4 : .mov
-        )
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         writer.shouldOptimizeForNetworkUse = false
 
         // Video input: nil outputSettings = passthrough of compressed data.
@@ -4004,7 +4004,7 @@ func encodeMOV(
 
         var audioIn: AVAssetWriterInput? = nil
         if audioOut != nil, let aTrack = audioTrack {
-            if !writesAV1Container, sourceAudioFormatHint == nil {
+            if !writesAV1Video, sourceAudioFormatHint == nil {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -4015,10 +4015,10 @@ func encodeMOV(
             }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: writesAV1Container
-                    ? mp4AACWriterSettings(channelCount: sourceAudioChannelCount)
+                outputSettings: writesAV1Video
+                    ? av1AACWriterSettings(channelCount: sourceAudioChannelCount)
                     : nil,
-                sourceFormatHint: writesAV1Container ? nil : sourceAudioFormatHint
+                sourceFormatHint: writesAV1Video ? nil : sourceAudioFormatHint
             )
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else {
@@ -4037,7 +4037,7 @@ func encodeMOV(
 
         var extraAudioIn: AVAssetWriterInput? = nil
         if extraAudioOut != nil {
-            if !writesAV1Container, extraAudioFormatHint == nil {
+            if !writesAV1Video, extraAudioFormatHint == nil {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -4048,10 +4048,10 @@ func encodeMOV(
             }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: writesAV1Container
-                    ? mp4AACWriterSettings(channelCount: extraAudioChannelCount)
+                outputSettings: writesAV1Video
+                    ? av1AACWriterSettings(channelCount: extraAudioChannelCount)
                     : nil,
-                sourceFormatHint: writesAV1Container ? nil : extraAudioFormatHint
+                sourceFormatHint: writesAV1Video ? nil : extraAudioFormatHint
             )
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else {
@@ -4854,7 +4854,7 @@ func encodeMOV(
                 metadataKeyValue: dolbyVisionMetadata.metadataKeyValue)
         }
         let finalizedCompressedCodec = try compressedDolbyVisionCodec(in: outputURL)
-        if isHEVC || writesAV1Container {
+        if isHEVC || writesAV1Video {
             guard finalizedCompressedCodec != nil else {
                 throw NSError(
                     domain: "encodeMOV",
