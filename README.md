@@ -176,8 +176,7 @@ Generate a Metal-analyzed MDF-like XML sidecar:
 proresencoder -i hdr.mov -o prores.mov -q 422hq --cmu 1000
 ```
 
-CMU analysis writes only the `.cmu.xml` sidecar; it does not create JSON or
-Markdown log files.
+CMU analysis writes the `.cmu.xml` sidecar
 
 Add `--cmu-include` to use the generated XML directly as the native Dolby
 Vision metadata source. Do not also pass `-dovi`; no external XML is required:
