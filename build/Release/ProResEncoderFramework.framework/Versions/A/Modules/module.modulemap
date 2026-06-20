@@ -1,0 +1,4 @@
+framework module ProResEncoderFramework {
+  header "ProResEncoderFramework-Swift.h"
+  requires objc
+}
