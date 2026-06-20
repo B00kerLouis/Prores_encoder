@@ -78,6 +78,7 @@ struct SourceColorSpace: Sendable {
 }
 
 enum DolbyVisionHEVCProfile: String, Sendable {
+    case profile76 = "76"
     case profile81 = "81"
     case profile84 = "84"
     case profile101 = "101"
@@ -85,6 +86,8 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 
     init?(argument: String) {
         switch argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "76", "7.6":
+            self = .profile76
         case "81", "8.1":
             self = .profile81
         case "84", "8.4":
@@ -100,6 +103,7 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 
     var doviToolProfileArgument: String {
         switch self {
+        case .profile76: return "7.6"
         case .profile81: return "8.1"
         case .profile84: return "8.4"
         case .profile101: return "8.1"
@@ -109,6 +113,7 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 
     var displayName: String {
         switch self {
+        case .profile76: return "7.6"
         case .profile81: return "8.1"
         case .profile84: return "8.4"
         case .profile101: return "10.1"
@@ -120,12 +125,16 @@ enum DolbyVisionHEVCProfile: String, Sendable {
         self == .profile84 || self == .profile104
     }
 
+    var isProfile76: Bool {
+        self == .profile76
+    }
+
     var usesHLGBaseLayer: Bool {
         usesProfile84Mapping
     }
 
     var isHEVCProfile: Bool {
-        self == .profile81 || self == .profile84
+        self == .profile76 || self == .profile81 || self == .profile84
     }
 
     var isAV1Profile: Bool {
@@ -133,11 +142,27 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 
     var containerProfile: UInt8 {
-        isAV1Profile ? 10 : 8
+        if isProfile76 {
+            return 7
+        }
+        return isAV1Profile ? 10 : 8
     }
 
     var compatibilityID: UInt8 {
-        usesHLGBaseLayer ? 4 : 1
+        if isProfile76 {
+            return 6
+        }
+        return usesHLGBaseLayer ? 4 : 1
+    }
+
+    var applicationID: UInt8 {
+        // Profile 7.6 uses the same CM application identifier as Profile 8.1.
+        isProfile76 ? 1 : compatibilityID
+    }
+
+    var extendedMappingIDC: UInt8 {
+        let inverseMappingIDC: UInt8 = usesHLGBaseLayer ? 0 : 1
+        return (applicationID << 5) | inverseMappingIDC
     }
 }
 
@@ -1134,6 +1159,7 @@ func encodeMXF(
     exportFormat: String,
     audioCHperFile: Int,
     audioOverrideURL: URL?,
+    deleteSourceAudio: Bool,
     colorTransform: ColorTransformRequest?
 ) async -> MXFEncodeResult {
 
@@ -1149,7 +1175,9 @@ func encodeMXF(
     } else {
         audioSourceAsset = asset
     }
-    let audioTracks = (try? await audioSourceAsset.loadTracks(withMediaType: .audio)) ?? []
+    let audioTracks = (deleteSourceAudio && audioOverrideURL == nil)
+        ? []
+        : ((try? await audioSourceAsset.loadTracks(withMediaType: .audio)) ?? [])
     if audioOverrideURL != nil && audioTracks.isEmpty {
         return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
                                error: "Replacement audio file has no audio track",

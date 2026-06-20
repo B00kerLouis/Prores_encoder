@@ -1,35 +1,61 @@
 # ProRes Encoder 1.2.0
 
-Native macOS CLI and Framework for ProRes, HEVC, AV1, Dolby Vision, HDR color
-conversion, CMU analysis, MOV/MXF mastering, linked AAF, and timeline workflows.
-All MOV codecs—including AV1—are muxed as QuickTime `.mov`; the encoder does
-not create MP4 containers or elementary-stream output files.
+Native macOS CLI and Framework for professional video encoding, HDR color
+conversion, dynamic metadata processing, MOV/MXF mastering, linked timeline
+workflows, batch encoding, and external-audio replacement.
+
+All supported MOV outputs are written as `.mov` files. The encoder does not
+create MP4 containers or elementary-stream output files.
 
 ## What’s New in 1.2.0
 
-- Native SVT-AV1 Main 10 encoding in QuickTime MOV.
-- Native HEVC Main 10 encoding with configurable bitrate.
-- Dolby Vision Profiles 8.1/8.4 for HEVC and 10.1/10.4 for AV1.
-- Final-stream RPU detection and failure when requested RPU injection is absent.
-- Verifier-compatible `hvc1`/`av01` defaults with optional
-  `--dv-flag` / `-df` for `dvh1`/`dav1`.
-- Metal HDR gamut, transfer-function, and luminance conversion.
-- Metal CMU analysis with XML-only sidecar output and optional PHDR/RPU inclusion.
-- Synthetic or preserved QuickTime timecode.
+- Native 10-bit long-GOP encoding paths for MOV output.
+- Native 10-bit HEVC encoding with configurable bitrate.
+- Dynamic HDR metadata workflows for HEVC and AV1 output.
+- Profile-dependent metadata Application ID handling.
+- Final-stream metadata detection and failure when requested metadata injection
+  is absent.
+- Verifier-oriented sample-entry defaults with an optional alternate sample
+  entry flag when explicitly required.
+- MOV external-audio passthrough plus source-audio deletion.
+- GPU-based HDR gamut, transfer-function, and luminance conversion.
+- GPU-based metadata analysis with optional sidecar inclusion.
+- Synthetic or preserved MOV timecode.
 - MOV, MXF OP-1a, MXF OP-Atom, AAF, XML/FCPXML timeline, folder batch, and
-  external audio workflows.
+  external-audio workflows.
 - Public `ProResEncoderFramework` target with CLI feature parity.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+This project is licensed under the GNU Affero General Public License v3.0 for
+general public use. See [LICENSE](LICENSE).
+
+A designated commercial-license grant may be provided in the LICENSE file for
+specific organizations and their eligible subsidiaries or controlled affiliates.
+That grant applies only to source code owned by this project and does not apply
+to third-party components.
+
+## Third-Party and Trademark Notice
+
+This repository may refer to industry formats, codecs, containers, metadata
+schemes, and operating-system technologies only for identification and
+interoperability purposes.
+
+No third-party certification, endorsement, partnership, official compatibility,
+or trademark license is claimed or implied by this README.
+
+Third-party components, if included in the repository or required by a build,
+remain governed by their own license terms. The project license and any
+designated commercial-license exception do not relicense third-party code,
+frameworks, SDKs, tools, assets, documentation, or generated files.
 
 ## Requirements
 
-- macOS with the standard command-line build tools installed
-- Xcode project build support
-- The bundled `Frameworks/swiftaaf_Framework.framework` directory kept next to the project file
-- Self-contained runtime with no external `ffmpeg` or `dovi_tool` dependency
+- macOS with standard command-line build tools installed.
+- Project build support for the included project file.
+- Bundled project-owned framework directories kept in their expected locations.
+- Self-contained runtime behavior; the CLI does not require users to install
+  separate external command-line media tools for normal operation.
 
 ## Build
 
@@ -46,8 +72,6 @@ Build/Release/prores encoder
 Build/Release/default.metallib
 ```
 
-The only non-system build inputs are the bundled `swiftaaf_Framework.framework` and the repo-local SVT-AV1 static library under `ThirdParty/SVT-AV1/lib/`.
-
 Optional local install:
 
 ```bash
@@ -55,11 +79,12 @@ cp "Build/Release/prores encoder" ~/bin/proresencoder
 cp "Build/Release/default.metallib" ~/bin/default.metallib
 ```
 
-Keep `default.metallib` next to the executable; it contains the Metal-only color conversion and tone-mapping kernels.
+Keep `default.metallib` next to the executable when using the CLI outside the
+build directory; it contains the GPU kernels used by the encoder.
 
 ## Framework
 
-The `ProResEncoderFramework` target builds the same native Swift/C++/Metal
+The `ProResEncoderFramework` target builds the same native Swift/C++/GPU
 encoding pipeline as the CLI:
 
 ```bash
@@ -75,8 +100,7 @@ Build/Release/ProResEncoderFramework.framework
 ```
 
 Its public API supports MOV, MXF OP-1a, and MXF OP-Atom output, including the
-same Metal gamut, transfer-function, and peak-luminance conversion used by the
-CLI:
+same gamut, transfer-function, and peak-luminance conversion used by the CLI:
 
 ```swift
 import ProResEncoderFramework
@@ -100,26 +124,37 @@ try await encoder.encode(
 ```
 
 `default.metallib` is embedded in the framework Resources directory, so
-framework clients do not need to copy the Metal library separately.
-Set `ProResEncodeOptions.useDolbyVisionCodecTag` to `true` for the Framework
-equivalent of CLI `--dv-flag`; its default is `false`.
+framework clients do not need to copy the GPU library separately.
+
+Set the Framework codec-tag option to `true` only when the target workflow
+requires the alternate dynamic-HDR sample entry; its default should remain
+`false` for normal output.
+
+Set `ProResEncodeOptions.deleteSourceAudio` to `true` to omit input audio.
+It can be combined with `extraAudioURL` so the source audio is removed before
+the external track is added.
 
 ## Native Pipeline Architecture
 
-- AV1 encode uses the bundled SVT-AV1 static library.
-- AV1, HEVC, and ProRes MOV outputs always use the QuickTime MOV container.
-- ProRes source decode for AV1 feeds uses `VTDecompressionSession` plus native pixel conversion and chroma downsampling.
-- Dolby Vision RPU generation and writing are implemented in native Swift, then packaged into HEVC NAL units or AV1 metadata OBUs.
+- MOV outputs always use the MOV container.
+- Source decode for compressed inputs uses native media sessions plus project
+  pixel conversion and chroma downsampling.
+- Dynamic HDR metadata generation and writing are implemented in project code,
+  then packaged into the selected output bitstream or metadata track.
+- Enhanced-layer workflows perform closed-loop base-layer encode and
+  reconstruction, derive a residual signal on the GPU, encode the enhanced
+  layer, and interleave metadata directly into output samples.
+- No separate elementary-stream files are emitted during normal MOV output.
 
 Final compressed samples are inspected before the file is accepted:
 
-- HEVC uses the Dolby Verifier-compatible `hvc1` sample entry by default,
-  including streams carrying RPU and `dvvC`.
-- AV1 similarly uses `av01` by default.
-- Pass `--dv-flag` / `-df` to explicitly use `dvh1` for HEVC or `dav1` for
-  AV1 when a downstream workflow requires those codec identifiers.
-- A requested Dolby Vision encode fails instead of returning a file if the
-  finalized stream contains no RPU.
+- HEVC output uses a verifier-oriented sample entry by default, including
+  streams carrying dynamic HDR metadata.
+- AV1 output similarly uses a verifier-oriented sample entry by default.
+- Pass `--dv-flag` / `-df` only when an explicit alternate dynamic-HDR sample entry is
+  required.
+- A requested dynamic HDR metadata encode fails instead of returning a file if
+  the finalized stream contains no requested metadata.
 
 ## Basic Usage
 
@@ -127,7 +162,7 @@ Final compressed samples are inspected before the file is accepted:
 proresencoder -i input.mov -o output.mov
 ```
 
-Set ProRes quality:
+Set output quality:
 
 ```bash
 proresencoder -i input.mov -q 422hq -o output.mov
@@ -146,9 +181,10 @@ Use `pass` when you want a stream copy where supported:
 proresencoder -i input.mov -q pass -o output.mov
 ```
 
-## Metal Color Conversion and Tone Mapping
+## GPU Color Conversion and Tone Mapping
 
-The three target-color options are atomic: all three must be present, or encoding is refused.
+The three target-color options are atomic: all three must be present, or
+encoding is refused.
 
 ```bash
 proresencoder -i hdr.mov -o sdr.mov -q 422hq \
@@ -163,55 +199,69 @@ Supported targets:
 - `--oetf gamma2.4|gamma2.6|pq|hlg`
 - `--nit <target peak nits>`, from 1 through 10000
 
-The source gamut and transfer function are read from the input video metadata. Rec.709, Rec.2020, and P3-D65 sources with Gamma 2.4, Gamma 2.6, PQ, or HLG are supported. Pixel processing runs in Metal before ProRes/HEVC/AV1 submission; there is no CPU color-conversion fallback.
+The source gamut and transfer function are read from the input video metadata.
+Rec.709, Rec.2020, and P3-D65 sources with Gamma 2.4, Gamma 2.6, PQ, or HLG
+are supported. Pixel processing runs on the GPU before ProRes/HEVC/AV1
+submission; there is no CPU color-conversion fallback.
 
-`--nit` controls the actual pixel luminance mapping. Already-mastered programme material is mapped with the display-referred ITU-R BT.2446 Method A EETF, using its matched inverse for range expansion. This provides one monotonic mapping for HDR-to-SDR, SDR-to-HDR, HDR-to-HDR, and SDR-to-SDR conversions. Equal source/target peaks remain colorimetric; different peaks preserve tonal separation while mapping the detected source peak to the requested target peak.
+`--nit` controls the actual pixel luminance mapping. Already-mastered programme
+material is mapped with a display-referred EETF-style curve and a matched
+inverse for range expansion. This provides one monotonic mapping for HDR-to-SDR,
+SDR-to-HDR, HDR-to-HDR, and SDR-to-SDR conversions. Equal source/target peaks
+remain colorimetric; different peaks preserve tonal separation while mapping
+the detected source peak to the requested target peak.
 
-When these options are omitted, the encoder keeps its previous behavior and does not perform color conversion or tone mapping.
+When these options are omitted, the encoder keeps its previous behavior and
+does not perform color conversion or tone mapping.
 
-## CMU Analysis and Inclusion
+## Metadata Analysis and Inclusion
 
-Generate a Metal-analyzed MDF-like XML sidecar:
+Generate an analyzed XML sidecar:
 
 ```bash
 proresencoder -i hdr.mov -o prores.mov -q 422hq --cmu 1000
 ```
 
-CMU analysis writes only the `.cmu.xml` sidecar; it does not create JSON or
-Markdown log files.
+For ProRes/MXF output, metadata analysis writes only the `.xml` sidecar; it does
+not create JSON or Markdown log files. HEVC/AV1 output can use a temporary XML
+internally and remove it after encoding.
 
-Add `--cmu-include` to use the generated XML directly as the native Dolby
-Vision metadata source. Do not also pass `-dovi`; no external XML is required:
+Add `--cmu-include` to use the generated XML directly as the native metadata
+source. Do not also pass an external metadata XML:
 
 ```bash
-# ProRes MOV: losslessly remux the encoded video with a PHDR metadata track
-proresencoder -i hdr.mov -o prores_dv.mov -q 422hq \
+# ProRes MOV: remux the encoded video with a metadata track
+proresencoder -i hdr.mov -o prores_metadata.mov -q 422hq \
   --cmu 1000 --cmu-include
 
-# HEVC Profile 8.1: generate and inject one RPU per frame
-proresencoder -i hdr.mov -o hevc_dv.mov -q hevc -b 50 -dp 81 \
+# HEVC: generate and inject one metadata unit per frame
+proresencoder -i hdr.mov -o hevc_metadata.mov -q hevc -b 50 -dp 81 \
   --cmu 1000 --cmu-include
 
-# AV1 Profile 10.1: generate and inject one RPU metadata OBU per frame
-proresencoder -i hdr.mov -o av1_dv.mov -q av1 -b 50 -dp 10 \
+# HEVC enhanced-layer workflow
+proresencoder -i hdr.mov -o hevc_enhanced.mov -q hevc -b 80 -dp 76 \
+  --cmu 1000 --cmu-include
+
+# AV1: generate and inject one metadata unit per frame
+proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 10 \
   --cmu 1000 --cmu-include
 ```
 
-These commands retain the verifier-compatible `hvc1` and `av01` identifiers.
-Add `--dv-flag` (or `-df`) only when `dvh1` or `dav1` is explicitly required:
+Add `--dv-flag` / `-df` only when an explicit alternate dynamic-HDR sample entry is
+required by the target workflow:
 
 ```bash
-proresencoder -i hdr.mov -o hevc_dv.mov -q hevc -b 50 -dp 81 \
+proresencoder -i hdr.mov -o hevc_metadata.mov -q hevc -b 50 -dp 81 \
   -dovi metadata.xml --dv-flag
-proresencoder -i hdr.mov -o av1_dv.mov -q av1 -b 50 -dp 10 \
+proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 10 \
   -dovi metadata.xml -df
 ```
 
-`--cmu` and `-dovi` / `--dolby-vision-xml` are mutually exclusive.
+`--cmu` and `-dovi` are mutually exclusive.
 `--cmu-include` requires `--cmu`, supports MOV output only, and requires the
 matching `-dp` value for HEVC or AV1. For HEVC/AV1, the internally generated
-XML is converted to one native RPU per frame and injected during the encode;
-for ProRes it is embedded as a PHDR metadata track.
+XML is converted to one native metadata unit per frame and injected during the
+encode; for ProRes it is embedded as a metadata track.
 
 ## Output Formats
 
@@ -229,8 +279,10 @@ HEVC/AV1 elementary streams.
 
 MOV timecode behavior:
 
-- If the source already contains a QuickTime TC track, the output MOV keeps that source timecode.
-- If the source has no QuickTime TC track, the output MOV now writes a synthetic QuickTime TC track.
+- If the source already contains a MOV timecode track, the output MOV keeps
+  that source timecode.
+- If the source has no MOV timecode track, the output MOV writes a synthetic
+  timecode track.
 - The default synthetic start timecode is `01:00:00:00`.
 - Use `-ffoa` to override that synthetic start value when needed.
 
@@ -252,15 +304,22 @@ MXF OP-Atom:
 proresencoder -i input.mov -ef opatom -q 422hq --audio-ch-per-file 1 -o output_dir
 ```
 
-## Audio Replacement
+## External Audio and Source-Audio Deletion
 
-Use `-aa` to provide an external audio file. Add `--audio-replace` or `-ar` to drop the source audio and keep only the supplied audio.
+Use `-aa` to add an external audio track. The encoder accepts audio readable
+through the native runtime, including common PCM and compressed audio formats.
+MOV-compatible codecs are muxed where supported; inputs that require conversion
+use an explicit channel layout.
+
+Add `--audio-replace` / `-ar`, or combine `-aa` with
+`--delete-source-audio` / `-dsa`, to drop source audio and keep only the
+supplied track.
 
 ```bash
 proresencoder \
   -i input.mov \
   -q 4444xq \
-  -aa audio_if_u_need.wav(or other format,MXF only supports WAV) \
+  -aa audio_if_needed.wav \
   --audio-replace \
   -ef mov \
   -o output.mov
@@ -270,14 +329,18 @@ Short form:
 
 ```bash
 proresencoder -i input.mov -q 4444xq -aa replacement_7_1.wav -ar -o output.mov
+proresencoder -i input.mov -q pass -dsa -aa external_audio.ec3 -o output.mov
+proresencoder -i input.mov -q pass -dsa -o silent_output.mov
 ```
 
 Safety rules:
 
 - `--audio-replace` / `-ar` requires `-aa <audio_file>`.
+- `--delete-source-audio` / `-dsa` does not conflict with `-aa`; deletion is
+  applied first, then the external audio is added.
 - Unknown arguments stop the process with an error.
 - Missing argument values stop the process with an error.
-- MXF output accepts `-aa` only when replacement mode is enabled.
+- MXF output accepts `-aa` when replacement or source-audio deletion is enabled.
 
 ## Batch Encoding
 
@@ -326,48 +389,25 @@ proresencoder -if input_folder -ef opatom -q 422hq --export-aaf-all -o output_di
 
 ## Benchmark
 
-The chart below records one local 3840x2160/24p ProRes 4444 XQ benchmark on the same source clip. Higher realtime speed is better.
+This README intentionally avoids benchmark comparisons against third-party
+applications or command-line tools.
 
-![ProRes 4444 XQ benchmark](docs/benchmark-prores-4444xq.svg)
+For release validation, benchmark this encoder on the same host, source clip,
+codec profile, and output scope that will be used for delivery. Record the
+hardware, operating-system version, source properties, output settings, wall
+time, realtime speed, and verification method.
 
-Measured data:
+Suggested local benchmark table:
 
-| Encoder path | Scope | Wall time | Realtime speed |
-|---|---:|---:|---:|
-| ProRes Encoder | MOV encode with 7.1 audio replacement | 13.22 s | 7.04x |
-| ffmpeg prores_videotoolbox | Video-only encode to null output | 49.52 s | 1.88x |
-| ffmpeg prores_ks | Video-only encode to null output | 316.71 s | 0.29x |
-
-Benchmark commands should be re-run on the same host, source clip, codec profile, and output scope before using the numbers for purchasing or delivery decisions.
-
-### Dolby Vision ProRes Master
-
-![Dolby Vision ProRes master benchmark](docs/benchmark-dolbyvision-prores-master.svg)
-
-Measured data:
-
-| Encoder path | Output | Wall time | Realtime speed | Metadata verification |
+| Encoder path | Output scope | Wall time | Realtime speed | Verification |
 |---|---:|---:|---:|---|
-| ProRes Encoder | ProRes 4444 XQ MOV | 13.24 s | 7.03x | Dolby Vision Metadata |
-| DaVinci Resolve 20.3.1 | ProRes 422 HQ MOV | 137.82 s | 0.68x | SMPTE ST 2086 only; no Dolby Vision metadata found |
-| Mezzinator 5.6.2 | ProRes 4444 XQ MOV | 364.02 s | 0.26x | SMPTE ST 2086 / Dolby Vision Metadata |
-
-Resolve's ProRes 422 HQ result is included as a speed reference, but it should not be treated as an embedded Dolby Vision ProRes master from this test because MediaInfo did not report a Dolby Vision metadata track.
-
-### Dolby Vision HEVC Profile 8.1
-
-![Dolby Vision HEVC Profile 8.1 benchmark](docs/benchmark-dolbyvision-hevc-p81.svg)
-
-Measured data:
-
-| Encoder path | Output | Wall time | Realtime speed | Metadata verification |
-|---|---:|---:|---:|---|
-| ProRes Encoder | HEVC Main 10 MOV | 21.68 s | 4.29x | hvc1 with hvcC+dvvC, Dolby Vision / SMPTE ST 2086 |
-| DaVinci Resolve 20.3.1 | HEVC Main 10 MOV | 169.07 s | 0.55x | hvc1 with hvcC+dvvC, Dolby Vision / SMPTE ST 2086 |
-| Mezzinator 5.6.2 | Unsupported | N/A | N/A | Tested CLI exposes no HEVC output path |
+| ProRes Encoder | Fill in locally | Fill in locally | Fill in locally | Fill in locally |
 
 ## Notes
 
 - The CLI prints explicit errors for unsafe argument combinations.
 - `-ar` is replacement mode, not an additive mix mode.
-- MOV replacement output should contain only the replacement audio stream plus video and timecode/metadata tracks.
+- MOV replacement output should contain only the replacement audio stream plus
+  video and timecode/metadata tracks.
+- Third-party names, if any remain in code comments, build scripts, or source
+  paths, should be reviewed separately before public release.

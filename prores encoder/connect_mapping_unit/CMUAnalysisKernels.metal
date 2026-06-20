@@ -145,3 +145,59 @@ kernel void cmu_analyze_yuv(
         );
     }
 }
+
+kernel void p7_make_luma_residual(
+    texture2d<float, access::read> sourceY [[texture(0)]],
+    texture2d<float, access::read> reconstructedY [[texture(1)]],
+    texture2d<float, access::write> enhancementY [[texture(2)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= enhancementY.get_width() ||
+        position.y >= enhancementY.get_height()) {
+        return;
+    }
+
+    const uint2 sourceOrigin = position * 2;
+    float residual = 0.0f;
+    for (uint y = 0; y < 2; ++y) {
+        for (uint x = 0; x < 2; ++x) {
+            const uint2 sourcePosition = sourceOrigin + uint2(x, y);
+            const float sourceCode = sourceY.read(sourcePosition).r * 1023.0f;
+            const float reconstructedCode =
+                reconstructedY.read(sourcePosition).r * 1023.0f;
+            residual += sourceCode - reconstructedCode;
+        }
+    }
+    const float enhancementCode = clamp(512.0f + residual * 0.25f, 0.0f, 1023.0f);
+    enhancementY.write(float4(enhancementCode / 1023.0f), position);
+}
+
+kernel void p7_make_chroma_residual(
+    texture2d<float, access::read> sourceUV [[texture(0)]],
+    texture2d<float, access::read> reconstructedUV [[texture(1)]],
+    texture2d<float, access::write> enhancementUV [[texture(2)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= enhancementUV.get_width() ||
+        position.y >= enhancementUV.get_height()) {
+        return;
+    }
+
+    const uint2 sourceOrigin = position * 2;
+    float2 residual = float2(0.0f);
+    for (uint y = 0; y < 2; ++y) {
+        for (uint x = 0; x < 2; ++x) {
+            const uint2 sourcePosition = sourceOrigin + uint2(x, y);
+            const float2 sourceCode = sourceUV.read(sourcePosition).rg * 1023.0f;
+            const float2 reconstructedCode =
+                reconstructedUV.read(sourcePosition).rg * 1023.0f;
+            residual += sourceCode - reconstructedCode;
+        }
+    }
+    const float2 enhancementCode = clamp(
+        float2(512.0f) + residual * 0.25f,
+        float2(0.0f),
+        float2(1023.0f)
+    );
+    enhancementUV.write(float4(enhancementCode / 1023.0f, 0.0f, 1.0f), position);
+}

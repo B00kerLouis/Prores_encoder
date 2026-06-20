@@ -35,20 +35,16 @@ func cmuPreflight(
                     "metadata source before Profile 8.4/10.4 HLG base-layer conversion."
                 )
             case .pq:
-                let preservesAnalyzedPixels =
-                    colorTransform.outputGamut == resolved.input.gamut
-                    && colorTransform.outputGamut != .rec2020LimitedToP3D65
-                    && abs(colorTransform.targetNits - resolved.input.peakNits) < 0.5
-                guard preservesAnalyzedPixels else {
+                guard colorTransform.outputGamut == .p3D65
+                        || colorTransform.outputGamut.isRec2020Encoding else {
                     throw CMUError.unsupportedColorSpace(
-                        "For compressed Profile 8.1/10.1 output, CMU can use the input " +
-                        "directly only when --gamunt, --oetf pq, and --nit preserve the " +
-                        "source gamut and mastering peak."
+                        "Compressed Profile 8.1/10.1 CMU generation requires a P3-D65 " +
+                        "or Rec.2020-encoded PQ base layer."
                     )
                 }
                 print(
-                    "[CMU] \(quality.uppercased()) PQ conversion preserves the analyzed " +
-                    "source gamut and mastering peak; generated metadata can drive the encode directly."
+                    "[CMU] \(quality.uppercased()) CMU analysis will apply the requested " +
+                    "\(resolved.outputGamut.label) PQ transform before measuring the pixels."
                 )
             default:
                 throw CMUError.unsupportedColorSpace(
@@ -134,6 +130,7 @@ func runCMUAnalysisBeforeCompressedEncode(
     inputAsset: AVAsset,
     sidecarBaseURL: URL,
     quality: String,
+    colorTransform: ColorTransformRequest?,
     masteringPeakNits: Float,
     forcedStartTimecode: String?
 ) async throws -> CMUOutputArtifacts {
@@ -147,16 +144,30 @@ func runCMUAnalysisBeforeCompressedEncode(
             "CMU currently requires file-based input media."
         )
     }
-    let descriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
+    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
+    var descriptor = inputDescriptor
+    var resolvedTransform: ResolvedColorTransform?
+    if let colorTransform, colorTransform.outputOETF == .pq {
+        guard let track = try await inputAsset.loadTracks(withMediaType: .video).first else {
+            throw CMUError.noVideoTrack(inputURL)
+        }
+        let resolved = try resolveColorTransform(
+            request: colorTransform,
+            sourceColorSpace: await detectColorSpace(from: track)
+        )
+        descriptor = inputDescriptor.applying(resolved)
+        resolvedTransform = resolved
+    }
     print("[CMU] Generating Dolby Vision metadata before \(quality.uppercased()) encode.")
     return try await runCMUAnalysis(
         selectedURL: inputURL,
         descriptor: descriptor,
-        source: .input,
+        source: resolvedTransform == nil ? .input : .transformedInput,
         fallbackInputURL: inputURL,
         sidecarBaseURL: sidecarBaseURL,
         masteringPeakNits: masteringPeakNits,
-        forcedStartTimecode: forcedStartTimecode
+        forcedStartTimecode: forcedStartTimecode,
+        colorTransform: resolvedTransform
     )
 }
 
@@ -167,7 +178,8 @@ private func runCMUAnalysis(
     fallbackInputURL: URL?,
     sidecarBaseURL: URL,
     masteringPeakNits: Float,
-    forcedStartTimecode: String?
+    forcedStartTimecode: String?,
+    colorTransform: ResolvedColorTransform? = nil
 ) async throws -> CMUOutputArtifacts {
     let timecode = try await cmuResolveTimecodeReference(
         analyzedURL: selectedURL,
@@ -190,7 +202,8 @@ private func runCMUAnalysis(
         descriptor: descriptor,
         source: source,
         masteringPeakNits: masteringPeakNits,
-        timecode: timecode
+        timecode: timecode,
+        colorTransform: colorTransform
     )
     let artifacts = try CMUExporter.write(
         document: document,

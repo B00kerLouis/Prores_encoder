@@ -188,7 +188,8 @@ final class CMUMetalAnalyzer {
         descriptor: CMUAssetDescriptor,
         source: CMUAnalysisSource,
         masteringPeakNits: Float,
-        timecode: CMUTimecodeReference
+        timecode: CMUTimecodeReference,
+        colorTransform: ResolvedColorTransform? = nil
     ) async throws -> CMUAnalysisDocument {
         let asset = AVURLAsset(
             url: url,
@@ -196,6 +197,14 @@ final class CMUMetalAnalyzer {
         )
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw CMUError.noVideoTrack(url)
+        }
+        let colorPipeline = try colorTransform.map {
+            try MetalColorPipeline(
+                transform: $0,
+                width: descriptor.width,
+                height: descriptor.height,
+                pixelFormat: descriptor.signalRange.pixelFormat
+            )
         }
 
         let reader = try AVAssetReader(asset: asset)
@@ -252,9 +261,14 @@ final class CMUMetalAnalyzer {
                 output.copyNextSampleBuffer()
             }
             guard let sample else { break }
-            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else {
+            guard let decodedPixelBuffer = CMSampleBufferGetImageBuffer(sample) else {
                 continue
             }
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            let pixelBuffer = try colorPipeline?.process(
+                decodedPixelBuffer,
+                pts: pts
+            ) ?? decodedPixelBuffer
             let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
             guard pixelFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
                     || pixelFormat == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
@@ -262,7 +276,6 @@ final class CMUMetalAnalyzer {
                 throw CMUError.unsupportedPixelBuffer(pixelFormat)
             }
 
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
             let duration = CMSampleBufferGetDuration(sample)
             if firstPTS == nil { firstPTS = pts }
             let endPTS: CMTime

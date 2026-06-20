@@ -56,7 +56,7 @@ enum CMUExporter {
         let baseURL = sidecarBaseURL.pathExtension.isEmpty
             ? sidecarBaseURL
             : sidecarBaseURL.deletingPathExtension()
-        let xmlURL = baseURL.appendingPathExtension("cmu.xml")
+        let xmlURL = baseURL.appendingPathExtension("xml")
 
         let fileManager = FileManager.default
         try fileManager.createDirectory(

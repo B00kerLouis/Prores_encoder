@@ -35,6 +35,7 @@ public enum ProResTransferFunction: String, Sendable {
 }
 
 public enum ProResDolbyVisionProfile: String, Sendable {
+    case profile76 = "76"
     case profile81 = "81"
     case profile84 = "84"
     case profile101 = "101"
@@ -69,6 +70,7 @@ public struct ProResEncodeOptions: Sendable {
     public var quality: String
     public var extraAudioURL: URL?
     public var replaceSourceAudio: Bool
+    public var deleteSourceAudio: Bool
     public var forcedOutputStartTimecode: String?
     public var dolbyVisionXMLURL: URL?
     public var bitrateMbps: Double?
@@ -84,6 +86,7 @@ public struct ProResEncodeOptions: Sendable {
         quality: String = "422hq",
         extraAudioURL: URL? = nil,
         replaceSourceAudio: Bool = false,
+        deleteSourceAudio: Bool = false,
         forcedOutputStartTimecode: String? = nil,
         dolbyVisionXMLURL: URL? = nil,
         bitrateMbps: Double? = nil,
@@ -98,6 +101,7 @@ public struct ProResEncodeOptions: Sendable {
         self.quality = quality
         self.extraAudioURL = extraAudioURL
         self.replaceSourceAudio = replaceSourceAudio
+        self.deleteSourceAudio = deleteSourceAudio
         self.forcedOutputStartTimecode = forcedOutputStartTimecode
         self.dolbyVisionXMLURL = dolbyVisionXMLURL
         self.bitrateMbps = bitrateMbps
@@ -309,10 +313,11 @@ public final class ProResEncoder: Sendable {
             }
             if wantsHEVC,
                let profile = options.dolbyVisionProfile,
+               profile != .profile76,
                profile != .profile81,
                profile != .profile84 {
                 throw ProResEncoderError.invalidOption(
-                    "HEVC supports Dolby Vision Profiles 8.1 and 8.4."
+                    "HEVC supports Dolby Vision Profiles 7.6, 8.1, and 8.4."
                 )
             }
             if wantsAV1,
@@ -512,6 +517,7 @@ public final class ProResEncoder: Sendable {
             outputURL: outputURL,
             quality: quality,
             forcedOutputStartTimecode: options.forcedOutputStartTimecode,
+            deleteSourceAudio: options.deleteSourceAudio,
             colorTransform: colorTransform
         ) else {
             throw ProResEncoderError.encodingFailed(
@@ -657,13 +663,27 @@ public final class ProResEncoder: Sendable {
 
         var generatedCMUArtifacts: CMUOutputArtifacts?
         var dolbyVisionXMLURL = options.dolbyVisionXMLURL
+        let isCompressedOutput = isHEVCQuality(quality) || isAV1Quality(quality)
+        let temporaryCMUSidecarBaseURL = isCompressedOutput
+            ? FileManager.default.temporaryDirectory.appendingPathComponent(
+                "prores-encoder-cmu-\(UUID().uuidString)"
+            )
+            : outputURL
+        defer {
+            if isCompressedOutput {
+                try? fileManager.removeItem(
+                    at: temporaryCMUSidecarBaseURL.appendingPathExtension("xml")
+                )
+            }
+        }
         if options.includeGeneratedDolbyVisionMetadata,
            let masteringPeakNits = options.cmuMasteringNits,
-           isHEVCQuality(quality) || isAV1Quality(quality) {
+           isCompressedOutput {
             generatedCMUArtifacts = try await runCMUAnalysisBeforeCompressedEncode(
                 inputAsset: asset,
-                sidecarBaseURL: outputURL,
+                sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: quality,
+                colorTransform: colorTransform,
                 masteringPeakNits: masteringPeakNits,
                 forcedStartTimecode: options.forcedOutputStartTimecode
             )
@@ -676,6 +696,7 @@ public final class ProResEncoder: Sendable {
             quality: quality,
             extraAudioURL: options.extraAudioURL,
             audioReplace: options.replaceSourceAudio,
+            deleteSourceAudio: options.deleteSourceAudio,
             forcedOutputStartTimecode: options.forcedOutputStartTimecode,
             dolbyVisionXMLURL: dolbyVisionXMLURL,
             hevcOptions: hevcOptions,
@@ -695,7 +716,7 @@ public final class ProResEncoder: Sendable {
             generatedCMUArtifacts = try await runCMUAnalysisAfterEncode(
                 inputAsset: asset,
                 encodedOutputURL: outputURL,
-                sidecarBaseURL: outputURL,
+                sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: quality,
                 masteringPeakNits: masteringPeakNits,
                 forcedStartTimecode: options.forcedOutputStartTimecode
@@ -716,7 +737,7 @@ public final class ProResEncoder: Sendable {
         }
         return ProResEncodeResult(
             outputURLs: [outputURL],
-            cmuXMLURL: generatedCMUArtifacts?.xmlURL
+            cmuXMLURL: isCompressedOutput ? nil : generatedCMUArtifacts?.xmlURL
         )
     }
 
@@ -743,9 +764,11 @@ public final class ProResEncoder: Sendable {
                 "forcedOutputStartTimecode is supported only in MOV."
             )
         }
-        if options.extraAudioURL != nil && !options.replaceSourceAudio {
+        if options.extraAudioURL != nil
+            && !options.replaceSourceAudio
+            && !options.deleteSourceAudio {
             throw ProResEncoderError.invalidOption(
-                "MXF extraAudioURL requires replaceSourceAudio."
+                "MXF extraAudioURL requires replaceSourceAudio or deleteSourceAudio."
             )
         }
 
@@ -772,7 +795,10 @@ public final class ProResEncoder: Sendable {
             quality: quality,
             exportFormat: format.rawValue,
             audioCHperFile: options.audioChannelsPerMXFFile,
-            audioOverrideURL: options.replaceSourceAudio ? options.extraAudioURL : nil,
+            audioOverrideURL: (options.replaceSourceAudio || options.deleteSourceAudio)
+                ? options.extraAudioURL
+                : nil,
+            deleteSourceAudio: options.deleteSourceAudio,
             colorTransform: colorTransform
         )
         guard result.success else {

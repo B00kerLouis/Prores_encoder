@@ -22,6 +22,7 @@ func includeGeneratedCMUXMLInProResMOV(
         quality: "pass",
         extraAudioURL: nil,
         audioReplace: false,
+        deleteSourceAudio: false,
         forcedOutputStartTimecode: nil,
         dolbyVisionXMLURL: xmlURL,
         hevcOptions: nil,

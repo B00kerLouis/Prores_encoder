@@ -405,17 +405,9 @@ func colorPipelinePixelFormat(for quality: String) -> OSType {
 }
 
 private func detectedSourcePeakNits(colorSpace: SourceColorSpace, oetf: VideoOETF) -> Float {
-    if let contentLight = colorSpace.contentLightLevelInfo,
-       contentLight.count >= 2 {
-        let maxCLL = contentLight.withUnsafeBytes { bytes -> UInt16 in
-            let p = bytes.bindMemory(to: UInt8.self)
-            return (UInt16(p[0]) << 8) | UInt16(p[1])
-        }
-        if maxCLL > 0 {
-            return Float(maxCLL)
-        }
-    }
-
+    // The display mastering peak defines the source mastering range used by
+    // the EETF. MaxCLL describes measured content and can legitimately exceed
+    // that range, so it is only a fallback when mastering metadata is absent.
     if let mastering = colorSpace.masteringDisplayColorVolume,
        mastering.count >= 20 {
         let raw = mastering.withUnsafeBytes { bytes -> UInt32 in
@@ -427,6 +419,17 @@ private func detectedSourcePeakNits(colorSpace: SourceColorSpace, oetf: VideoOET
         }
         if raw > 0 {
             return Float(raw) / 10_000.0
+        }
+    }
+
+    if let contentLight = colorSpace.contentLightLevelInfo,
+       contentLight.count >= 2 {
+        let maxCLL = contentLight.withUnsafeBytes { bytes -> UInt16 in
+            let p = bytes.bindMemory(to: UInt8.self)
+            return (UInt16(p[0]) << 8) | UInt16(p[1])
+        }
+        if maxCLL > 0 {
+            return Float(maxCLL)
         }
     }
 

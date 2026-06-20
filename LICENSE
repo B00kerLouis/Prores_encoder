@@ -1,3 +1,95 @@
+PROJECT LICENSE NOTICE AND DESIGNATED COMMERCIAL LICENSE GRANT
+Effective Date: 2026-06-21
+
+General Public License
+----------------------
+Except for the separate commercial license grant expressly stated below, this
+repository, project, and Program are licensed to the public under the GNU Affero
+General Public License, version 3, as published by the Free Software Foundation
+("AGPL-3.0"). The full AGPL-3.0 license text appears below unmodified.
+
+Designated Commercial License Grant
+-----------------------------------
+The copyright holder grants the following designated entities a separate
+commercial license for the Covered Mainline Code, as defined below:
+
+  - Apple Inc.
+  - Avid Technology, Inc.
+  - Black Magic / Blackmagic Design Pty Ltd
+  - Dolby Laboratories, Inc.
+
+For purposes of this grant, each designated entity includes its direct and
+indirect subsidiaries, controlled affiliates, and internal business units, but
+only while such entity is controlled by, controls, or is under common control
+with the designated entity.
+
+Covered Mainline Code
+---------------------
+"Covered Mainline Code" means all source code in the mainline repository or main
+branch of this project for which the project copyright holder owns or controls
+sufficient rights to grant this commercial license.
+
+Covered Mainline Code does not include Third-Party Components. "Third-Party
+Components" include dependencies, vendored libraries, SDKs, frameworks, sample
+code, generated files, assets, or other materials whose copyright is owned by a
+third party, even if they are distributed in or referenced by this repository.
+Third-Party Components remain governed solely by their own applicable licenses.
+Nothing in this file grants rights that the copyright holder does not own or
+control.
+
+Commercial Rights Granted to Designated Entities
+------------------------------------------------
+Each designated entity may use, copy, reproduce, compile, execute, modify,
+adapt, create derivative works from, internally deploy, externally deploy,
+provide network access to, distribute in object-code or binary form, and
+commercially exploit the Covered Mainline Code as part of that designated
+entity's proprietary products, services, internal systems, research, development,
+testing, production pipelines, or commercial offerings.
+
+A designated entity exercising this separate commercial license is not required,
+with respect to the Covered Mainline Code, to comply with the AGPL-3.0 copyleft,
+Corresponding Source, network interaction, disclosure, redistribution, or
+reciprocal licensing obligations that would otherwise apply under AGPL-3.0.
+
+Restrictions and Reservations
+-----------------------------
+This commercial license does not permit a designated entity to relicense,
+resell, publish, or distribute the Covered Mainline Code itself as a standalone
+source-code product to third parties, except as part of that designated entity's
+own products, services, tools, platforms, SDKs, workflows, or internal/external
+commercial offerings.
+
+This commercial license does not grant any trademark rights, trade name rights,
+service mark rights, rights of publicity, or rights in Third-Party Components.
+Patent rights, if any, are granted only to the extent expressly required to use
+the Covered Mainline Code as permitted above and only to the extent owned or
+controlled by the copyright holder.
+
+No Warranty
+-----------
+The Covered Mainline Code is provided "AS IS", without warranty of any kind, to
+the maximum extent permitted by applicable law. The copyright holder is not
+liable for any claim, damages, or other liability arising from use of the Covered
+Mainline Code under either AGPL-3.0 or this separate commercial license.
+
+Relation Between Licenses
+-------------------------
+Anyone who is not a designated entity, and who has not received a separate
+written commercial license from the copyright holder, receives this project only
+under AGPL-3.0.
+
+A designated entity may choose to use the Covered Mainline Code either under
+this separate commercial license grant or under AGPL-3.0. Use of Third-Party
+Components remains subject to the applicable third-party licenses.
+
+Future versions of this project may be distributed under different terms. This
+license grant applies only to versions of the Covered Mainline Code that include
+this notice, unless a separate written agreement states otherwise.
+
+-------------------------------------------------------------------------------
+GNU AFFERO GENERAL PUBLIC LICENSE, VERSION 3
+-------------------------------------------------------------------------------
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

@@ -32,6 +32,21 @@ final class MediaPumpPair: @unchecked Sendable {
     }
 }
 
+private protocol AudioSampleBufferSource: AnyObject {
+    var formatDescription: CMAudioFormatDescription { get }
+    func copyNextSampleBuffer() throws -> CMSampleBuffer?
+}
+
+private final class AudioSampleSourcePumpPair: @unchecked Sendable {
+    let input: AVAssetWriterInput
+    let source: any AudioSampleBufferSource
+
+    init(input: AVAssetWriterInput, source: any AudioSampleBufferSource) {
+        self.input = input
+        self.source = source
+    }
+}
+
 /// Bundles timed metadata reader/writer adaptors for pump-based writing.
 final class TimedMetadataPumpPair: @unchecked Sendable {
     let input: AVAssetWriterInput
@@ -46,6 +61,470 @@ final class TimedMetadataPumpPair: @unchecked Sendable {
         self.input = input
         self.writerAdaptor = writerAdaptor
         self.readerAdaptor = readerAdaptor
+    }
+}
+
+private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked Sendable {
+    let formatDescription: CMAudioFormatDescription
+
+    private var audioFile: AudioFileID?
+    private let maxPacketSize: UInt32
+    private let framesPerPacket: UInt32
+    private let sampleRateTimescale: CMTimeScale
+    private var packetIndex: Int64 = 0
+
+    init(url: URL) throws {
+        var openedFile: AudioFileID?
+        let openStatus = AudioFileOpenURL(
+            url as CFURL,
+            .readPermission,
+            0,
+            &openedFile
+        )
+        guard openStatus == noErr, let openedFile else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(openStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not open audio file \(url.lastPathComponent): \(openStatus)."
+                ]
+            )
+        }
+        audioFile = openedFile
+
+        do {
+            var asbd = AudioStreamBasicDescription()
+            var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            let formatStatus = AudioFileGetProperty(
+                openedFile,
+                kAudioFilePropertyDataFormat,
+                &asbdSize,
+                &asbd
+            )
+            guard formatStatus == noErr else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: Int(formatStatus),
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Could not read the audio data format: \(formatStatus)."
+                    ]
+                )
+            }
+            guard asbd.mSampleRate > 0, asbd.mFramesPerPacket > 0 else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Audio file has invalid sample-rate or packet timing."
+                    ]
+                )
+            }
+
+            var packetSizeUpperBound: UInt32 = 0
+            var packetSizePropertySize = UInt32(MemoryLayout<UInt32>.size)
+            let packetSizeStatus = AudioFileGetProperty(
+                openedFile,
+                kAudioFilePropertyPacketSizeUpperBound,
+                &packetSizePropertySize,
+                &packetSizeUpperBound
+            )
+            guard packetSizeStatus == noErr, packetSizeUpperBound > 0 else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: Int(packetSizeStatus),
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Could not determine the audio packet size."
+                    ]
+                )
+            }
+
+            let channelLayout = try Self.propertyData(
+                audioFile: openedFile,
+                propertyID: kAudioFilePropertyChannelLayout
+            )
+            let magicCookie = try Self.propertyData(
+                audioFile: openedFile,
+                propertyID: kAudioFilePropertyMagicCookieData
+            )
+
+            var createdDescription: CMAudioFormatDescription?
+            let descriptionStatus = channelLayout.withUnsafeBytes { layoutBytes in
+                magicCookie.withUnsafeBytes { cookieBytes in
+                    CMAudioFormatDescriptionCreate(
+                        allocator: kCFAllocatorDefault,
+                        asbd: &asbd,
+                        layoutSize: channelLayout.count,
+                        layout: channelLayout.isEmpty
+                            ? nil
+                            : layoutBytes.baseAddress?.assumingMemoryBound(to: AudioChannelLayout.self),
+                        magicCookieSize: magicCookie.count,
+                        magicCookie: magicCookie.isEmpty ? nil : cookieBytes.baseAddress,
+                        extensions: nil,
+                        formatDescriptionOut: &createdDescription
+                    )
+                }
+            }
+            guard descriptionStatus == noErr, let createdDescription else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: Int(descriptionStatus),
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Could not create the audio format description: \(descriptionStatus)."
+                    ]
+                )
+            }
+
+            formatDescription = createdDescription
+            maxPacketSize = packetSizeUpperBound
+            framesPerPacket = asbd.mFramesPerPacket
+            sampleRateTimescale = CMTimeScale(asbd.mSampleRate.rounded())
+        } catch {
+            AudioFileClose(openedFile)
+            audioFile = nil
+            throw error
+        }
+    }
+
+    deinit {
+        if let audioFile {
+            AudioFileClose(audioFile)
+        }
+    }
+
+    func copyNextSampleBuffer() throws -> CMSampleBuffer? {
+        guard let audioFile else { return nil }
+
+        var packetDescription = AudioStreamPacketDescription()
+        var packetCount: UInt32 = 1
+        var byteCount = maxPacketSize
+        var packetData = Data(count: Int(maxPacketSize))
+        let readStatus = packetData.withUnsafeMutableBytes { rawBytes in
+            AudioFileReadPacketData(
+                audioFile,
+                false,
+                &byteCount,
+                &packetDescription,
+                packetIndex,
+                &packetCount,
+                rawBytes.baseAddress
+            )
+        }
+        if readStatus == kAudioFileEndOfFileError || packetCount == 0 {
+            return nil
+        }
+        guard readStatus == noErr, byteCount > 0 else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(readStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not read audio packet \(packetIndex): \(readStatus)."
+                ]
+            )
+        }
+
+        let packetOffset = max(Int(packetDescription.mStartOffset), 0)
+        let describedSize = Int(packetDescription.mDataByteSize)
+        let packetSize = describedSize > 0 ? describedSize : Int(byteCount)
+        guard packetOffset + packetSize <= Int(byteCount) else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Audio packet \(packetIndex) has an invalid byte range."
+                ]
+            )
+        }
+
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: packetSize,
+            blockAllocator: nil,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: packetSize,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(blockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not allocate an audio sample buffer: \(blockStatus)."
+                ]
+            )
+        }
+
+        let replaceStatus = packetData.withUnsafeBytes { rawBytes in
+            CMBlockBufferReplaceDataBytes(
+                with: rawBytes.baseAddress!.advanced(by: packetOffset),
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: packetSize
+            )
+        }
+        guard replaceStatus == kCMBlockBufferNoErr else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(replaceStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not populate an audio sample buffer: \(replaceStatus)."
+                ]
+            )
+        }
+
+        let duration = CMTime(
+            value: CMTimeValue(framesPerPacket),
+            timescale: sampleRateTimescale
+        )
+        var timing = CMSampleTimingInfo(
+            duration: duration,
+            presentationTimeStamp: CMTime(
+                value: CMTimeValue(packetIndex) * CMTimeValue(framesPerPacket),
+                timescale: sampleRateTimescale
+            ),
+            decodeTimeStamp: .invalid
+        )
+        var sampleSize = packetSize
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(sampleStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not create audio sample \(packetIndex): \(sampleStatus)."
+                ]
+            )
+        }
+        packetIndex += Int64(packetCount)
+        return sampleBuffer
+    }
+
+    private static func propertyData(
+        audioFile: AudioFileID,
+        propertyID: AudioFilePropertyID
+    ) throws -> Data {
+        var byteCount: UInt32 = 0
+        var writable: UInt32 = 0
+        let infoStatus = AudioFileGetPropertyInfo(
+            audioFile,
+            propertyID,
+            &byteCount,
+            &writable
+        )
+        if infoStatus == kAudioFileUnsupportedPropertyError {
+            return Data()
+        }
+        guard infoStatus == noErr else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(infoStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not inspect audio property \(propertyID): \(infoStatus)."
+                ]
+            )
+        }
+        guard byteCount > 0 else { return Data() }
+
+        var data = Data(count: Int(byteCount))
+        let readStatus = data.withUnsafeMutableBytes { rawBytes in
+            AudioFileGetProperty(
+                audioFile,
+                propertyID,
+                &byteCount,
+                rawBytes.baseAddress!
+            )
+        }
+        guard readStatus == noErr else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(readStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not read audio property \(propertyID): \(readStatus)."
+                ]
+            )
+        }
+        return data.prefix(Int(byteCount))
+    }
+}
+
+private final class AVAudioFilePCMSource: AudioSampleBufferSource, @unchecked Sendable {
+    let formatDescription: CMAudioFormatDescription
+
+    private let audioFile: AVAudioFile
+    private let format: AVAudioFormat
+    private let framesPerBuffer: AVAudioFrameCount = 4096
+    private let sampleRateTimescale: CMTimeScale
+    private var frameIndex: AVAudioFramePosition = 0
+
+    init(url: URL) throws {
+        audioFile = try AVAudioFile(
+            forReading: url,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: true
+        )
+        format = audioFile.processingFormat
+        guard format.sampleRate > 0,
+              format.channelCount > 0 else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Decoded audio has no valid PCM stream description."
+                ]
+            )
+        }
+
+        let streamDescription = format.streamDescription
+        var asbd = streamDescription.pointee
+        let channelLayout = format.channelLayout
+        let layoutPointer = channelLayout?.layout
+        let layoutSize = layoutPointer.map {
+            MemoryLayout<AudioChannelLayout>.size
+                + max(Int($0.pointee.mNumberChannelDescriptions) - 1, 0)
+                * MemoryLayout<AudioChannelDescription>.size
+        } ?? 0
+
+        var createdDescription: CMAudioFormatDescription?
+        let status = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: layoutSize,
+            layout: layoutPointer,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &createdDescription
+        )
+        guard status == noErr, let createdDescription else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not create the decoded PCM format description: \(status)."
+                ]
+            )
+        }
+        formatDescription = createdDescription
+        sampleRateTimescale = CMTimeScale(format.sampleRate.rounded())
+    }
+
+    func copyNextSampleBuffer() throws -> CMSampleBuffer? {
+        guard let pcmBuffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: framesPerBuffer
+        ) else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not allocate the decoded PCM buffer."
+                ]
+            )
+        }
+        try audioFile.read(into: pcmBuffer)
+        let frameLength = pcmBuffer.frameLength
+        guard frameLength > 0 else { return nil }
+
+        let audioBuffer = pcmBuffer.audioBufferList.pointee.mBuffers
+        guard let sourceData = audioBuffer.mData,
+              audioBuffer.mDataByteSize > 0 else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Decoded PCM buffer contains no audio bytes."
+                ]
+            )
+        }
+        let byteCount = Int(audioBuffer.mDataByteSize)
+
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: byteCount,
+            blockAllocator: nil,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: byteCount,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(blockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not allocate the decoded PCM sample buffer: \(blockStatus)."
+                ]
+            )
+        }
+        let replaceStatus = CMBlockBufferReplaceDataBytes(
+            with: sourceData,
+            blockBuffer: blockBuffer,
+            offsetIntoDestination: 0,
+            dataLength: byteCount
+        )
+        guard replaceStatus == kCMBlockBufferNoErr else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(replaceStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not populate the decoded PCM sample buffer: \(replaceStatus)."
+                ]
+            )
+        }
+
+        let bytesPerFrame = max(
+            Int(format.streamDescription.pointee.mBytesPerFrame),
+            1
+        )
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: sampleRateTimescale),
+            presentationTimeStamp: CMTime(
+                value: CMTimeValue(frameIndex),
+                timescale: sampleRateTimescale
+            ),
+            decodeTimeStamp: .invalid
+        )
+        var sampleSize = bytesPerFrame
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: Int(frameLength),
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: Int(sampleStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not create the decoded PCM sample: \(sampleStatus)."
+                ]
+            )
+        }
+        frameIndex += AVAudioFramePosition(frameLength)
+        return sampleBuffer
     }
 }
 
@@ -289,26 +768,86 @@ private func addMetadataReferentAssociations(
     }
 }
 
-private func av1AudioReaderSettings(channelCount: Int) -> [String: Any] {
-    [
+private func movSupportsAudioPassthrough(
+    formatDescription: CMAudioFormatDescription
+) -> Bool {
+    switch CMFormatDescriptionGetMediaSubType(formatDescription) {
+    case kAudioFormatLinearPCM,
+         kAudioFormatMPEG4AAC,
+         kAudioFormatAC3,
+         kAudioFormatEnhancedAC3,
+         kAudioFormatAppleLossless,
+         kAudioFormatMPEGLayer3:
+        return true
+    default:
+        return false
+    }
+}
+
+private func audioChannelLayoutData(
+    formatDescription: CMAudioFormatDescription,
+    channelCount: Int
+) -> Data? {
+    var layoutSize = 0
+    if let layout = CMAudioFormatDescriptionGetChannelLayout(
+        formatDescription,
+        sizeOut: &layoutSize
+    ), layoutSize > 0 {
+        return Data(bytes: layout, count: layoutSize)
+    }
+    guard channelCount > 2 else { return nil }
+
+    let tag: AudioChannelLayoutTag
+    switch channelCount {
+    case 3: tag = kAudioChannelLayoutTag_MPEG_3_0_A
+    case 4: tag = kAudioChannelLayoutTag_Quadraphonic
+    case 5: tag = kAudioChannelLayoutTag_MPEG_5_0_A
+    case 6: tag = kAudioChannelLayoutTag_MPEG_5_1_A
+    case 7: tag = kAudioChannelLayoutTag_MPEG_6_1_A
+    case 8: tag = kAudioChannelLayoutTag_MPEG_7_1_C
+    default:
+        tag = kAudioChannelLayoutTag_DiscreteInOrder
+            | AudioChannelLayoutTag(channelCount)
+    }
+
+    var layoutTag = tag
+    var channelBitmap: UInt32 = 0
+    var descriptionCount: UInt32 = 0
+    var data = Data()
+    withUnsafeBytes(of: &layoutTag) { data.append(contentsOf: $0) }
+    withUnsafeBytes(of: &channelBitmap) { data.append(contentsOf: $0) }
+    withUnsafeBytes(of: &descriptionCount) { data.append(contentsOf: $0) }
+    return data
+}
+
+private func movPCMTranscodeSettings(
+    formatDescription: CMAudioFormatDescription
+) -> [String: Any]? {
+    guard !movSupportsAudioPassthrough(formatDescription: formatDescription),
+          let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(
+            formatDescription
+          )?.pointee else {
+        return nil
+    }
+
+    let channelCount = max(Int(asbd.mChannelsPerFrame), 1)
+    let sampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48_000
+    var settings: [String: Any] = [
         AVFormatIDKey: kAudioFormatLinearPCM,
-        AVSampleRateKey: 48_000,
-        AVNumberOfChannelsKey: max(channelCount, 1),
-        AVLinearPCMBitDepthKey: 16,
-        AVLinearPCMIsFloatKey: false,
+        AVSampleRateKey: sampleRate,
+        AVNumberOfChannelsKey: channelCount,
+        AVLinearPCMBitDepthKey: 32,
+        AVLinearPCMIsFloatKey: true,
         AVLinearPCMIsBigEndianKey: false,
         AVLinearPCMIsNonInterleaved: false
     ]
-}
-
-private func av1AACWriterSettings(channelCount: Int) -> [String: Any] {
-    let channels = max(channelCount, 1)
-    return [
-        AVFormatIDKey: kAudioFormatMPEG4AAC,
-        AVSampleRateKey: 48_000,
-        AVNumberOfChannelsKey: channels,
-        AVEncoderBitRateKey: min(max(channels * 128_000, 128_000), 640_000)
-    ]
+    if let channelLayout = audioChannelLayoutData(
+        formatDescription: formatDescription,
+        channelCount: channelCount
+    ) {
+        settings[AVChannelLayoutKey] = channelLayout
+    }
+    return settings
 }
 
 private struct MOVAtomDescriptor {
@@ -336,9 +875,10 @@ private enum DolbyVisionCompressedCodec {
         }
     }
 
-    var dolbyVisionSampleEntryType: String {
+    func dolbyVisionSampleEntryType(profile: DolbyVisionHEVCProfile?) -> String {
         switch self {
-        case .hevc: return "dvh1"
+        case .hevc:
+            return profile?.isProfile76 == true ? "dvhe" : "dvh1"
         case .av1: return "dav1"
         }
     }
@@ -2281,14 +2821,17 @@ private func makeDolbyVisionHEVCConfigurationBox(
 ) -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel = dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
+    let dvLevel = profile.isProfile76
+        ? 6
+        : dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
-    let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
+    let layerFlags: UInt8 = profile.isProfile76 ? 0x07 : 0x05
+    let byte3 = ((dvLevel & 0x1f) << 3) | layerFlags
     let byte4 = compatibilityID << 4
 
     var box = Data()
     box.append(uint32BEData(32))
-    box.append(Data("dvvC".utf8))
+    box.append(Data((profile.isProfile76 ? "dvcC" : "dvvC").utf8))
     box.append(contentsOf: [0x01, 0x00, byte2, byte3, byte4])
     box.append(Data(repeating: 0, count: 19))
     return box
@@ -2424,7 +2967,8 @@ private func videoSampleEntry(
 private func normalizeCompressedVideoSampleEntry(
     in movieURL: URL,
     codec: DolbyVisionCompressedCodec,
-    useDolbyVisionCodecTag: Bool
+    useDolbyVisionCodecTag: Bool,
+    profile: DolbyVisionHEVCProfile? = nil
 ) throws -> String {
     guard let entry = try videoSampleEntry(
         in: movieURL,
@@ -2440,7 +2984,7 @@ private func normalizeCompressedVideoSampleEntry(
     }
 
     let requiredType = useDolbyVisionCodecTag
-        ? codec.dolbyVisionSampleEntryType
+        ? codec.dolbyVisionSampleEntryType(profile: profile)
         : codec.baseLayerSampleEntryType
     if entry.type != requiredType {
         let handle = try FileHandle(forUpdating: movieURL)
@@ -2463,6 +3007,64 @@ private func normalizeCompressedVideoSampleEntry(
         )
     }
     return verifiedEntry.type
+}
+
+private func movieContainsDolbyVisionEnhancementLayer(
+    at movieURL: URL
+) async throws -> Bool {
+    let asset = AVURLAsset(
+        url: movieURL,
+        options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+    )
+    guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "EL verification found no video track in \(movieURL.lastPathComponent)."
+            ]
+        )
+    }
+    let reader = try AVAssetReader(asset: asset)
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "EL verification could not read HEVC samples from \(movieURL.lastPathComponent)."
+            ]
+        )
+    }
+    reader.add(output)
+    guard reader.startReading() else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "EL verification reader failed to start: " +
+                (reader.error?.localizedDescription ?? "unknown reader error")
+            ]
+        )
+    }
+    while let sampleBuffer = output.copyNextSampleBuffer() {
+        if sampleBufferContainsHEVCDolbyVisionEL(sampleBuffer) {
+            reader.cancelReading()
+            return true
+        }
+    }
+    if reader.status == .failed {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "EL verification failed: " +
+                (reader.error?.localizedDescription ?? "unknown reader error")
+            ]
+        )
+    }
+    return false
 }
 
 private func compressedDolbyVisionCodec(in movieURL: URL) throws -> DolbyVisionCompressedCodec? {
@@ -3366,6 +3968,59 @@ private func startPassthroughPump(
     }
 }
 
+private func startAudioSampleSourcePump(
+    _ pair: AudioSampleSourcePumpPair,
+    queueLabel: String,
+    trackLabel: String,
+    writer: AVAssetWriter,
+    cont: CheckedContinuation<Void, Error>
+) {
+    enum PumpStep {
+        case appended
+        case finished
+        case failed(Error)
+    }
+
+    let once = OnceGuard()
+    let pairRef = SendableRef(pair)
+    let writerRef = SendableRef(writer)
+    pairRef.value.input.requestMediaDataWhenReady(
+        on: DispatchQueue(label: queueLabel, qos: .userInitiated)
+    ) {
+        let pair = pairRef.value
+        while pair.input.isReadyForMoreMediaData {
+            let step: PumpStep = autoreleasepool {
+                do {
+                    guard let buffer = try pair.source.copyNextSampleBuffer() else {
+                        return .finished
+                    }
+                    guard pair.input.append(buffer) else {
+                        return .failed(makeWriterFailure(
+                            stage: "\(trackLabel) append failed",
+                            writer: writerRef.value
+                        ))
+                    }
+                    return .appended
+                } catch {
+                    return .failed(error)
+                }
+            }
+            switch step {
+            case .appended:
+                continue
+            case .finished:
+                pair.input.markAsFinished()
+                if once.claim() { cont.resume() }
+                return
+            case .failed(let error):
+                pair.input.markAsFinished()
+                if once.claim() { cont.resume(throwing: error) }
+                return
+            }
+        }
+    }
+}
+
 /// Writes a one-sample synthetic QuickTime TC track.
 private func startSyntheticTimecodePump(
     _ pair: SyntheticTimecodePumpPair,
@@ -3551,6 +4206,7 @@ func encodeMOV(
     quality: String,
     extraAudioURL: URL?,
     audioReplace: Bool,
+    deleteSourceAudio: Bool,
     forcedOutputStartTimecode: String?,
     dolbyVisionXMLURL: URL?,
     hevcOptions: HEVCEncodeOptions?,
@@ -3605,10 +4261,10 @@ func encodeMOV(
         $0 == 0x61763031 || $0 == 0x64617631 // av01 / dav1
     } == true
     let writesAV1Video = isAV1 || passthroughIsAV1
-    let audioTrack     = audioReplace ? nil : (try? await asset.loadTracks(withMediaType: .audio).first)
-    let sourceAudioChannelCount = audioTrack == nil
-        ? 0
-        : await audioChannelCount(from: asset)
+    let removesSourceAudio = audioReplace || deleteSourceAudio
+    let audioTrack = removesSourceAudio
+        ? nil
+        : (try? await asset.loadTracks(withMediaType: .audio).first)
     let sourceMetadataTracks = (try? await asset.loadTracks(withMediaType: .metadata)) ?? []
     let estimatedFrames = await estimateFrameCount(asset: asset)
     let sourceIsProRes = isAV1 ? await isSourceProRes(videoTrack) : false
@@ -3694,11 +4350,15 @@ func encodeMOV(
                         domain: "DolbyVisionRPU",
                         code: 1,
                         userInfo: [NSLocalizedDescriptionKey:
-                            "HEVC Dolby Vision encode requires --dv-profile 81 or 84."
+                            "HEVC Dolby Vision encode requires --dv-profile 76, 81, or 84."
                         ]
                     )
                 }
-                print("[DoVi] Generating Profile \(profile.displayName) RPU from XML \(metadata.version) (\(metadata.frameCount) frames) while VT encodes HEVC.")
+                if profile.isProfile76 {
+                    print("[DoVi] Generating Profile 7.6 FEL RPU from XML \(metadata.version) (\(metadata.frameCount) frames); VideoToolbox will encode BL/EL and Metal will derive the residual EL.")
+                } else {
+                    print("[DoVi] Generating Profile \(profile.displayName) RPU from XML \(metadata.version) (\(metadata.frameCount) frames) while VT encodes HEVC.")
+                }
                 dolbyVisionMetadata = nil
                 dolbyVisionRPUProvider = DolbyVisionRPUProvider(
                     metadataSource: metadata,
@@ -3782,21 +4442,58 @@ func encodeMOV(
     // Extra audio
     var extraAudioReader: AVAssetReader? = nil
     var extraAudioTrack:  AVAssetTrack?  = nil
-    var extraAudioChannelCount = 0
+    var externalAudioSampleSource: (any AudioSampleBufferSource)? = nil
     if let eaURL = extraAudioURL {
         let eaAsset = AVURLAsset(url: eaURL)
-        guard let track = try? await eaAsset.loadTracks(withMediaType: .audio).first else {
-            print("[Error] Extra audio file has no audio track: \(eaURL.path)")
-            return false
+        if let track = try? await eaAsset.loadTracks(withMediaType: .audio).first {
+            let formatHint = try? await track.load(.formatDescriptions).first
+            if let formatHint,
+               !movSupportsAudioPassthrough(formatDescription: formatHint) {
+                do {
+                    externalAudioSampleSource = try AVAudioFilePCMSource(url: eaURL)
+                    print("[Audio] Decoding external audio to 32-bit float PCM for MOV compatibility.")
+                } catch {
+                    print("[Error] External audio PCM decoder could not be created: \(error.localizedDescription)")
+                    return false
+                }
+            } else {
+                extraAudioTrack = track
+                do {
+                    extraAudioReader = try AVAssetReader(asset: eaAsset)
+                } catch {
+                    print("[Error] Extra audio reader could not be created: \(error.localizedDescription)")
+                    return false
+                }
+            }
+        } else {
+            do {
+                externalAudioSampleSource = try AudioFilePacketSource(url: eaURL)
+                print("[Audio] Reading audio packets directly with AudioToolbox for lossless MOV muxing.")
+            } catch {
+                print("[Error] Extra audio file is not readable by AVFoundation or AudioToolbox: \(eaURL.path)")
+                print("[Error] \(error.localizedDescription)")
+                return false
+            }
         }
-        extraAudioTrack = track
-        extraAudioChannelCount = await audioChannelCount(from: eaAsset)
-        do {
-            extraAudioReader = try AVAssetReader(asset: eaAsset)
-        } catch {
-            print("[Error] Extra audio reader could not be created: \(error.localizedDescription)")
-            return false
-        }
+    }
+
+    let sourceAudioFormatHint: CMFormatDescription?
+    if let audioTrack {
+        sourceAudioFormatHint = try? await audioTrack.load(.formatDescriptions).first
+    } else {
+        sourceAudioFormatHint = nil
+    }
+    let sourceAudioPCMSettings = sourceAudioFormatHint.flatMap {
+        movPCMTranscodeSettings(formatDescription: $0)
+    }
+    let extraAudioFormatHint: CMFormatDescription?
+    if let extraAudioTrack {
+        extraAudioFormatHint = try? await extraAudioTrack.load(.formatDescriptions).first
+    } else {
+        extraAudioFormatHint = externalAudioSampleSource?.formatDescription
+    }
+    if sourceAudioPCMSettings != nil {
+        print("[Audio] Source codec is not safe for MOV passthrough; converting it to 32-bit float PCM.")
     }
 
     do {
@@ -3815,9 +4512,7 @@ func encodeMOV(
         if let aTrack = audioTrack {
             let output = AVAssetReaderTrackOutput(
                 track: aTrack,
-                outputSettings: writesAV1Video
-                    ? av1AudioReaderSettings(channelCount: sourceAudioChannelCount)
-                    : nil
+                outputSettings: sourceAudioPCMSettings
             )
             guard reader.canAdd(output) else {
                 throw NSError(
@@ -3867,9 +4562,7 @@ func encodeMOV(
         if let eaReader = extraAudioReader, let eaTrack = extraAudioTrack {
             let output = AVAssetReaderTrackOutput(
                 track: eaTrack,
-                outputSettings: writesAV1Video
-                    ? av1AudioReaderSettings(channelCount: extraAudioChannelCount)
-                    : nil
+                outputSettings: nil
             )
             guard eaReader.canAdd(output) else {
                 throw NSError(
@@ -3886,6 +4579,7 @@ func encodeMOV(
 
         // ── Compression session (if re-encoding) ──
         var vtSession: ProResSession? = nil
+        var profile7Encoder: DolbyVisionProfile7Encoder? = nil
         var av1Bridge: AV1Bridge? = nil
         var av1FormatDescription: CMFormatDescription? = nil
         var av1DecodeSession: ProResNativeDecodeSession? = nil
@@ -3948,6 +4642,23 @@ func encodeMOV(
                         height: height
                     )
                 }
+            } else if isHEVC, hevcOptions?.dvProfile?.isProfile76 == true {
+                guard dolbyVisionRPUProvider != nil else {
+                    throw NSError(
+                        domain: "DolbyVisionProfile7",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Profile 7.6 encoding requires Dolby Vision metadata via -dovi or --cmu/--cmu-include."
+                        ]
+                    )
+                }
+                profile7Encoder = try DolbyVisionProfile7Encoder(
+                    width: width,
+                    height: height,
+                    fpsHint: Int(fpsInfo.fps.rounded()),
+                    colorSpace: effectiveColorSpace,
+                    bitrateMbps: hevcOptions!.bitrateMbps
+                )
             } else {
                 vtSession = try ProResSession(
                     width: width, height: height,
@@ -3992,19 +4703,9 @@ func encodeMOV(
             videoTrack.trackID: videoIn
         ]
 
-        var sourceAudioFormatHint: CMFormatDescription? = nil
-        if let aTrack = audioTrack {
-            sourceAudioFormatHint = try? await aTrack.load(.formatDescriptions).first
-        }
-
-        var extraAudioFormatHint: CMFormatDescription? = nil
-        if let eaTrack = extraAudioTrack {
-            extraAudioFormatHint = try? await eaTrack.load(.formatDescriptions).first
-        }
-
         var audioIn: AVAssetWriterInput? = nil
         if audioOut != nil, let aTrack = audioTrack {
-            if !writesAV1Video, sourceAudioFormatHint == nil {
+            if sourceAudioFormatHint == nil {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -4015,10 +4716,10 @@ func encodeMOV(
             }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: writesAV1Video
-                    ? av1AACWriterSettings(channelCount: sourceAudioChannelCount)
-                    : nil,
-                sourceFormatHint: writesAV1Video ? nil : sourceAudioFormatHint
+                outputSettings: sourceAudioPCMSettings,
+                sourceFormatHint: sourceAudioPCMSettings == nil
+                    ? sourceAudioFormatHint
+                    : nil
             )
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else {
@@ -4036,8 +4737,8 @@ func encodeMOV(
         }
 
         var extraAudioIn: AVAssetWriterInput? = nil
-        if extraAudioOut != nil {
-            if !writesAV1Video, extraAudioFormatHint == nil {
+        if extraAudioOut != nil || externalAudioSampleSource != nil {
+            if extraAudioFormatHint == nil {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -4048,10 +4749,8 @@ func encodeMOV(
             }
             let input = AVAssetWriterInput(
                 mediaType: .audio,
-                outputSettings: writesAV1Video
-                    ? av1AACWriterSettings(channelCount: extraAudioChannelCount)
-                    : nil,
-                sourceFormatHint: writesAV1Video ? nil : extraAudioFormatHint
+                outputSettings: nil,
+                sourceFormatHint: extraAudioFormatHint
             )
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else {
@@ -4226,7 +4925,14 @@ func encodeMOV(
         // Build pump pairs for passthrough tracks
         let audioPair = audioIn.flatMap { i in audioOut.map { o in MediaPumpPair(input: i, output: o) } }
         let extraAudioPair = extraAudioIn.flatMap { i in extraAudioOut.map { o in MediaPumpPair(input: i, output: o) } }
-        let extraAudioTrackLabel = audioReplace ? "Replacement audio track" : "Injected audio track"
+        let audioSampleSourcePair = extraAudioIn.flatMap { input in
+            externalAudioSampleSource.map { source in
+                AudioSampleSourcePumpPair(input: input, source: source)
+            }
+        }
+        let extraAudioTrackLabel = removesSourceAudio
+            ? "Replacement audio track"
+            : "Injected audio track"
         let tcPair = tcIn.flatMap { i in tcOut.map { o in MediaPumpPair(input: i, output: o) } }
         let metaPairCount = min(metaIns.count, min(metaInputAdaptors.count, metaOutputAdaptors.count))
         let metaPairs = (0..<metaPairCount).map {
@@ -4284,6 +4990,23 @@ func encodeMOV(
                                                      writer: writerRef.value,
                                                      reader: extraAudioReaderRef!.value,
                                                      cont: cont)
+                            }
+                        } catch {
+                            failureBox.store(error)
+                        }
+                    }
+                }
+                if let pair = audioSampleSourcePair {
+                    group.addTask(priority: .userInitiated) {
+                        do {
+                            try await withCheckedThrowingContinuation { cont in
+                                startAudioSampleSourcePump(
+                                    pair,
+                                    queueLabel: "enc.audioSampleSourceQ",
+                                    trackLabel: extraAudioTrackLabel,
+                                    writer: writerRef.value,
+                                    cont: cont
+                                )
                             }
                         } catch {
                             failureBox.store(error)
@@ -4559,6 +5282,23 @@ func encodeMOV(
                             }
                         }
                     }
+                    if let pair = audioSampleSourcePair {
+                        group.addTask(priority: .userInitiated) {
+                            do {
+                                try await withCheckedThrowingContinuation { cont in
+                                    startAudioSampleSourcePump(
+                                        pair,
+                                        queueLabel: "enc.audioSampleSourceQ",
+                                        trackLabel: extraAudioTrackLabel,
+                                        writer: writerRef.value,
+                                        cont: cont
+                                    )
+                                }
+                            } catch {
+                                failureBox.store(error)
+                            }
+                        }
+                    }
                     if let pair = tcPair {
                         group.addTask(priority: .utility) {
                             do {
@@ -4619,8 +5359,9 @@ func encodeMOV(
                     }
                 }
             } else {
-            vtSession!.enableAsyncMode(channelCapacity: pipelineCapacity)
-            let vtRef = SendableRef(vtSession!)
+            vtSession?.enableAsyncMode(channelCapacity: pipelineCapacity)
+            let vtRef = vtSession.map(SendableRef.init)
+            let profile7EncoderRef = profile7Encoder.map(SendableRef.init)
             let fpsInfoRef = SendableRef(fpsInfo)
             let rpuProviderRef = dolbyVisionRPUProvider.map(SendableRef.init)
             let hdr10Metadata = isHEVC
@@ -4646,51 +5387,119 @@ func encodeMOV(
                     pixelChannel.finish()
                 }
 
-                // Stage 2 — Encoder (VT async)
-                group.addTask(priority: .userInitiated) {
-                    let vt = vtRef.value
-                    if let outCh = vt.outputChannel {
-                        for await wrapped in outCh {
-                            await compressedChannel.sendAsync(wrapped)
+                if let profile7EncoderRef {
+                    // Profile 7.6 is intentionally one-frame closed-loop:
+                    // BL encode -> hardware reconstruct -> Metal EL -> EL encode -> mux.
+                    group.addTask(priority: .userInitiated) {
+                        let encoder = profile7EncoderRef.value
+                        let fi = fpsInfoRef.value
+                        guard let rpuProvider = rpuProviderRef?.value else {
+                            failureBox.store(NSError(
+                                domain: "DolbyVisionProfile7",
+                                code: 1,
+                                userInfo: [NSLocalizedDescriptionKey:
+                                    "Profile 7.6 encoder has no RPU metadata provider."
+                                ]
+                            ))
+                            pixelChannel.finish()
+                            compressedChannel.finish()
+                            return
                         }
+                        var frameIndex: Int64 = 0
+                        for await spb in pixelChannel {
+                            let pts = CMTime(
+                                value: CMTimeValue(frameIndex) * CMTimeValue(fi.denominator),
+                                timescale: CMTimeScale(fi.numerator)
+                            )
+                            let duration = CMTime(
+                                value: CMTimeValue(fi.denominator),
+                                timescale: CMTimeScale(fi.numerator)
+                            )
+                            do {
+                                let pixelBuffer = try metalColorPipelineRef?.value.process(
+                                    spb.buf,
+                                    pts: pts
+                                ) ?? spb.buf
+                                let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
+                                let sample = try encoder.encode(
+                                    sourcePixelBuffer: pixelBuffer,
+                                    pts: pts,
+                                    duration: duration,
+                                    rpuNALUnit: rpu,
+                                    hdr10Metadata: hdr10MetadataRef?.value
+                                )
+                                await compressedChannel.sendAsync(
+                                    SendableSampleBuffer(buf: sample)
+                                )
+                            } catch {
+                                failureBox.store(error)
+                                pixelChannel.finish()
+                                compressedChannel.finish()
+                                encoder.finish()
+                                return
+                            }
+                            frameIndex += 1
+                        }
+                        encoder.finish()
+                        compressedChannel.finish()
                     }
-                    compressedChannel.finish()
-                }
+                } else if let vtRef {
+                    // Stage 2 — Encoder output drain (VT async)
+                    group.addTask(priority: .userInitiated) {
+                        let vt = vtRef.value
+                        if let outCh = vt.outputChannel {
+                            for await wrapped in outCh {
+                                await compressedChannel.sendAsync(wrapped)
+                            }
+                        }
+                        compressedChannel.finish()
+                    }
 
-                // Stage 2 — Encoder (VT async submission)
-                group.addTask(priority: .userInitiated) {
-                    let vt = vtRef.value
-                    let fi = fpsInfoRef.value
-                    var frameIdx: Int64 = 0
-                    for await spb in pixelChannel {
-                        let pts = CMTime(value: CMTimeValue(frameIdx) * CMTimeValue(fi.denominator),
-                                         timescale: CMTimeScale(fi.numerator))
-                        let dur = CMTime(value: CMTimeValue(fi.denominator),
-                                         timescale: CMTimeScale(fi.numerator))
-                        let pixelBuffer: CVPixelBuffer
-                        do {
-                            pixelBuffer = try metalColorPipelineRef?.value.process(
-                                spb.buf,
-                                pts: pts
-                            ) ?? spb.buf
-                        } catch {
-                            failureBox.store(error)
-                            pixelChannel.finish()
-                            compressedChannel.finish()
-                            vt.flushAsync()
-                            return
+                    // Stage 2 — Encoder submission (VT async)
+                    group.addTask(priority: .userInitiated) {
+                        let vt = vtRef.value
+                        let fi = fpsInfoRef.value
+                        var frameIdx: Int64 = 0
+                        for await spb in pixelChannel {
+                            let pts = CMTime(value: CMTimeValue(frameIdx) * CMTimeValue(fi.denominator),
+                                             timescale: CMTimeScale(fi.numerator))
+                            let dur = CMTime(value: CMTimeValue(fi.denominator),
+                                             timescale: CMTimeScale(fi.numerator))
+                            let pixelBuffer: CVPixelBuffer
+                            do {
+                                pixelBuffer = try metalColorPipelineRef?.value.process(
+                                    spb.buf,
+                                    pts: pts
+                                ) ?? spb.buf
+                            } catch {
+                                failureBox.store(error)
+                                pixelChannel.finish()
+                                compressedChannel.finish()
+                                vt.flushAsync()
+                                return
+                            }
+                            guard vt.submit(pixelBuffer: pixelBuffer, pts: pts, duration: dur) else {
+                                failureBox.store(makeWriterFailure(stage: "VT submit failed", writer: writerRef.value, reader: readerRef.value))
+                                pixelChannel.finish()
+                                compressedChannel.finish()
+                                vt.flushAsync()
+                                return
+                            }
+                            frameIdx += 1
                         }
-                        guard vt.submit(pixelBuffer: pixelBuffer, pts: pts, duration: dur) else {
-                            failureBox.store(makeWriterFailure(stage: "VT submit failed", writer: writerRef.value, reader: readerRef.value))
-                            pixelChannel.finish()
-                            compressedChannel.finish()
-                            vt.flushAsync()
-                            return
-                        }
-                        frameIdx += 1
+                        // Flush VT; the drain task forwards output concurrently.
+                        vt.flushAsync()
                     }
-                    // Flush VT; the drain task forwards output concurrently.
-                    vt.flushAsync()
+                } else {
+                    failureBox.store(NSError(
+                        domain: "encodeMOV",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "No video encoder was initialized for \(quality)."
+                        ]
+                    ))
+                    pixelChannel.finish()
+                    compressedChannel.finish()
                 }
 
                 // Stage 3 — Writer
@@ -4699,7 +5508,9 @@ func encodeMOV(
                     var frameIndex: Int64 = 0
                     for await wrapped in compressedChannel {
                         let sampleToAppend: CMSampleBuffer
-                        if let rpuProvider = rpuProviderRef?.value {
+                        if profile7EncoderRef != nil {
+                            sampleToAppend = wrapped.buf
+                        } else if let rpuProvider = rpuProviderRef?.value {
                             do {
                                 let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
                                 sampleToAppend = try sampleBufferByInjectingHEVCRPU(
@@ -4758,6 +5569,23 @@ func encodeMOV(
                                                      writer: writerRef.value,
                                                      reader: extraAudioReaderRef!.value,
                                                      cont: cont)
+                            }
+                        } catch {
+                            failureBox.store(error)
+                        }
+                    }
+                }
+                if let pair = audioSampleSourcePair {
+                    group.addTask(priority: .userInitiated) {
+                        do {
+                            try await withCheckedThrowingContinuation { cont in
+                                startAudioSampleSourcePump(
+                                    pair,
+                                    queueLabel: "enc.audioSampleSourceQ",
+                                    trackLabel: extraAudioTrackLabel,
+                                    writer: writerRef.value,
+                                    cont: cont
+                                )
                             }
                         } catch {
                             failureBox.store(error)
@@ -4824,6 +5652,7 @@ func encodeMOV(
                 }
             }
             vtSession?.invalidate()
+            profile7Encoder?.invalidate()
             }
         }
 
@@ -4882,7 +5711,23 @@ func encodeMOV(
                         ]
                     )
                 }
-                print("[DoVi] Verified \(rpuCount) injected RPU frames; adding dvvC.")
+                if profile.isProfile76 {
+                    let hasEnhancementLayer = try await movieContainsDolbyVisionEnhancementLayer(
+                        at: outputURL
+                    )
+                    guard hasEnhancementLayer else {
+                        throw NSError(
+                            domain: "DolbyVisionProfile7",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "Profile 7.6 was requested, but the finalized HEVC stream contains no EL NAL units."
+                            ]
+                        )
+                    }
+                    print("[DoVi] Verified \(rpuCount) Profile 7.6 RPU frames and interleaved EL NAL units; adding dvcC.")
+                } else {
+                    print("[DoVi] Verified \(rpuCount) injected RPU frames; adding dvvC.")
+                }
                 try patchDolbyVisionHEVCConfigurationAtom(
                     in: outputURL,
                     profile: profile,
@@ -4890,11 +5735,13 @@ func encodeMOV(
                     height: height,
                     fps: fpsInfo.fps
                 )
+                try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)
             }
             let sampleEntry = try normalizeCompressedVideoSampleEntry(
                 in: outputURL,
                 codec: .hevc,
-                useDolbyVisionCodecTag: useDolbyVisionCodecTag
+                useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                profile: hevcOptions?.dvProfile
             )
             print(
                 "[Codec ID] HEVC RPU \(hasRPU ? "present" : "absent"), " +
@@ -4931,7 +5778,8 @@ func encodeMOV(
             let sampleEntry = try normalizeCompressedVideoSampleEntry(
                 in: outputURL,
                 codec: .av1,
-                useDolbyVisionCodecTag: useDolbyVisionCodecTag
+                useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                profile: av1Options?.dvProfile
             )
             print(
                 "[Codec ID] AV1 RPU \(hasRPU ? "present" : "absent"), " +
@@ -4998,6 +5846,7 @@ func encodeTimelineMOV(
     outputURL: URL,
     quality: String,
     forcedOutputStartTimecode: String?,
+    deleteSourceAudio: Bool,
     colorTransform: ColorTransformRequest?
 ) async -> Bool {
     let requestedQuality = normalizedProResQuality(quality)
@@ -5008,7 +5857,9 @@ func encodeTimelineMOV(
         print("[Error] No video tracks found in timeline composition.")
         return false
     }
-    let audioTracks = composition.tracks(withMediaType: .audio)
+    let audioTracks = deleteSourceAudio
+        ? []
+        : composition.tracks(withMediaType: .audio)
 
     let width = max(Int(descriptor.resolution.width.rounded()), 2)
     let height = max(Int(descriptor.resolution.height.rounded()), 2)

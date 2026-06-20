@@ -129,6 +129,7 @@ enum CMUSignalRange: String, Codable, Sendable {
 enum CMUAnalysisSource: String, Codable, Sendable {
     case input
     case output
+    case transformedInput = "transformed-input"
 }
 
 struct CMURational: Codable, Sendable {
@@ -157,6 +158,23 @@ struct CMUAssetDescriptor: Codable, Sendable {
     let taggedDurationSeconds: Double
 
     var isEligible: Bool { true }
+
+    func applying(_ transform: ResolvedColorTransform) -> CMUAssetDescriptor {
+        let outputPrimaries: CMUPrimaries =
+            transform.outputGamut == .p3D65 ? .p3D65 : .rec2020
+        return CMUAssetDescriptor(
+            path: path,
+            fileName: fileName,
+            width: width,
+            height: height,
+            editRate: editRate,
+            codec: codec,
+            primaries: outputPrimaries,
+            signalRange: .video,
+            matrix: transform.outputGamut.yCbCrMatrix,
+            taggedDurationSeconds: taggedDurationSeconds
+        )
+    }
 
     static func inspect(url: URL) async throws -> CMUAssetDescriptor {
         let asset = AVURLAsset(
