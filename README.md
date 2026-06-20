@@ -387,22 +387,6 @@ Generate one linked AAF per clip in batch mode:
 proresencoder -if input_folder -ef opatom -q 422hq --export-aaf-all -o output_dir
 ```
 
-## Benchmark
-
-This README intentionally avoids benchmark comparisons against third-party
-applications or command-line tools.
-
-For release validation, benchmark this encoder on the same host, source clip,
-codec profile, and output scope that will be used for delivery. Record the
-hardware, operating-system version, source properties, output settings, wall
-time, realtime speed, and verification method.
-
-Suggested local benchmark table:
-
-| Encoder path | Output scope | Wall time | Realtime speed | Verification |
-|---|---:|---:|---:|---|
-| ProRes Encoder | Fill in locally | Fill in locally | Fill in locally | Fill in locally |
-
 ## Notes
 
 - The CLI prints explicit errors for unsafe argument combinations.
