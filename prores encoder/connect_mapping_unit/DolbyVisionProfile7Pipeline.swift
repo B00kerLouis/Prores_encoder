@@ -389,6 +389,13 @@ private final class Profile7MetalResidualGenerator {
     }
 }
 
+struct DolbyVisionProfile7EncodedFrame {
+    let muxedSample: CMSampleBuffer
+    let baseLayerSample: CMSampleBuffer
+    let enhancementLayerSample: CMSampleBuffer
+    let rpuNALUnit: Data
+}
+
 final class DolbyVisionProfile7Encoder: @unchecked Sendable {
     private let baseLayerEncoder: ProResSession
     private let enhancementLayerEncoder: ProResSession
@@ -411,28 +418,33 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
             baseLayerWidth: width,
             baseLayerHeight: height
         )
+        let p7ColorSpace = SourceColorSpace.hevcHDR10(basedOn: colorSpace)
+
         let baseLayerOptions = HEVCEncodeOptions(
             bitrateMbps: bitrateMbps * 0.74,
             dvProfile: .profile76
         )
+
         let enhancementLayerOptions = HEVCEncodeOptions(
             bitrateMbps: bitrateMbps * 0.26,
             dvProfile: nil
         )
+
         baseLayerEncoder = try ProResSession(
             width: width,
             height: height,
             codecType: kCMVideoCodecType_HEVC,
             fpsHint: fpsHint,
-            colorSpace: colorSpace,
+            colorSpace: p7ColorSpace,
             hevcOptions: baseLayerOptions
         )
+
         enhancementLayerEncoder = try ProResSession(
             width: residualGenerator.width,
             height: residualGenerator.height,
             codecType: kCMVideoCodecType_HEVC,
             fpsHint: fpsHint,
-            colorSpace: nil,
+            colorSpace: p7ColorSpace,
             hevcOptions: enhancementLayerOptions
         )
     }
@@ -443,7 +455,7 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
         duration: CMTime,
         rpuNALUnit: Data,
         hdr10Metadata: HEVCHDR10Metadata?
-    ) throws -> CMSampleBuffer {
+    ) throws -> DolbyVisionProfile7EncodedFrame {
         guard let baseLayerSample = baseLayerEncoder.encode(
             pixelBuffer: sourcePixelBuffer,
             pts: pts,
@@ -479,7 +491,12 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
                 "The encoded Profile 7 sample is missing its EL or RPU NAL unit."
             )
         }
-        return sample
+        return DolbyVisionProfile7EncodedFrame(
+            muxedSample: sample,
+            baseLayerSample: baseLayerSample,
+            enhancementLayerSample: enhancementLayerSample,
+            rpuNALUnit: rpuNALUnit
+        )
     }
 
     func finish() {

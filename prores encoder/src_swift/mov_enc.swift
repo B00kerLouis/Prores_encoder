@@ -4214,7 +4214,8 @@ func encodeMOV(
     colorSpace: SourceColorSpace?,
     fpsInfo: FramerateInfo,
     colorTransform: ColorTransformRequest?,
-    useDolbyVisionCodecTag: Bool = false
+    useDolbyVisionCodecTag: Bool = false,
+    dolbyVisionDualOutput: Bool = false
 ) async -> Bool {
 
     guard outputURL.pathExtension.lowercased() == "mov" else {
@@ -4226,6 +4227,11 @@ func encodeMOV(
     let isHEVC = isHEVCQuality(quality)
     let isAV1 = isAV1Quality(quality)
     let isCompressedHDR = isHEVC || isAV1
+    if dolbyVisionDualOutput
+        && !(isHEVC && hevcOptions?.dvProfile?.isProfile76 == true) {
+        print("[Error] --dual requires HEVC Dolby Vision Profile 7.6 output.")
+        return false
+    }
     let resolvedColorTransform: ResolvedColorTransform?
     do {
         if let colorTransform {
@@ -4580,6 +4586,7 @@ func encodeMOV(
         // ── Compression session (if re-encoding) ──
         var vtSession: ProResSession? = nil
         var profile7Encoder: DolbyVisionProfile7Encoder? = nil
+        var profile7DualWriter: DolbyVisionProfile7DualWriter? = nil
         var av1Bridge: AV1Bridge? = nil
         var av1FormatDescription: CMFormatDescription? = nil
         var av1DecodeSession: ProResNativeDecodeSession? = nil
@@ -4659,6 +4666,16 @@ func encodeMOV(
                     colorSpace: effectiveColorSpace,
                     bitrateMbps: hevcOptions!.bitrateMbps
                 )
+                if dolbyVisionDualOutput {
+                    let dualWriter = try DolbyVisionProfile7DualWriter(
+                        outputURL: outputURL,
+                        fpsInfo: fpsInfo,
+                        totalBitrateMbps: hevcOptions!.bitrateMbps
+                    )
+                    profile7DualWriter = dualWriter
+                    print("[DoVi] Writing Profile 7.6 BL stream: \(dualWriter.baseLayerURL.path)")
+                    print("[DoVi] Writing Profile 7.6 EL stream: \(dualWriter.enhancementLayerURL.path)")
+                }
             } else {
                 vtSession = try ProResSession(
                     width: width, height: height,
@@ -5362,6 +5379,7 @@ func encodeMOV(
             vtSession?.enableAsyncMode(channelCapacity: pipelineCapacity)
             let vtRef = vtSession.map(SendableRef.init)
             let profile7EncoderRef = profile7Encoder.map(SendableRef.init)
+            let profile7DualWriterRef = profile7DualWriter.map(SendableRef.init)
             let fpsInfoRef = SendableRef(fpsInfo)
             let rpuProviderRef = dolbyVisionRPUProvider.map(SendableRef.init)
             let hdr10Metadata = isHEVC
@@ -5421,25 +5439,31 @@ func encodeMOV(
                                     pts: pts
                                 ) ?? spb.buf
                                 let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
-                                let sample = try encoder.encode(
+                                let encodedFrame = try encoder.encode(
                                     sourcePixelBuffer: pixelBuffer,
                                     pts: pts,
                                     duration: duration,
                                     rpuNALUnit: rpu,
                                     hdr10Metadata: hdr10MetadataRef?.value
                                 )
+                                try profile7DualWriterRef?.value.write(
+                                    frame: encodedFrame,
+                                    hdr10Metadata: hdr10MetadataRef?.value
+                                )
                                 await compressedChannel.sendAsync(
-                                    SendableSampleBuffer(buf: sample)
+                                    SendableSampleBuffer(buf: encodedFrame.muxedSample)
                                 )
                             } catch {
                                 failureBox.store(error)
                                 pixelChannel.finish()
                                 compressedChannel.finish()
+                                try? profile7DualWriterRef?.value.finish()
                                 encoder.finish()
                                 return
                             }
                             frameIndex += 1
                         }
+                        try? profile7DualWriterRef?.value.finish()
                         encoder.finish()
                         compressedChannel.finish()
                     }

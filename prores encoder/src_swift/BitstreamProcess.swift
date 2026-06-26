@@ -156,11 +156,15 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 
     var applicationID: UInt8 {
-        // Profile 7.6 uses the same CM application identifier as Profile 8.1.
-        isProfile76 ? 1 : compatibilityID
+        compatibilityID
     }
 
     var extendedMappingIDC: UInt8 {
+        if isProfile76 {
+            // Profile 7.6: Application ID / CCID 6, inverse mapping indicator 0.
+            return UInt8(6 << 5) // 192
+        }
+
         let inverseMappingIDC: UInt8 = usesHLGBaseLayer ? 0 : 1
         return (applicationID << 5) | inverseMappingIDC
     }

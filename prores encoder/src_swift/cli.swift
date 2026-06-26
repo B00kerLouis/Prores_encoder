@@ -56,6 +56,7 @@ struct CLIConfig: Sendable {
     let cmuMasteringNits: Float?
     let cmuInclude:     Bool
     let dvFlag:         Bool
+    let dolbyVisionDualOutput: Bool
 }
 
 // MARK: - Entry Point
@@ -91,6 +92,7 @@ enum ProResEncoderCLI {
         var cmuMasteringNits: Float? = nil
         var cmuInclude = false
         var dvFlag = false
+        var dolbyVisionDualOutput = false
 
         let args = CommandLine.arguments
         var idx = 1
@@ -191,6 +193,8 @@ enum ProResEncoderCLI {
                 cmuInclude = true
             case "--dv-flag", "-df":
                 dvFlag = true
+            case "--dual":
+                dolbyVisionDualOutput = true
             default:
                 print("[Error] Unknown argument: \(args[idx])")
                 printUsage()
@@ -257,6 +261,10 @@ enum ProResEncoderCLI {
             }
             if dvFlag {
                 print("[Error] --dv-flag / -df is available only while encoding HEVC or AV1 media.")
+                exit(1)
+            }
+            if dolbyVisionDualOutput {
+                print("[Error] --dual is available only while encoding HEVC Profile 7.6.")
                 exit(1)
             }
             guard !inputFilePath.isEmpty,
@@ -367,6 +375,11 @@ enum ProResEncoderCLI {
                 print("[Error] -q \(quality) with Dolby Vision metadata requires --dv-profile \(required).")
                 exit(1)
             }
+            if dolbyVisionDualOutput
+                && !(wantsHEVC && dolbyVisionProfile?.isProfile76 == true) {
+                print("[Error] --dual requires -q hevc with --dv-profile 76 / 7.6.")
+                exit(1)
+            }
         } else {
             if videoBitrateMbps != nil {
                 print("[Error] --bitrate / -b is available only with -q hevc or -q av1.")
@@ -378,6 +391,10 @@ enum ProResEncoderCLI {
             }
             if dvFlag {
                 print("[Error] --dv-flag / -df is available only with -q hevc or -q av1.")
+                exit(1)
+            }
+            if dolbyVisionDualOutput {
+                print("[Error] --dual is available only with -q hevc --dv-profile 76 / 7.6.")
                 exit(1)
             }
         }
@@ -431,7 +448,8 @@ enum ProResEncoderCLI {
                                colorTransform: colorTransform,
                                cmuMasteringNits: cmuMasteringNits,
                                cmuInclude: cmuInclude,
-                               dvFlag: dvFlag)
+                               dvFlag: dvFlag,
+                               dolbyVisionDualOutput: dolbyVisionDualOutput)
         let fm = FileManager.default
         let outputURL = URL(fileURLWithPath: outputPath)
         let isOutFile = !outputURL.pathExtension.isEmpty
@@ -807,7 +825,8 @@ private func processSingleVideo(
         av1Options: config.av1Options,
         colorSpace: cs, fpsInfo: fpsI,
         colorTransform: config.colorTransform,
-        useDolbyVisionCodecTag: config.dvFlag)
+        useDolbyVisionCodecTag: config.dvFlag,
+        dolbyVisionDualOutput: config.dolbyVisionDualOutput)
 
     guard success else {
         print("[Failed] \(assetName)")
@@ -1129,6 +1148,7 @@ private func printUsage() {
       -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
       -dp, --dv-profile <76|81|84|10|104> Dolby Vision profile: HEVC 7.6/8.1/8.4 or AV1 10.1/10.4
       -df, --dv-flag                  Label HEVC as dvhe (7.6) / dvh1 (8.x), or AV1 as dav1; default is hvc1/av01
+      --dual                          With -q hevc -dp 76, also write Profile 7.6 BL/EL .hevc streams beside the MOV
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio

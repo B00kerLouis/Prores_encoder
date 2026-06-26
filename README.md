@@ -1,14 +1,19 @@
-# ProRes Encoder 1.2.0
+# ProRes Encoder 1.2.1
 
 Native macOS CLI and Framework for professional video encoding, HDR color
 conversion, dynamic metadata processing, MOV/MXF mastering, linked timeline
 workflows, batch encoding, and external-audio replacement.
 
 All supported MOV outputs are written as `.mov` files. The encoder does not
-create MP4 containers or elementary-stream output files.
+create MP4 containers; Profile 7.6 can optionally emit separate BL/EL HEVC
+elementary streams with `--dual`.
 
-## What’s New in 1.2.0
+## What’s New in 1.2.1
 
+- Dolby Vision Profile 7.6 verifier compliance updates for BL/EL HEVC output.
+- Optional `--dual` output for Profile 7.6 BL/EL `.hevc` elementary streams.
+- Default verifier-oriented AV1 sample entry remains `av01`; `-df` keeps the
+  explicit `dav1` compatibility path.
 - Native 10-bit long-GOP encoding paths for MOV output.
 - Native 10-bit HEVC encoding with configurable bitrate.
 - Dynamic HDR metadata workflows for HEVC and AV1 output.
@@ -144,7 +149,8 @@ the external track is added.
 - Enhanced-layer workflows perform closed-loop base-layer encode and
   reconstruction, derive a residual signal on the GPU, encode the enhanced
   layer, and interleave metadata directly into output samples.
-- No separate elementary-stream files are emitted during normal MOV output.
+- No separate elementary-stream files are emitted during normal MOV output
+  unless Profile 7.6 `--dual` output is explicitly requested.
 
 Final compressed samples are inspected before the file is accepted:
 
@@ -274,8 +280,9 @@ proresencoder -i input.mov -ef mov -q av1 -b 50 -o output_av1.mov
 ```
 
 The CLI normalizes every MOV encode filename to `.mov`. The Framework requires
-an output URL ending in `.mov` for AV1. Neither interface emits MP4 or raw
-HEVC/AV1 elementary streams.
+an output URL ending in `.mov` for AV1. Neither interface emits MP4; raw HEVC
+elementary streams are emitted only for Dolby Vision Profile 7.6 when `--dual`
+is explicitly requested.
 
 MOV timecode behavior:
 

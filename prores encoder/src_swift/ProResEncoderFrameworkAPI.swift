@@ -80,6 +80,7 @@ public struct ProResEncodeOptions: Sendable {
     public var cmuMasteringNits: Float?
     public var includeGeneratedDolbyVisionMetadata: Bool
     public var useDolbyVisionCodecTag: Bool
+    public var dolbyVisionDualOutput: Bool
     public var aafMode: ProResAAFMode
 
     public init(
@@ -96,6 +97,7 @@ public struct ProResEncodeOptions: Sendable {
         cmuMasteringNits: Float? = nil,
         includeGeneratedDolbyVisionMetadata: Bool = false,
         useDolbyVisionCodecTag: Bool = false,
+        dolbyVisionDualOutput: Bool = false,
         aafMode: ProResAAFMode = .none
     ) {
         self.quality = quality
@@ -111,6 +113,7 @@ public struct ProResEncodeOptions: Sendable {
         self.cmuMasteringNits = cmuMasteringNits
         self.includeGeneratedDolbyVisionMetadata = includeGeneratedDolbyVisionMetadata
         self.useDolbyVisionCodecTag = useDolbyVisionCodecTag
+        self.dolbyVisionDualOutput = dolbyVisionDualOutput
         self.aafMode = aafMode
     }
 }
@@ -333,6 +336,12 @@ public final class ProResEncoder: Sendable {
                     "\(quality) with Dolby Vision metadata requires dolbyVisionProfile."
                 )
             }
+            if options.dolbyVisionDualOutput
+                && !(wantsHEVC && options.dolbyVisionProfile == .profile76) {
+                throw ProResEncoderError.invalidOption(
+                    "dolbyVisionDualOutput requires HEVC Dolby Vision Profile 7.6."
+                )
+            }
         } else {
             if options.bitrateMbps != nil {
                 throw ProResEncoderError.invalidOption(
@@ -347,6 +356,11 @@ public final class ProResEncoder: Sendable {
             if options.useDolbyVisionCodecTag {
                 throw ProResEncoderError.invalidOption(
                     "useDolbyVisionCodecTag is available only for HEVC or AV1 output."
+                )
+            }
+            if options.dolbyVisionDualOutput {
+                throw ProResEncoderError.invalidOption(
+                    "dolbyVisionDualOutput is available only for HEVC Dolby Vision Profile 7.6 output."
                 )
             }
         }
@@ -704,7 +718,8 @@ public final class ProResEncoder: Sendable {
             colorSpace: sourceColorSpace,
             fpsInfo: await framerateInfo(from: asset),
             colorTransform: colorTransform,
-            useDolbyVisionCodecTag: options.useDolbyVisionCodecTag
+            useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
+            dolbyVisionDualOutput: options.dolbyVisionDualOutput
         )
         guard success else {
             throw ProResEncoderError.encodingFailed(
@@ -735,8 +750,14 @@ public final class ProResEncoder: Sendable {
                 )
             }
         }
+        var outputURLs = [outputURL]
+        if options.dolbyVisionDualOutput {
+            let dualURLs = DolbyVisionProfile7DualWriter.outputURLs(for: outputURL)
+            outputURLs.append(dualURLs.baseLayerURL)
+            outputURLs.append(dualURLs.enhancementLayerURL)
+        }
         return ProResEncodeResult(
-            outputURLs: [outputURL],
+            outputURLs: outputURLs,
             cmuXMLURL: isCompressedOutput ? nil : generatedCMUArtifacts?.xmlURL
         )
     }

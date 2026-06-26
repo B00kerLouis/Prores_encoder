@@ -564,7 +564,11 @@ private struct NativeDolbyVisionRPUBuilder {
         // RPU v1.1 packs ext_mapping_idc above the low 8 bits of
         // el_bit_depth_minus8. Bits 7:5 carry the Dolby Vision Application
         // ID; bits 4:0 carry the extended BL inverse-mapping indicator.
-        let extendedELBitDepth = (UInt64(profile.extendedMappingIDC) << 8) | 2
+        let rpuExtMappingIDC: UInt64 = profile.isProfile76
+            ? UInt64(6 << 5)
+            : UInt64(profile.extendedMappingIDC)
+
+        let extendedELBitDepth = (rpuExtMappingIDC << 8) | 2
         writer.writeUE(extendedELBitDepth)
         writer.writeUE(4)
         writer.writeBit(false)
