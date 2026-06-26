@@ -74,18 +74,17 @@ The Release binary is written to:
 
 ```bash
 Build/Release/prores encoder
-Build/Release/default.metallib
 ```
 
 Optional local install:
 
 ```bash
 cp "Build/Release/prores encoder" ~/bin/proresencoder
-cp "Build/Release/default.metallib" ~/bin/default.metallib
 ```
 
-Keep `default.metallib` next to the executable when using the CLI outside the
-build directory; it contains the GPU kernels used by the encoder.
+The CLI embeds its Metal kernel fallback in the Mach-O binary, so the executable
+can be copied by itself without a neighboring `default.metallib` or helper
+program.
 
 ## Framework
 
@@ -128,8 +127,9 @@ try await encoder.encode(
 )
 ```
 
-`default.metallib` is embedded in the framework Resources directory, so
-framework clients do not need to copy the GPU library separately.
+The framework also embeds the Metal kernel fallback in code. A bundled
+`default.metallib` remains compatible with older layouts, but framework clients
+do not need to copy a GPU library or invoke helper programs separately.
 
 Set the Framework codec-tag option to `true` only when the target workflow
 requires the alternate dynamic-HDR sample entry; its default should remain

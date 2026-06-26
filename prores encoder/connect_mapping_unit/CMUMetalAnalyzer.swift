@@ -464,26 +464,11 @@ final class CMUMetalAnalyzer {
     }
 
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
-        if let library = device.makeDefaultLibrary() {
-            return library
-        }
-        let frameworkBundle = Bundle(for: CMUMetalResourceBundleToken.self)
-        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
-            .standardizedFileURL
-            .deletingLastPathComponent()
-        let candidates = [
-            frameworkBundle.url(forResource: "default", withExtension: "metallib"),
-            Bundle.main.url(forResource: "default", withExtension: "metallib"),
-            executableDirectory.appendingPathComponent("default.metallib")
-        ].compactMap { $0 }
-        var visited = Set<URL>()
-        for url in candidates where visited.insert(url.standardizedFileURL).inserted {
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            if let library = try? device.makeLibrary(URL: url) {
-                return library
-            }
-        }
-        return nil
+        EmbeddedMetalLibrary.load(
+            device: device,
+            bundle: Bundle(for: CMUMetalResourceBundleToken.self),
+            requiredFunctions: ["cmu_analyze_yuv"]
+        )
     }
 }
 

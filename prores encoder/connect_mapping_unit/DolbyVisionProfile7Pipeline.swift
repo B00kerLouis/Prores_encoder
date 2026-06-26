@@ -368,24 +368,14 @@ private final class Profile7MetalResidualGenerator {
     }
 
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
-        if let library = device.makeDefaultLibrary() {
-            return library
-        }
-        let bundle = Bundle(for: Profile7MetalBundleToken.self)
-        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
-            .standardizedFileURL
-            .deletingLastPathComponent()
-        let candidates = [
-            bundle.url(forResource: "default", withExtension: "metallib"),
-            Bundle.main.url(forResource: "default", withExtension: "metallib"),
-            executableDirectory.appendingPathComponent("default.metallib")
-        ].compactMap { $0 }
-        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
-            if let library = try? device.makeLibrary(URL: url) {
-                return library
-            }
-        }
-        return nil
+        EmbeddedMetalLibrary.load(
+            device: device,
+            bundle: Bundle(for: Profile7MetalBundleToken.self),
+            requiredFunctions: [
+                "p7_make_luma_residual",
+                "p7_make_chroma_residual"
+            ]
+        )
     }
 }
 

@@ -434,27 +434,18 @@ final class MetalColorPipeline: @unchecked Sendable {
     }
 
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
-        if let library = device.makeDefaultLibrary() {
-            return library
-        }
-        let frameworkBundle = Bundle(for: MetalColorResourceBundleToken.self)
-        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
-            .standardizedFileURL
-            .deletingLastPathComponent()
-        let candidates = [
-            frameworkBundle.url(forResource: "default", withExtension: "metallib"),
-            Bundle.main.url(forResource: "default", withExtension: "metallib"),
-            executableDirectory.appendingPathComponent("default.metallib")
-        ].compactMap { $0 }
-        var visited = Set<URL>()
-        for url in candidates
-            where visited.insert(url.standardizedFileURL).inserted
-                && FileManager.default.fileExists(atPath: url.path) {
-            if let library = try? device.makeLibrary(URL: url) {
-                return library
-            }
-        }
-        return nil
+        EmbeddedMetalLibrary.load(
+            device: device,
+            bundle: Bundle(for: MetalColorResourceBundleToken.self),
+            requiredFunctions: [
+                "color_decode_yuv",
+                "color_decode_bgra",
+                "color_transform_linear",
+                "color_pack_y",
+                "color_pack_uv",
+                "color_pack_bgra"
+            ]
+        )
     }
 
     private static func isSupported(_ format: OSType) -> Bool {

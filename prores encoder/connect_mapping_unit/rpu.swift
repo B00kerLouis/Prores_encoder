@@ -430,6 +430,17 @@ private func makeHEVCPrefixSEINALUnit(metadata: HEVCHDR10Metadata?) -> Data? {
     return nalu
 }
 
+private func profile7EnhancementLayerHDR10Metadata(from metadata: HEVCHDR10Metadata?) -> HEVCHDR10Metadata? {
+    guard let masteringDisplay = metadata?.masteringDisplayColorVolume,
+          masteringDisplay.count == 24 else {
+        return nil
+    }
+    return HEVCHDR10Metadata(
+        masteringDisplayColorVolume: masteringDisplay,
+        contentLightLevelInfo: Data([0x00, 0x00, 0x00, 0x00])
+    )
+}
+
 private func appendSEIMessage(payloadType: Int, payload: Data, to rbsp: inout Data) {
     appendSEIEncodedInteger(payloadType, to: &rbsp)
     appendSEIEncodedInteger(payload.count, to: &rbsp)
@@ -1148,7 +1159,7 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
             framesSinceBufferingPeriod: framesSinceBPForPicture,
             concatenationFlag: concatenationFlag,
             bitrateBitsPerSecond: enhancementLayerBitrateBitsPerSecond,
-            hdr10Metadata: nil,
+            hdr10Metadata: profile7EnhancementLayerHDR10Metadata(from: hdr10Metadata),
             rpuNALUnit: frame.rpuNALUnit
         )
         enhancementLayerHandle.write(enhancementAccessUnit)
