@@ -1,4 +1,4 @@
-// rpu.swift — Dolby Vision RPU generation and HEVC sample injection
+// DolbyVisionHEVCBitstreamProcessor — Dolby Vision RPU generation and HEVC sample injection
 
 import Foundation
 import AVFoundation

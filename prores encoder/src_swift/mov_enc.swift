@@ -15,6 +15,10 @@ import AudioToolbox
 import CoreMedia
 import VideoToolbox
 
+private let sparselyInterleavedWithMainMediaDataLocation = AVAssetWriterInput.MediaDataLocation(
+    rawValue: "AVAssetWriterInputMediaDataLocationSparselyInterleavedWithMainMediaData"
+)
+
 // MARK: - Sendable Utility Wrappers
 
 /// Wraps a non-Sendable value for safe transfer across isolation boundaries.
@@ -4915,13 +4919,13 @@ func encodeMOV(
                 metadata: dolbyVisionMetadata,
                 fpsInfo: fpsInfo)
             if #available(macOS 26.0, *) {
-                doviIn.mediaDataLocation = .sparselyInterleavedWithMainMediaData
+                doviIn.mediaDataLocation = sparselyInterleavedWithMainMediaDataLocation
             }
         }
 
         if #available(macOS 26.0, *) {
-            tcIn?.mediaDataLocation = .sparselyInterleavedWithMainMediaData
-            metaIns.forEach { $0.mediaDataLocation = .sparselyInterleavedWithMainMediaData }
+            tcIn?.mediaDataLocation = sparselyInterleavedWithMainMediaDataLocation
+            metaIns.forEach { $0.mediaDataLocation = sparselyInterleavedWithMainMediaDataLocation }
         }
 
         // ── Start ──

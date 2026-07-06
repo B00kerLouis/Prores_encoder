@@ -3,7 +3,7 @@
 // MXF → AAF generation, Metal pre-warm.
 
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import Metal
 
 #if PRORES_ENCODER_CLI
@@ -164,7 +164,7 @@ enum ProResEncoderCLI {
                     exit(1)
                 }
                 audioCHperFile = parsed
-            case "-trans", "--transform":
+            case "-tt", "--transform-timeline":
                 let raw = requireValue(for: args[idx])
                 if let mode = TransformMode(argument: raw) {
                     transformMode = mode
@@ -1133,7 +1133,7 @@ private func printUsage() {
       -aaf <file>           AAF timeline, parsed natively then bounced to MOV
 
     Transform mode:
-      -trans AAF|XML                 Convert timeline with native Swift parser/writers
+      --transform-timeline,-tt  AAF|XML                 Convert timeline with native Swift parser/writers
       --media-search-path <path>     Extra relink path for linked AAF media
 
     Output format:
@@ -1152,13 +1152,13 @@ private func printUsage() {
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio
-      -ffoa, --start-timecode <TC>    MOV only; synthesize QuickTime TC from this start value when the source has no TC (default: 01:00:00:00)
-      -dovi, --dolby-vision-xml <file> MOV only; embed ProRes PHDR metadata, or generate RPU for -q hevc/-q av1
+      --start-timecode,-ffoa  <TC>    MOV only; synthesize QuickTime TC from this start value when the source has no TC (default: 01:00:00:00)
+      --dolby-vision-xml,-dovi <file> MOV only; embed ProRes PHDR metadata, or generate RPU for -q hevc/-q av1
       --gamunt <rec709|rec2020|rec2020lm|p3d65> Target gamut; rec2020lm is Rec.2020 tagged with P3-D65 gamut limiting
       --oetf <gamma2.4|gamma2.6|pq|hlg> Target opto-electronic transfer function
       --nit <nits>                     Target peak luminance, 1 <= nits <= 10000
       --cmu <nits>                     Metal-only HDR analysis; ProRes/MXF exports XML, HEVC/AV1 keep it internal
-      --cmu-include                    Use the internally generated CMU XML directly as ProRes PHDR metadata, or to generate HEVC/AV1 RPU; requires --cmu and no -dovi
+      --cmu-include,-ci                    Use the internally generated CMU XML directly as ProRes PHDR metadata, or to generate HEVC/AV1 RPU; requires --cmu and no -dovi
       --audio-ch-per-file <N>         Channels per OP-Atom audio MXF (default: 1)
       -ea, --export-aaf               Generate one AAF for all clips (MXF modes only)
       -ea-all, --export-aaf-all       Generate one AAF per clip (MXF modes only)
