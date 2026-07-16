@@ -2,9 +2,12 @@ import Foundation
 import AVFoundation
 import CoreMedia
 
+/// Writes the common timeline model as sequence-oriented XML.
 public final class FCP7XMLTimelineWriter {
+    /// Creates a stateless writer.
     public init() {}
 
+    /// Serializes a descriptor and writes it directly to the requested URL.
     public func write(_ descriptor: TimelineDescriptor, to url: URL) -> Bool {
         do {
             let document = XMLDocument(rootElement: rootElement(for: descriptor))
@@ -28,6 +31,7 @@ public final class FCP7XMLTimelineWriter {
         }
     }
 
+    /// Builds the document root and sequence properties.
     private func rootElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let root = XMLElement(name: "xmeml")
         root.addAttribute(XMLNode.attribute(withName: "version", stringValue: "4") as! XMLNode)
@@ -42,10 +46,12 @@ public final class FCP7XMLTimelineWriter {
         return root
     }
 
+    /// Returns the timeline duration in output frame units.
     private func durationElement(for descriptor: TimelineDescriptor) -> XMLElement {
         element("duration", "\(maxFrameEnd(in: descriptor))")
     }
 
+    /// Builds the sequence timecode node from the descriptor start value.
     private func timecodeElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let timecode = XMLElement(name: "timecode")
         timecode.addChild(rateElement(for: descriptor))
@@ -55,6 +61,7 @@ public final class FCP7XMLTimelineWriter {
         return timecode
     }
 
+    /// Combines generated video and audio track sections.
     private func mediaElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let media = XMLElement(name: "media")
         media.addChild(videoElement(for: descriptor))
@@ -62,6 +69,7 @@ public final class FCP7XMLTimelineWriter {
         return media
     }
 
+    /// Groups video clips by track and writes format plus clip-item nodes.
     private func videoElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let video = XMLElement(name: "video")
         let format = XMLElement(name: "format")
@@ -90,6 +98,7 @@ public final class FCP7XMLTimelineWriter {
         return video
     }
 
+    /// Groups audio clips by track and writes channel plus clip-item nodes.
     private func audioElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let audio = XMLElement(name: "audio")
         audio.addChild(element("samplecharacteristics", children: [
@@ -115,6 +124,7 @@ public final class FCP7XMLTimelineWriter {
         return audio
     }
 
+    /// Maps one clip's timeline/source ranges and media reference to XML fields.
     private func clipItemElement(
         _ clip: ClipDescriptor,
         descriptor: TimelineDescriptor,
@@ -147,6 +157,7 @@ public final class FCP7XMLTimelineWriter {
         return clipitem
     }
 
+    /// Writes a reusable file reference with path URL and display name.
     private func fileElement(for url: URL, id: String) -> XMLElement {
         let file = XMLElement(name: "file")
         file.addAttribute(XMLNode.attribute(withName: "id", stringValue: id) as! XMLNode)
@@ -155,6 +166,7 @@ public final class FCP7XMLTimelineWriter {
         return file
     }
 
+    /// Writes nominal timebase and fractional-rate flag.
     private func rateElement(for descriptor: TimelineDescriptor) -> XMLElement {
         let rate = XMLElement(name: "rate")
         let info = frameRateInfo(for: descriptor)
@@ -163,6 +175,7 @@ public final class FCP7XMLTimelineWriter {
         return rate
     }
 
+    /// Converts exact frame duration to nominal timebase and fractional-rate status.
     private func frameRateInfo(for descriptor: TimelineDescriptor) -> (fps: Double, timebase: Int, ntsc: Bool) {
         let fps = descriptor.frameRate.value > 0
             ? Double(descriptor.frameRate.timescale) / Double(descriptor.frameRate.value)
@@ -183,6 +196,7 @@ public final class FCP7XMLTimelineWriter {
         return (fps, timebase, ntsc)
     }
 
+    /// Rounds a media time to the nearest timeline frame number.
     private func frameNumber(_ time: CMTime, descriptor: TimelineDescriptor) -> Int {
         let seconds = CMTimeGetSeconds(time)
         let fps = frameRateInfo(for: descriptor).fps
@@ -190,12 +204,14 @@ public final class FCP7XMLTimelineWriter {
         return max(Int((seconds * fps).rounded()), 0)
     }
 
+    /// Returns the last frame boundary occupied by any clip.
     private func maxFrameEnd(in descriptor: TimelineDescriptor) -> Int {
         descriptor.clips
             .map { frameNumber(CMTimeAdd($0.timelineRange.start, $0.timelineRange.duration), descriptor: descriptor) }
             .max() ?? 0
     }
 
+    /// Parses sequence timecode to its nominal frame count.
     private func timecodeStartFrame(_ value: String, descriptor: TimelineDescriptor) -> Int {
         let fps = max(frameRateInfo(for: descriptor).timebase, 1)
         let parts = value.replacingOccurrences(of: ";", with: ":").split(separator: ":")
@@ -209,6 +225,7 @@ public final class FCP7XMLTimelineWriter {
         return (((hh * 60) + mm) * 60 + ss) * fps + ff
     }
 
+    /// Orders clip items by timeline start and then source path.
     private func clipSortOrder(_ lhs: ClipDescriptor, _ rhs: ClipDescriptor) -> Bool {
         let startCompare = CMTimeCompare(lhs.timelineRange.start, rhs.timelineRange.start)
         if startCompare != 0 {
@@ -217,6 +234,7 @@ public final class FCP7XMLTimelineWriter {
         return lhs.sourceURL.path < rhs.sourceURL.path
     }
 
+    /// Produces a deterministic identifier from a source string.
     private func stableID(for value: String) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in value.utf8 {
@@ -226,12 +244,14 @@ public final class FCP7XMLTimelineWriter {
         return String(hash, radix: 16)
     }
 
+    /// Creates an element containing one text value.
     private func element(_ name: String, _ stringValue: String) -> XMLElement {
         let node = XMLElement(name: name)
         node.stringValue = stringValue
         return node
     }
 
+    /// Creates an element and attaches child nodes in order.
     private func element(_ name: String, children: [XMLElement]) -> XMLElement {
         let node = XMLElement(name: name)
         for child in children {

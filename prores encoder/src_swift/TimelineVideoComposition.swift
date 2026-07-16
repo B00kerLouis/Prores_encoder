@@ -1,5 +1,8 @@
+// Builds video-composition instructions for layered timeline tracks.
+
 import AVFoundation
 
+/// Recovers the zero-based timeline layer index encoded in a composition track ID.
 func compositionVideoTrackIndex(_ track: AVCompositionTrack) -> Int {
     let rawValue = Int(track.trackID)
     if rawValue >= 1001 {
@@ -8,6 +11,7 @@ func compositionVideoTrackIndex(_ track: AVCompositionTrack) -> Int {
     return rawValue
 }
 
+/// Returns whether a track has a non-empty segment overlapping the requested range.
 func compositionTrackIsActive(_ track: AVCompositionTrack, over timeRange: CMTimeRange) -> Bool {
     for segment in track.segments where !segment.isEmpty {
         let target = segment.timeMapping.target
@@ -19,6 +23,8 @@ func compositionTrackIsActive(_ track: AVCompositionTrack, over timeRange: CMTim
     return false
 }
 
+/// Partitions the timeline at segment boundaries and orders active layers from
+/// upper tracks to lower tracks for each interval.
 func buildTimelineVideoComposition(
     composition: AVMutableComposition,
     descriptor: TimelineDescriptor

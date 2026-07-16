@@ -1,12 +1,17 @@
+// Parses dynamic HDR authoring XML and generates one profile-specific RPU NAL
+// unit per encoded frame using project-owned bitstream code.
+
 import Foundation
 import AVFoundation
 import CoreMedia
 
+/// Metadata schema revision controlling available block families.
 private enum NativeDolbyVisionCMVersion {
     case v29
     case v40
 }
 
+/// Target-display identifier, peak luminance, and chromaticities from authoring XML.
 private struct NativeDolbyVisionTargetDisplay {
     let id: UInt8
     let peakNits: UInt16
@@ -14,11 +19,13 @@ private struct NativeDolbyVisionTargetDisplay {
     let primaries: [Double]
 }
 
+/// Metadata overrides applied at one frame offset within a shot.
 private struct NativeDolbyVisionFrameEdit {
     let editOffset: Int
     let blocks: [NativeDolbyVisionMetadataBlock]
 }
 
+/// Shot timing and its shot-level and frame-level metadata blocks.
 private struct NativeDolbyVisionShotDefinition {
     let start: Int
     let duration: Int
@@ -26,6 +33,7 @@ private struct NativeDolbyVisionShotDefinition {
     let frameEdits: [NativeDolbyVisionFrameEdit]
 }
 
+/// Parsed document configuration used by the RPU builder.
 private struct NativeDolbyVisionConfig {
     let cmVersion: NativeDolbyVisionCMVersion
     let sourceMinPQ: UInt16?
@@ -35,12 +43,14 @@ private struct NativeDolbyVisionConfig {
     let shots: [NativeDolbyVisionShotDefinition]
 }
 
+/// Level 1 minimum, average, and maximum image-character values.
 private struct NativeLevel1Block {
     var minPQ: UInt16
     var maxPQ: UInt16
     var avgPQ: UInt16
 }
 
+/// Level 2 target trim controls.
 private struct NativeLevel2Block {
     let targetMaxPQ: UInt16
     let trimSlope: UInt16
@@ -51,17 +61,20 @@ private struct NativeLevel2Block {
     let msWeight: Int16
 }
 
+/// Level 3 scene offset controls.
 private struct NativeLevel3Block {
     let minPQOffset: UInt16
     let avgPQOffset: UInt16
     let maxPQOffset: UInt16
 }
 
+/// Level 4 anchor values.
 private struct NativeLevel4Block {
     let anchorPQ: UInt16
     let anchorPower: UInt16
 }
 
+/// Level 5 active-area offsets.
 private struct NativeLevel5Block {
     let leftOffset: UInt16
     let rightOffset: UInt16
@@ -69,12 +82,14 @@ private struct NativeLevel5Block {
     let bottomOffset: UInt16
 }
 
+/// Level 6 mastering display and content-light values.
 private struct NativeLevel6Block {
     let maxDisplayMasteringLuminance: UInt16
     let minDisplayMasteringLuminance: UInt16
     let maxContentLightLevel: UInt16
     let maxFrameAverageLightLevel: UInt16
 
+    /// Converts mastering luminance limits to source minimum/maximum PQ codes.
     func sourceMetaFromLevel6() -> (UInt16, UInt16) {
         let sourceMinPQ: UInt16
         switch minDisplayMasteringLuminance {
@@ -103,6 +118,7 @@ private struct NativeLevel6Block {
     }
 }
 
+/// Level 8 target trim and optional hue/saturation vectors.
 private struct NativeLevel8Block {
     let length: UInt64
     let targetDisplayIndex: UInt8
@@ -118,12 +134,14 @@ private struct NativeLevel8Block {
     let hueVectorField: [UInt8]
 }
 
+/// Level 9 source primary identifier and explicit chromaticities.
 private struct NativeLevel9Block {
     let length: UInt64
     let sourcePrimaryIndex: UInt8
     let primaries: [UInt16]
 }
 
+/// Level 10 target-display metadata.
 private struct NativeLevel10Block {
     let length: UInt64
     let targetDisplayIndex: UInt8
@@ -133,17 +151,20 @@ private struct NativeLevel10Block {
     let primaries: [UInt16]
 }
 
+/// Level 11 content type and intended white point.
 private struct NativeLevel11Block {
     let contentType: UInt8
     let whitePoint: UInt8
     let referenceModeFlag: Bool
 }
 
+/// Level 254 metadata revision and processing mode.
 private struct NativeLevel254Block {
     let dmMode: UInt8
     let dmVersionIndex: UInt8
 }
 
+/// Typed metadata blocks that can be serialized into a DM container.
 private enum NativeDolbyVisionMetadataBlock {
     case level1(NativeLevel1Block)
     case level2(NativeLevel2Block)
@@ -229,6 +250,7 @@ private enum NativeDolbyVisionMetadataBlock {
         }
     }
 
+    /// Writes the payload fields for this block without its level/size prefix.
     func writeBody(to writer: inout NativeDolbyVisionBitWriter) {
         switch self {
         case .level1(let block):
@@ -306,9 +328,11 @@ private enum NativeDolbyVisionMetadataBlock {
     }
 }
 
+/// Mutable set of metadata blocks with deterministic replacement and ordering.
 private struct NativeDolbyVisionDMContainer {
     var blocks: [NativeDolbyVisionMetadataBlock]
 
+    /// Replaces the block sharing the same level and target key, or appends it.
     mutating func replace(_ block: NativeDolbyVisionMetadataBlock) {
         switch block {
         case .level2(let newBlock):
@@ -353,6 +377,7 @@ private struct NativeDolbyVisionDMContainer {
         }
     }
 
+    /// Returns blocks in required level and target order.
     func sortedBlocks() -> [NativeDolbyVisionMetadataBlock] {
         blocks.sorted { lhs, rhs in
             if lhs.sortKey.0 == rhs.sortKey.0 {
@@ -362,6 +387,7 @@ private struct NativeDolbyVisionDMContainer {
         }
     }
 
+    /// Writes block count, per-block headers, and byte-aligned bodies.
     func write(to writer: inout NativeDolbyVisionBitWriter) {
         let sorted = sortedBlocks()
         writer.writeUE(UInt64(sorted.count))
@@ -380,6 +406,7 @@ private struct NativeDolbyVisionDMContainer {
     }
 }
 
+/// Per-frame source levels, scene refresh state, and metadata containers.
 private struct NativeDolbyVisionVdrDmData {
     let affectedMetadataID: UInt64 = 0
     let currentMetadataID: UInt64 = 0
@@ -401,6 +428,7 @@ private struct NativeDolbyVisionVdrDmData {
     var cmv29: NativeDolbyVisionDMContainer
     var cmv40: NativeDolbyVisionDMContainer?
 
+    /// Serializes the per-frame dynamic metadata payload.
     func write(to writer: inout NativeDolbyVisionBitWriter) {
         writer.writeUE(affectedMetadataID)
         writer.writeUE(currentMetadataID)
@@ -424,15 +452,18 @@ private struct NativeDolbyVisionVdrDmData {
     }
 }
 
+/// Expands shot definitions to frame-indexed profile-specific RPU NAL units.
 private struct NativeDolbyVisionRPUBuilder {
     private let config: NativeDolbyVisionConfig
     private let profile: DolbyVisionHEVCProfile
 
+    /// Stores parsed configuration and selected output profile.
     init(config: NativeDolbyVisionConfig, profile: DolbyVisionHEVCProfile) {
         self.config = config
         self.profile = profile
     }
 
+    /// Generates the configured frame span and fills gaps from active shot state.
     func generate() throws -> [Data] {
         let sortedShots = config.shots.sorted { $0.start < $1.start }
         let totalFrames = sortedShots.reduce(0) { $0 + $1.duration }
@@ -453,6 +484,7 @@ private struct NativeDolbyVisionRPUBuilder {
         return rpus
     }
 
+    /// Builds one NAL unit, including header, mapping, metadata, CRC, and escaping.
     private func buildFrameRPU(
         sceneRefresh: Bool,
         shotBlocks: [NativeDolbyVisionMetadataBlock],
@@ -481,6 +513,7 @@ private struct NativeDolbyVisionRPUBuilder {
         return payload
     }
 
+    /// Merges document defaults, shot blocks, and frame overrides for one frame.
     private func makeVdrDmData(
         sceneRefresh: Bool,
         shotBlocks: [NativeDolbyVisionMetadataBlock],
@@ -524,8 +557,8 @@ private struct NativeDolbyVisionRPUBuilder {
             return nil
         } ?? initialLevel6
 
-        // Match dovi_tool generation: Profile 8.4 starts from its HLG defaults,
-        // then explicit source levels from the authoring metadata override them.
+        // Profile 8.4 starts with HLG defaults; explicit authoring metadata
+        // overrides the source levels.
         var sourceMinPQ: UInt16 = profile.usesProfile84Mapping ? 62 : 0
         var sourceMaxPQ: UInt16 = profile.usesProfile84Mapping ? 3079 : 0
         if let configuredMinPQ = config.sourceMinPQ {
@@ -549,6 +582,7 @@ private struct NativeDolbyVisionRPUBuilder {
         )
     }
 
+    /// Writes common and profile-specific RPU header fields.
     private func writeHeader(to writer: inout NativeDolbyVisionBitWriter) {
         writer.write(2, bits: 6)
         writer.write(18, bits: 11)
@@ -561,9 +595,9 @@ private struct NativeDolbyVisionRPUBuilder {
         writer.write(1, bits: 2)
         writer.writeBit(false)
         writer.writeUE(2)
-        // RPU v1.1 packs ext_mapping_idc above the low 8 bits of
-        // el_bit_depth_minus8. Bits 7:5 carry the Dolby Vision Application
-        // ID; bits 4:0 carry the extended BL inverse-mapping indicator.
+        // Version 1.1 packs ext_mapping_idc above the low 8 bits of
+        // el_bit_depth_minus8. Bits 7:5 carry the application ID; bits 4:0
+        // carry the extended base-layer inverse-mapping indicator.
         let rpuExtMappingIDC: UInt64 = profile.isProfile76
             ? UInt64(6 << 5)
             : UInt64(profile.extendedMappingIDC)
@@ -579,6 +613,7 @@ private struct NativeDolbyVisionRPUBuilder {
         writer.writeBit(false)
     }
 
+    /// Dispatches to the mapping syntax required by the selected profile.
     private func writeMapping(to writer: inout NativeDolbyVisionBitWriter) {
         if profile.isProfile76 {
             writeProfile76Mapping(to: &writer)
@@ -589,6 +624,7 @@ private struct NativeDolbyVisionRPUBuilder {
         }
     }
 
+    /// Writes identity base-layer mapping for Profile 8.1 family output.
     private func writeProfile81Mapping(to writer: inout NativeDolbyVisionBitWriter) {
         writer.writeUE(0)
         writer.writeUE(0)
@@ -611,6 +647,7 @@ private struct NativeDolbyVisionRPUBuilder {
         }
     }
 
+    /// Writes base-layer identity mapping and enhancement residual parameters.
     private func writeProfile76Mapping(to writer: inout NativeDolbyVisionBitWriter) {
         writer.writeUE(0) // vdr_rpu_id
         writer.writeUE(0) // mapping_color_space
@@ -627,7 +664,7 @@ private struct NativeDolbyVisionRPUBuilder {
         writer.writeUE(0) // num_x_partitions_minus1
         writer.writeUE(0) // num_y_partitions_minus1
 
-        // Identity BL reshaping, identical to Profile 8.1.
+        // Profile 8.1-compatible identity base-layer reshaping.
         for _ in 0..<3 {
             writer.writeUE(0) // mapping_idc: polynomial
             writer.writeUE(0) // poly_order_minus1
@@ -650,6 +687,7 @@ private struct NativeDolbyVisionRPUBuilder {
         }
     }
 
+    /// Writes the HLG-oriented nonlinear mapping for Profile 8.4 family output.
     private func writeProfile84Mapping(to writer: inout NativeDolbyVisionBitWriter) {
         writer.writeUE(0) // vdr_rpu_id
         writer.writeUE(0) // mapping_color_space
@@ -729,6 +767,7 @@ private struct NativeDolbyVisionRPUBuilder {
         )
     }
 
+    /// Writes one chroma multivariate-regression component for Profile 8.4 mapping.
     private func writeProfile84ChromaMMR(
         constantInteger: Int64,
         constant: UInt64,
@@ -749,10 +788,12 @@ private struct NativeDolbyVisionRPUBuilder {
     }
 }
 
+/// Generates the full RPU sequence once and serves frame-indexed NAL units.
 final class DolbyVisionRPUProvider: @unchecked Sendable {
     private let task: Task<[Data], Error>
     private let expectedFrameCount: Int64
 
+    /// Starts detached XML parsing and RPU generation for the selected profile.
     init(metadataSource: DolbyVisionMetadataSource, profile: DolbyVisionHEVCProfile, expectedFrameCount: Int64) {
         self.expectedFrameCount = expectedFrameCount
         task = Task.detached(priority: .userInitiated) {
@@ -761,6 +802,7 @@ final class DolbyVisionRPUProvider: @unchecked Sendable {
         }
     }
 
+    /// Returns the RPU matching a zero-based encoded frame index.
     func rpu(forFrame frameIndex: Int64) async throws -> Data {
         let rpus = try await task.value
         if expectedFrameCount > 0, Int64(rpus.count) != expectedFrameCount {
@@ -785,20 +827,24 @@ final class DolbyVisionRPUProvider: @unchecked Sendable {
         return rpus[rpus.count - 1]
     }
 
+    /// Waits for generation and returns the validated RPU count.
     func waitForCompletion() async throws -> Int {
         try await task.value.count
     }
 }
 
+/// Extracts supported authoring metadata into the builder configuration model.
 private struct NativeDolbyVisionXMLParser {
     private let xmlData: Data
     private let profile: DolbyVisionHEVCProfile
 
+    /// Stores raw XML and the profile that determines accepted defaults.
     init(xmlData: Data, profile: DolbyVisionHEVCProfile) {
         self.xmlData = xmlData
         self.profile = profile
     }
 
+    /// Parses document version, display definitions, global blocks, and shots.
     func parse() throws -> NativeDolbyVisionConfig {
         let doc = try XMLDocument(data: xmlData, options: [.nodeLoadExternalEntitiesNever])
         guard let root = doc.rootElement(),
@@ -855,6 +901,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Parses target-display entries keyed by their metadata identifier.
     private func parseTargetDisplays(
         in video: XMLElement,
         xmlVersion: String,
@@ -892,6 +939,7 @@ private struct NativeDolbyVisionXMLParser {
         return targets
     }
 
+    /// Reads optional content-light values from the video metadata section.
     private func parseLevel6(in video: XMLElement) -> NativeLevel6Block? {
         guard let maxCLLText = nativeText(".//*[local-name()='Level6']/*[local-name()='MaxCLL']", in: video),
               let maxFALLText = nativeText(".//*[local-name()='Level6']/*[local-name()='MaxFALL']", in: video),
@@ -908,6 +956,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Converts mastering display luminance fields to stored integer units.
     private func parseMasteringDisplay(in video: XMLElement) -> (minLuminance: UInt16, maxLuminance: UInt16)? {
         guard let display = nativeFirstElement(
             ".//*[local-name()='MasteringDisplay']",
@@ -922,6 +971,7 @@ private struct NativeDolbyVisionXMLParser {
         return (UInt16((minimum * 10_000.0).rounded()), peak)
     }
 
+    /// Reads optional metadata revision and mode fields.
     private func parseLevel254(in video: XMLElement) -> NativeLevel254Block? {
         guard let node = nativeFirstElement(".//*[local-name()='Level254']", in: video),
               let dmMode = nativeText("./*[local-name()='DMMode']", in: node).flatMap(UInt8.init),
@@ -931,6 +981,7 @@ private struct NativeDolbyVisionXMLParser {
         return NativeLevel254Block(dmMode: dmMode, dmVersionIndex: dmVersion)
     }
 
+    /// Reads optional content type and intended white point fields.
     private func parseLevel11(in video: XMLElement) -> NativeLevel11Block? {
         guard let node = nativeFirstElement(".//*[local-name()='Level11']", in: video),
               let contentType = nativeText("./*[local-name()='ContentType']", in: node).flatMap(UInt8.init),
@@ -940,6 +991,7 @@ private struct NativeDolbyVisionXMLParser {
         return NativeLevel11Block(contentType: contentType, whitePoint: whitePoint, referenceModeFlag: false)
     }
 
+    /// Converts target displays into default Level 10 blocks.
     private func parseDefaultLevel10Blocks(
         targets: [NativeDolbyVisionTargetDisplay]
     ) -> [NativeDolbyVisionMetadataBlock] {
@@ -960,6 +1012,7 @@ private struct NativeDolbyVisionXMLParser {
         }
     }
 
+    /// Parses shot timing, shot metadata, and frame-edit overrides.
     private func parseShots(
         in video: XMLElement,
         cmVersion: NativeDolbyVisionCMVersion,
@@ -1001,6 +1054,7 @@ private struct NativeDolbyVisionXMLParser {
         }
     }
 
+    /// Dispatches supported XML block elements to typed metadata records.
     private func parseBlocks(
         in node: XMLElement,
         cmVersion: NativeDolbyVisionCMVersion,
@@ -1046,6 +1100,7 @@ private struct NativeDolbyVisionXMLParser {
         return blocks
     }
 
+    /// Parses and bounds Level 1 image-character values.
     private func parseLevel1(
         in node: XMLElement,
         separator: Character,
@@ -1065,6 +1120,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Parses Level 2 target trim values.
     private func parseLevel2(
         in node: XMLElement,
         separator: Character,
@@ -1093,6 +1149,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Parses Level 3 scene offsets.
     private func parseLevel3(
         in node: XMLElement,
         separator: Character
@@ -1107,6 +1164,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Parses Level 5 active-area offsets.
     private func parseLevel5(
         in node: XMLElement,
         separator: Character
@@ -1117,6 +1175,7 @@ private struct NativeDolbyVisionXMLParser {
         return NativeLevel5Block(leftOffset: 0, rightOffset: 0, topOffset: 0, bottomOffset: 0)
     }
 
+    /// Parses Level 8 trims and optional vector fields.
     private func parseLevel8(
         in node: XMLElement,
         separator: Character,
@@ -1176,6 +1235,7 @@ private struct NativeDolbyVisionXMLParser {
         )
     }
 
+    /// Parses Level 9 source-primary metadata.
     private func parseLevel9(
         in node: XMLElement,
         separator: Character
@@ -1193,6 +1253,7 @@ private struct NativeDolbyVisionXMLParser {
     }
 }
 
+/// Writes fixed-width and exponential-Golomb fields most-significant bit first.
 private struct NativeDolbyVisionBitWriter {
     private(set) var data = Data()
     private var bitOffset = 0
@@ -1201,6 +1262,7 @@ private struct NativeDolbyVisionBitWriter {
         max(0, (data.count - (bitOffset == 0 ? 0 : 1)) * 8 + bitOffset)
     }
 
+    /// Appends one bit to the current output byte.
     mutating func writeBit(_ bit: Bool) {
         if bitOffset == 0 {
             data.append(0)
@@ -1212,6 +1274,7 @@ private struct NativeDolbyVisionBitWriter {
         bitOffset = (bitOffset + 1) & 7
     }
 
+    /// Appends a fixed-width unsigned field.
     mutating func write(_ value: UInt64, bits: Int) {
         guard bits > 0 else { return }
         for bitIndex in stride(from: bits - 1, through: 0, by: -1) {
@@ -1219,11 +1282,13 @@ private struct NativeDolbyVisionBitWriter {
         }
     }
 
+    /// Appends a fixed-width two's-complement field.
     mutating func writeSigned(_ value: Int64, bits: Int) {
         let masked = UInt64(bitPattern: value) & ((1 << UInt64(bits)) - 1)
         write(masked, bits: bits)
     }
 
+    /// Appends an unsigned exponential-Golomb code.
     mutating func writeUE(_ value: UInt64) {
         let codeNum = value + 1
         let length = max(1, 64 - codeNum.leadingZeroBitCount)
@@ -1234,11 +1299,13 @@ private struct NativeDolbyVisionBitWriter {
         write(codeNum, bits: length)
     }
 
+    /// Maps and appends a signed exponential-Golomb code.
     mutating func writeSE(_ value: Int64) {
         let mapped = value <= 0 ? UInt64(-value * 2) : UInt64(value * 2 - 1)
         writeUE(mapped)
     }
 
+    /// Pads the current byte with zero bits.
     mutating func byteAlignZero() {
         while bitOffset != 0 {
             writeBit(false)
@@ -1246,6 +1313,7 @@ private struct NativeDolbyVisionBitWriter {
     }
 }
 
+/// Computes the 32-bit checksum appended to each RPU payload.
 private func nativeDolbyVisionCRC32<S: Sequence>(_ bytes: S) -> UInt32 where S.Element == UInt8 {
     var crc: UInt32 = 0xffffffff
     for byte in bytes {
@@ -1261,6 +1329,7 @@ private func nativeDolbyVisionCRC32<S: Sequence>(_ bytes: S) -> UInt32 where S.E
     return crc
 }
 
+/// Inserts prevention bytes where payload data could imitate a NAL start code.
 private func nativeAddStartCodeEmulationPrevention(to data: inout Data) {
     var output = Data()
     output.reserveCapacity(data.count + 16)
@@ -1280,6 +1349,7 @@ private func nativeAddStartCodeEmulationPrevention(to data: inout Data) {
     data = output
 }
 
+/// Converts absolute luminance to a rounded 12-bit PQ code.
 private func nativeNitsToPQ12Bit(_ nits: Double) -> UInt16 {
     let y = max(nits, 0) / 10_000.0
     let m1 = 2610.0 / 16384.0
@@ -1291,6 +1361,7 @@ private func nativeNitsToPQ12Bit(_ nits: Double) -> UInt16 {
     return UInt16((pq * 4095.0).rounded())
 }
 
+/// Clamps a numeric metadata field to its 12-bit storage range.
 private func nativeClamped12Bit(_ value: Double) -> UInt16 {
     UInt16(max(0, min(4095, Int(value))))
 }
@@ -1320,6 +1391,7 @@ private let nativeRealDevicePrimaries: [[Double]] = [
     [0.6981, 0.2898, 0.1814, 0.7189, 0.1517, 0.0567, 0.3127, 0.329]
 ]
 
+/// Returns the registered primary preset index or 255 for explicit coordinates.
 private func nativeFindPrimaryIndex(_ primaries: [Double], allowRealDevice: Bool) -> UInt8 {
     if allowRealDevice {
         let exactPreset = nativeFindPrimaryIndex(primaries, allowRealDevice: false)
@@ -1334,27 +1406,33 @@ private func nativeFindPrimaryIndex(_ primaries: [Double], allowRealDevice: Bool
     return 255
 }
 
+/// Quantizes chromaticity coordinates to unsigned 16-bit fields.
 private func nativeFloatPrimariesToUInt16(_ primaries: [Double]) -> [UInt16] {
     primaries.map { UInt16(($0 / (1.0 / 32767.0)).rounded()) }
 }
 
+/// Removes an optional namespace prefix from an XML node name.
 private func nativeXMLLocalName(_ node: XMLNode) -> String {
     let name = node.name ?? ""
     return name.split(separator: ":").last.map(String.init) ?? name
 }
 
+/// Returns the first element selected by a non-throwing XPath query.
 private func nativeFirstElement(_ xPath: String, in node: XMLNode) -> XMLElement? {
     (try? node.nodes(forXPath: xPath))?.first as? XMLElement
 }
 
+/// Returns all element nodes selected by a non-throwing XPath query.
 private func nativeElements(_ xPath: String, in node: XMLNode) -> [XMLElement] {
     (try? node.nodes(forXPath: xPath))?.compactMap { $0 as? XMLElement } ?? []
 }
 
+/// Returns trimmed nonempty text from the first selected XML node.
 private func nativeText(_ xPath: String, in node: XMLNode) -> String? {
     (try? node.nodes(forXPath: xPath))?.first?.stringValue?.trimmedNonEmpty
 }
 
+/// Parses a whitespace or locale-separated list of decimal values.
 private func nativeParseNumbers(_ text: String?, separator: Character) -> [Double] {
     guard let text else { return [] }
     return text
@@ -1363,10 +1441,12 @@ private func nativeParseNumbers(_ text: String?, separator: Character) -> [Doubl
         .compactMap { Double($0) }
 }
 
+/// Creates a localized error in the RPU generation domain.
 private func nativeRPUError(_ message: String) -> NSError {
     NSError(domain: "DolbyVisionRPU", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
 }
 
+/// Text normalization used by XML value extraction.
 private extension String {
     var trimmedNonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)

@@ -1,6 +1,5 @@
-// mxf_common.h — Shared MXF utilities (stb-style single-header)
-// Used by mxf_op1a_enc.cpp and mxf_opatom_enc.cpp
-// References: SMPTE 377-1:2011, SMPTE RDD-36
+// Shared single-header MXF utilities for the OP-1a and OP-Atom writers.
+// Implements structures defined by SMPTE 377-1:2011 and SMPTE RDD-36.
 
 #pragma once
 
@@ -25,19 +24,26 @@ namespace mxf {
 // ============================================================
 //  1. Byte-order helpers
 // ============================================================
+// Appends one byte.
 static inline void w8(std::vector<uint8_t>& b, uint8_t v)  { b.push_back(v); }
+// Appends a 16-bit big-endian value.
 static inline void w16(std::vector<uint8_t>& b, uint16_t v) { b.push_back(v>>8); b.push_back(v&0xff); }
+// Appends a 32-bit big-endian value.
 static inline void w32(std::vector<uint8_t>& b, uint32_t v) {
     b.push_back((v>>24)&0xff); b.push_back((v>>16)&0xff);
     b.push_back((v>>8)&0xff);  b.push_back(v&0xff);
 }
+// Appends a 64-bit big-endian value.
 static inline void w64(std::vector<uint8_t>& b, uint64_t v) {
     for(int i=56;i>=0;i-=8) b.push_back((v>>i)&0xff);
 }
+// Appends a signed 32-bit value using its big-endian bit representation.
 static inline void wi32(std::vector<uint8_t>& b, int32_t v) { w32(b,(uint32_t)v); }
+// Appends an unowned byte range.
 static inline void wbytes(std::vector<uint8_t>& b, const uint8_t* p, size_t n) {
     b.insert(b.end(), p, p+n);
 }
+// Appends an owned byte vector.
 static inline void wbytes(std::vector<uint8_t>& b, const std::vector<uint8_t>& v) {
     b.insert(b.end(), v.begin(), v.end());
 }
@@ -45,6 +51,7 @@ static inline void wbytes(std::vector<uint8_t>& b, const std::vector<uint8_t>& v
 // ============================================================
 //  2. UUID / UMID generation
 // ============================================================
+// Generates a random version-4 UUID.
 static inline UUID16 make_uuid() {
     static std::mt19937_64 rng(std::random_device{}());
     UUID16 u;
@@ -54,6 +61,7 @@ static inline UUID16 make_uuid() {
     u[8]=(u[8]&0x3f)|0x80;   // variant
     return u;
 }
+// Generates a basic UMID with random UUID material.
 static inline UMID32 make_umid() {
     UMID32 u{};
     static const uint8_t pfx[12] = {0x06,0x0a,0x2b,0x34,0x01,0x01,0x01,0x05,0x01,0x01,0x0d,0x12};
@@ -67,6 +75,7 @@ static inline UMID32 make_umid() {
 // ============================================================
 //  3. BER length encoding
 // ============================================================
+// Appends the shortest BER length representation.
 static inline void ber(std::vector<uint8_t>& b, size_t len) {
     if(len <= 0xffffff) {
         b.push_back(0x83);
@@ -77,6 +86,7 @@ static inline void ber(std::vector<uint8_t>& b, size_t len) {
         b.push_back((len>>8)&0xff);  b.push_back(len&0xff);
     }
 }
+// Appends a fixed nine-byte BER length field for later patching.
 static inline void ber9(std::vector<uint8_t>& b, uint64_t len) {
     b.push_back(0x80 | 8);
     for(int i=7;i>=0;i--) b.push_back((len>>(i*8))&0xff);
@@ -112,6 +122,7 @@ static const UL16 DDEF_TC        = {0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x01,0x01
 static const UL16 UL_PCM         = {0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0a,0x04,0x02,0x02,0x01,0x01,0x00,0x00,0x00};
 
 // ProRes codec UL
+// Returns the registered ProRes coding label for a variant byte.
 static inline UL16 prores_codec_ul(uint8_t v) {
     return {0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,0x04,0x01,0x02,0x02,0x03,0x06,v,0x00};
 }
@@ -135,15 +146,19 @@ static const UL16 SK_MULTI_DESC  = {0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d
 constexpr uint8_t EE_RDD36 = 0x17;
 constexpr uint8_t EE_BWF   = 0x01;
 
+// Builds a ProRes essence element key.
 static inline UL16 make_rdd36_key(uint8_t cnt, uint8_t type, uint8_t num) {
     return {0x06,0x0e,0x2b,0x34,0x01,0x02,0x01,0x01,0x0d,0x01,0x03,0x01,0x15,cnt,type,num};
 }
+// Builds an audio essence element key.
 static inline UL16 make_bwf_key(uint8_t cnt, uint8_t type, uint8_t num) {
     return {0x06,0x0e,0x2b,0x34,0x01,0x02,0x01,0x01,0x0d,0x01,0x03,0x01,0x16,cnt,type,num};
 }
+// Packs a ProRes essence track number.
 static inline uint32_t rdd36_tracknum(uint8_t cnt, uint8_t type, uint8_t num) {
     return (0x15u<<24)|(cnt<<16)|(type<<8)|num;
 }
+// Packs an audio essence track number.
 static inline uint32_t bwf_tracknum(uint8_t cnt, uint8_t type, uint8_t num) {
     return (0x16u<<24)|(cnt<<16)|(type<<8)|num;
 }
@@ -157,47 +172,63 @@ static constexpr uint32_t KAG_SIZE = 512;
 // ============================================================
 //  5. KLV / local-set helpers
 // ============================================================
+// Appends a complete key-length-value triplet.
 static inline void klv(std::vector<uint8_t>& o, const UL16& k, const std::vector<uint8_t>& v) {
     wbytes(o, k.data(), 16); ber(o, v.size()); wbytes(o, v);
 }
+// Returns a new buffer containing one key-length-value triplet.
 static inline std::vector<uint8_t> klv_vec(const UL16& k, const std::vector<uint8_t>& v) {
     std::vector<uint8_t> o; klv(o, k, v); return o;
 }
 
 // Local-set item writers
+// Appends one local-set item with a two-byte tag and length.
 static inline void lt_item(std::vector<uint8_t>& b, uint16_t t, const std::vector<uint8_t>& v) {
     w16(b,t); w16(b,(uint16_t)v.size()); wbytes(b,v);
 }
+// Appends an 8-bit local-set value.
 static inline void lt_u8(std::vector<uint8_t>& b, uint16_t t, uint8_t v)   { w16(b,t); w16(b,1); w8(b,v); }
+// Appends a 16-bit local-set value.
 static inline void lt_u16(std::vector<uint8_t>& b, uint16_t t, uint16_t v) { w16(b,t); w16(b,2); w16(b,v); }
+// Appends a 32-bit local-set value.
 static inline void lt_u32(std::vector<uint8_t>& b, uint16_t t, uint32_t v) { w16(b,t); w16(b,4); w32(b,v); }
+// Appends a 64-bit local-set value.
 static inline void lt_u64(std::vector<uint8_t>& b, uint16_t t, uint64_t v) { w16(b,t); w16(b,8); w64(b,v); }
+// Appends a Boolean local-set value.
 static inline void lt_bool(std::vector<uint8_t>& b, uint16_t t, bool v)    { lt_u8(b,t,v?1:0); }
+// Appends a UUID local-set value.
 static inline void lt_uuid(std::vector<uint8_t>& b, uint16_t t, const UUID16& u) {
     w16(b,t); w16(b,16); wbytes(b, u.data(), 16);
 }
+// Appends a UMID local-set value.
 static inline void lt_umid(std::vector<uint8_t>& b, uint16_t t, const UMID32& u) {
     w16(b,t); w16(b,32); wbytes(b, u.data(), 32);
 }
+// Appends a universal-label local-set value.
 static inline void lt_ul(std::vector<uint8_t>& b, uint16_t t, const UL16& u) {
     w16(b,t); w16(b,16); wbytes(b, u.data(), 16);
 }
+// Appends a signed numerator/denominator local-set value.
 static inline void lt_rational(std::vector<uint8_t>& b, uint16_t t, int32_t n, int32_t d) {
     w16(b,t); w16(b,8); wi32(b,n); wi32(b,d);
 }
+// Appends an eight-byte timestamp local-set value.
 static inline void lt_ts(std::vector<uint8_t>& b, uint16_t t, const std::vector<uint8_t>& ts) {
     w16(b,t); w16(b,8); wbytes(b,ts);
 }
+// Appends a batch of universal labels.
 static inline void lt_ul_batch(std::vector<uint8_t>& b, uint16_t t, const std::vector<UL16>& uls) {
     std::vector<uint8_t> v; w32(v,(uint32_t)uls.size()); w32(v,16);
     for(auto& u:uls) wbytes(v, u.data(), 16);
     lt_item(b,t,v);
 }
+// Appends a batch of strong-reference UUIDs.
 static inline void lt_ref_batch(std::vector<uint8_t>& b, uint16_t t, const std::vector<UUID16>& us) {
     std::vector<uint8_t> v; w32(v,(uint32_t)us.size()); w32(v,16);
     for(auto& u:us) wbytes(v, u.data(), 16);
     lt_item(b,t,v);
 }
+// Appends a five-field product-version record.
 static inline void lt_pversion(std::vector<uint8_t>& b, uint16_t t,
     uint16_t ma,uint16_t mi,uint16_t pa,uint16_t bu,uint16_t re) {
     std::vector<uint8_t> v; w16(v,ma);w16(v,mi);w16(v,pa);w16(v,bu);w16(v,re);
@@ -205,11 +236,13 @@ static inline void lt_pversion(std::vector<uint8_t>& b, uint16_t t,
 }
 
 // UTF-16 big-endian encoder
+// Encodes an ASCII-compatible string as null-terminated UTF-16BE.
 static inline std::vector<uint8_t> utf16(const std::string& s) {
     std::vector<uint8_t> o; for(unsigned char c:s) { o.push_back(0); o.push_back(c); } return o;
 }
 
 // Timestamp
+// Encodes the current UTC time as an MXF timestamp.
 static inline std::vector<uint8_t> now_ts() {
     time_t t = time(nullptr); tm* u = gmtime(&t);
     std::vector<uint8_t> b;
@@ -222,6 +255,7 @@ static inline std::vector<uint8_t> now_ts() {
 // ============================================================
 //  6. GC System Item builder (SMPTE 326M) — OP-1a only
 // ============================================================
+// Maps an edit-rate rational to the system-item content-package rate code.
 static inline uint8_t gc_cp_rate(int fpsNum, int fpsDen) {
     int fps = (fpsDen==1) ? fpsNum : fpsNum/1000;
     const int rates[] = {24,25,30,48,50,60,72,75,90,96,100,120};
@@ -230,6 +264,7 @@ static inline uint8_t gc_cp_rate(int fpsNum, int fpsDen) {
     return 0;
 }
 
+// Encodes one frame position into the 16-byte system-item timecode field.
 static inline void encode_smpte_tc(uint8_t* tc16, int64_t pos, int fpsNum, int fpsDen, bool drop) {
     int fps = (fpsDen==1) ? fpsNum : (fpsNum+fpsDen/2)/fpsDen;
     if(fps<1) fps=1;
@@ -243,6 +278,7 @@ static inline void encode_smpte_tc(uint8_t* tc16, int64_t pos, int fpsNum, int f
     memset(tc16+4,0,12);
 }
 
+// Builds the fixed-size GC system item for one edit unit.
 static inline std::vector<uint8_t> build_system_item(int64_t frame, int fpsNum, int fpsDen,
     int64_t tcStart, bool drop, bool hasPic, bool hasSnd)
 {
@@ -269,6 +305,7 @@ static inline std::vector<uint8_t> build_system_item(int64_t frame, int fpsNum, 
 // ============================================================
 //  7. Timecode parser
 // ============================================================
+// Parses a four-field timecode string into nominal frame units.
 static inline int64_t parse_tc(const std::string& tc, int fps) {
     int hh=0,mm=0,ss=0,ff=0;
     if(tc.size()>=11) {
@@ -281,8 +318,10 @@ static inline int64_t parse_tc(const std::string& tc, int fps) {
 // ============================================================
 //  8. Primer Pack builder
 // ============================================================
+// Associates one local tag with its universal label.
 struct PrimerEntry { uint16_t tag; UL16 ul; };
 
+// Builds the primer pack for every local tag emitted by the metadata writers.
 static inline std::vector<uint8_t> build_primer() {
     auto ul = [](uint8_t a,uint8_t b,uint8_t c,uint8_t d,uint8_t e,uint8_t f,uint8_t g,uint8_t h,
                  uint8_t i,uint8_t j,uint8_t k,uint8_t l,uint8_t m,uint8_t n,uint8_t o,uint8_t p)->UL16{
@@ -389,6 +428,7 @@ static inline std::vector<uint8_t> build_primer() {
 // ============================================================
 //  9. Partition Pack builder
 // ============================================================
+// Builds a partition pack with explicit file offsets, byte counts, and SIDs.
 static inline std::vector<uint8_t> build_partition(
     const UL16& key, uint64_t thisPart, uint64_t prevPart, uint64_t footerPart,
     uint64_t headerBC, uint64_t indexBC, uint32_t indexSID,
@@ -411,8 +451,10 @@ static inline std::vector<uint8_t> build_partition(
 // ============================================================
 //  10. RIP builder
 // ============================================================
+// One random-index-pack entry associating a body SID with a partition offset.
 struct RIPEntry { uint32_t bodySID; uint64_t off; };
 
+// Builds the file-ending random index pack.
 static inline std::vector<uint8_t> build_rip(const std::vector<RIPEntry>& entries) {
     std::vector<uint8_t> body;
     for(auto& e:entries) { w32(body,e.bodySID); w64(body,e.off); }
@@ -427,6 +469,7 @@ static inline std::vector<uint8_t> build_rip(const std::vector<RIPEntry>& entrie
 // ============================================================
 //  11. Index Table Segment builder (VBR)
 // ============================================================
+// Builds a VBR index segment for an interleaved frame range.
 static inline std::vector<uint8_t> build_index_segment(
     int fpsNum, int fpsDen, int64_t startPos,
     const std::vector<uint64_t>& offsets,
@@ -469,6 +512,7 @@ static inline std::vector<uint8_t> build_index_segment(
 // ============================================================
 //  11b. CBR Index Table Segment for OP-Atom audio
 // ============================================================
+// Builds a CBR index segment for clip-wrapped OP-Atom audio.
 static inline std::vector<uint8_t> build_audio_cbr_index(
     int srNum, int srDen, int editUnitByteCount, int indexSID, int bodySID)
 {
@@ -496,6 +540,7 @@ static inline std::vector<uint8_t> build_audio_cbr_index(
 // ============================================================
 //  11c. VBR Index for OP-Atom video (clip-wrapped, in footer)
 // ============================================================
+// Builds a footer VBR index for clip-wrapped OP-Atom video.
 static inline std::vector<uint8_t> build_opatom_vbr_index(
     int fpsNum, int fpsDen,
     const std::vector<uint64_t>& offsets,
@@ -531,6 +576,7 @@ static inline std::vector<uint8_t> build_opatom_vbr_index(
 // ============================================================
 //  12. Metadata set builders
 // ============================================================
+// Builds the Preface metadata set.
 static inline std::vector<uint8_t> mk_preface(const UUID16& uid, const UUID16& identUID,
     const UUID16& csUID, const UL16& opPat, const std::vector<UL16>& ecs) {
     std::vector<uint8_t> b;
@@ -543,11 +589,12 @@ static inline std::vector<uint8_t> mk_preface(const UUID16& uid, const UUID16& i
     return klv_vec(SK_PREFACE, b);
 }
 
+// Builds the Identification metadata set for this encoder.
 static inline std::vector<uint8_t> mk_ident(const UUID16& uid) {
     std::vector<uint8_t> b;
     lt_uuid(b,0x3c0a,uid); lt_uuid(b,0x3c09,make_uuid());
     lt_item(b,0x3c01,utf16("Prores_encoder")); lt_item(b,0x3c02,utf16("mxf_enc"));
-    lt_pversion(b,0x3c03,1,2,0,0,0); lt_item(b,0x3c04,utf16("1.2.0"));
+    lt_pversion(b,0x3c03,1,2,2,0,0); lt_item(b,0x3c04,utf16("1.2.2"));
     static const UUID16 PID = {0x6d,0x78,0x66,0x5f,0x65,0x6e,0x63,0x20,
                                 0x70,0x72,0x6f,0x72,0x65,0x73,0x5f,0x65};
     lt_uuid(b,0x3c05,PID); lt_ts(b,0x3c06,now_ts());
@@ -555,6 +602,7 @@ static inline std::vector<uint8_t> mk_ident(const UUID16& uid) {
     return klv_vec(SK_IDENT, b);
 }
 
+// Builds ContentStorage references to package and essence-container-data sets.
 static inline std::vector<uint8_t> mk_content_storage(const UUID16& uid,
     const std::vector<UUID16>& pkgs, const std::vector<UUID16>& ecs) {
     std::vector<uint8_t> b;
@@ -563,6 +611,7 @@ static inline std::vector<uint8_t> mk_content_storage(const UUID16& uid,
     return klv_vec(SK_CONTENT_ST, b);
 }
 
+// Builds one EssenceContainerData metadata set.
 static inline std::vector<uint8_t> mk_ec_data(const UUID16& uid, const UMID32& linked,
     uint32_t indexSID, uint32_t bodySID) {
     std::vector<uint8_t> b;
@@ -571,6 +620,7 @@ static inline std::vector<uint8_t> mk_ec_data(const UUID16& uid, const UMID32& l
     return klv_vec(SK_EC_DATA, b);
 }
 
+// Appends fields shared by material and source package sets.
 static inline void write_pkg_base(std::vector<uint8_t>& b, const UUID16& uid, const UMID32& umid,
     const std::string& name, const std::vector<UUID16>& trks, bool genUID) {
     lt_uuid(b,0x3c0a,uid); lt_umid(b,0x4401,umid);
@@ -580,12 +630,14 @@ static inline void write_pkg_base(std::vector<uint8_t>& b, const UUID16& uid, co
     lt_ts(b,0x4405,now_ts()); lt_ts(b,0x4404,now_ts());
 }
 
+// Builds a MaterialPackage set and its track references.
 static inline std::vector<uint8_t> mk_mat_pkg(const UUID16& uid, const UMID32& umid,
     const std::vector<UUID16>& trks) {
     std::vector<uint8_t> b; write_pkg_base(b,uid,umid,"",trks,true);
     return klv_vec(SK_MAT_PKG, b);
 }
 
+// Builds a SourcePackage set and its descriptor reference.
 static inline std::vector<uint8_t> mk_src_pkg(const UUID16& uid, const UMID32& umid,
     const std::string& name, const std::vector<UUID16>& trks, const UUID16& descUID) {
     std::vector<uint8_t> b; write_pkg_base(b,uid,umid,name,trks,false);
@@ -593,6 +645,7 @@ static inline std::vector<uint8_t> mk_src_pkg(const UUID16& uid, const UMID32& u
     return klv_vec(SK_SRC_PKG, b);
 }
 
+// Builds a timeline Track set.
 static inline std::vector<uint8_t> mk_track(const UUID16& uid, uint32_t trkID, uint32_t trkNum,
     const std::string& name, const UL16& /*ddef*/, int rateN, int rateD,
     const UUID16& seqUID, bool genUID=false) {
@@ -604,6 +657,7 @@ static inline std::vector<uint8_t> mk_track(const UUID16& uid, uint32_t trkID, u
     return klv_vec(SK_TRACK, b);
 }
 
+// Builds a Sequence set containing ordered component references.
 static inline std::vector<uint8_t> mk_sequence(const UUID16& uid, const UL16& ddef,
     int64_t dur, const std::vector<UUID16>& comps, bool genUID=false) {
     std::vector<uint8_t> b;
@@ -613,6 +667,7 @@ static inline std::vector<uint8_t> mk_sequence(const UUID16& uid, const UL16& dd
     return klv_vec(SK_SEQUENCE, b);
 }
 
+// Builds a TimecodeComponent set.
 static inline std::vector<uint8_t> mk_tc_comp(const UUID16& uid, int64_t dur,
     uint16_t rndBase, int64_t startTC, bool drop, bool genUID=false) {
     std::vector<uint8_t> b;
@@ -623,6 +678,7 @@ static inline std::vector<uint8_t> mk_tc_comp(const UUID16& uid, int64_t dur,
     return klv_vec(SK_TC_COMP, b);
 }
 
+// Builds a SourceClip set and its package/track reference.
 static inline std::vector<uint8_t> mk_src_clip(const UUID16& uid, const UL16& ddef,
     int64_t dur, int64_t startPos, const UMID32& srcPkg, uint32_t srcTrk) {
     std::vector<uint8_t> b;
@@ -632,6 +688,7 @@ static inline std::vector<uint8_t> mk_src_clip(const UUID16& uid, const UL16& dd
     return klv_vec(SK_SRC_CLIP, b);
 }
 
+// Builds a CDCI video descriptor with raster, color, and coding fields.
 static inline std::vector<uint8_t> mk_cdci(const UUID16& uid, uint32_t linkedTrk,
     const Config& cfg, int aspW, int aspH, int64_t dur) {
     std::vector<uint8_t> b;
@@ -677,6 +734,7 @@ static inline std::vector<uint8_t> mk_cdci(const UUID16& uid, uint32_t linkedTrk
     return klv_vec(SK_CDCI, b);
 }
 
+// Builds a WaveAudioDescriptor for interleaved PCM essence.
 static inline std::vector<uint8_t> mk_wave(const UUID16& uid, uint32_t linkedTrk,
     int ch, int bits, int editRateN, int editRateD, int audioSr, int64_t dur) {
     std::vector<uint8_t> b;
@@ -689,6 +747,7 @@ static inline std::vector<uint8_t> mk_wave(const UUID16& uid, uint32_t linkedTrk
     return klv_vec(SK_WAVE, b);
 }
 
+// Builds a MultipleDescriptor referencing video and audio sub-descriptors.
 static inline std::vector<uint8_t> mk_multi_desc(const UUID16& uid, int fpsN, int fpsD,
     int64_t dur, const UL16& ec, const std::vector<UUID16>& subs) {
     std::vector<uint8_t> b;
@@ -701,8 +760,10 @@ static inline std::vector<uint8_t> mk_multi_desc(const UUID16& uid, int fpsN, in
 // ============================================================
 //  13. File I/O wrapper
 // ============================================================
+// Owns a random-access binary file and records its current byte position.
 class FileIO {
 public:
+    // Opens a buffered file for random-access binary output.
     bool open(const std::string& path) {
         fp_ = std::fopen(path.c_str(), "wb");
         if(!fp_) return false;
@@ -710,15 +771,21 @@ public:
         std::setvbuf(fp_, reinterpret_cast<char*>(buffer_.data()), _IOFBF, buffer_.size());
         pos_ = 0; return true;
     }
+    // Flushes and closes the file when open.
     void close() { if(fp_) { std::fclose(fp_); fp_=nullptr; } }
+    // Reports whether a file handle is active.
     bool ok() const { return fp_ != nullptr; }
+    // Writes an unowned byte range and advances the tracked position.
     void write(const uint8_t* d, size_t n) {
         if(n == 0) return;
         if(std::fwrite(d,1,n,fp_) != n) throw std::runtime_error("MXF write error");
         pos_ += n;
     }
+    // Writes an owned byte vector.
     void write(const std::vector<uint8_t>& v) { write(v.data(), v.size()); }
+    // Returns the tracked output position.
     uint64_t tell() const { return pos_; }
+    // Writes a four- or five-byte BER length for large essence items.
     void write_ber(size_t len) {
         uint8_t b[5];
         size_t n = 0;
@@ -736,6 +803,7 @@ public:
         }
         write(b, n);
     }
+    // Patches a 64-bit big-endian field without changing the tracked position.
     void patch_u64(uint64_t off, uint64_t val) {
         auto cur = ftello(fp_);
         fseeko(fp_, (off_t)off, SEEK_SET);
@@ -743,18 +811,21 @@ public:
         std::fwrite(buf,1,8,fp_);
         fseeko(fp_, cur, SEEK_SET);
     }
+    // Patches one byte without changing the tracked position.
     void patch_byte(uint64_t off, uint8_t val) {
         auto cur = ftello(fp_);
         fseeko(fp_, (off_t)off, SEEK_SET);
         std::fwrite(&val,1,1,fp_);
         fseeko(fp_, cur, SEEK_SET);
     }
+    // Patches an arbitrary byte range without changing the tracked position.
     void patch_bytes(uint64_t off, const uint8_t* data, size_t len) {
         auto cur = ftello(fp_);
         fseeko(fp_, (off_t)off, SEEK_SET);
         std::fwrite(data,1,len,fp_);
         fseeko(fp_, cur, SEEK_SET);
     }
+    // Closes the owned file handle.
     ~FileIO() { close(); }
 private:
     std::FILE* fp_ = nullptr;
@@ -765,6 +836,7 @@ private:
 // ============================================================
 //  14. Directory helper
 // ============================================================
+// Creates a directory path when it does not already exist.
 static inline bool ensure_dir(const std::string& p) {
     struct stat st{}; if(stat(p.c_str(),&st)==0) return S_ISDIR(st.st_mode);
     if(::mkdir(p.c_str(),0755)==0) return true;
@@ -773,6 +845,7 @@ static inline bool ensure_dir(const std::string& p) {
     return false;
 }
 
+// Returns the encoded BER field width in a complete KLV buffer.
 static inline size_t ber_field_sz(const std::vector<uint8_t>& p) {
     uint8_t b0 = p[16]; return (b0&0x80) ? (1+(b0&0x7f)) : 1;
 }
@@ -781,12 +854,14 @@ static constexpr size_t FOOTER_BODY_OFF = 24;
 // ============================================================
 //  15. KLV Fill (KAG-512 alignment)
 // ============================================================
+// Computes the KLV Fill byte count needed to reach the next KAG boundary.
 static inline uint32_t klv_fill_size(uint64_t pos) {
     uint32_t pad = KAG_SIZE - (uint32_t)(pos & (KAG_SIZE - 1));
     if(pad < 20) return pad + KAG_SIZE;  // minimum fill = key(16) + ber4(4) = 20
     return pad & (KAG_SIZE - 1);
 }
 
+// Writes one KLV Fill item that aligns the following item to KAG-512.
 static inline void write_klv_fill(FileIO& io) {
     uint32_t pad = klv_fill_size(io.tell());
     if(pad) {
@@ -802,25 +877,37 @@ static inline void write_klv_fill(FileIO& io) {
 // ============================================================
 //  16. EncoderImpl — polymorphic base
 // ============================================================
+// Polymorphic implementation contract shared by OP-1a and OP-Atom writers.
 class EncoderImpl {
 public:
+    // Releases implementation-owned output resources.
     virtual ~EncoderImpl() = default;
+    // Starts a file using a validated encoder configuration.
     virtual bool open(const std::string& path, const Config& cfg) = 0;
+    // Writes one video edit unit and its corresponding audio payloads.
     virtual bool writeFrame(const uint8_t* video, size_t videoSize,
                             const std::vector<const uint8_t*>& audio,
                             const std::vector<size_t>& audioSizes) = 0;
+    // Convenience entry point for video-only edit units.
     virtual bool writeVideoFrame(const uint8_t* d, size_t s) {
         return writeFrame(d,s,{},{});
     }
+    // Convenience entry point for audio-only edit units.
     virtual bool writeAudioFrame(const uint8_t* d, size_t s) {
         std::vector<const uint8_t*> a={d}; std::vector<size_t> as={s};
         return writeFrame(nullptr,0,a,as);
     }
+    // Finalizes index/footer data and closes the file.
     virtual bool close() = 0;
+    // Returns the number of accepted edit units.
     virtual int64_t frameCount() const = 0;
+    // Reports whether the implementation is accepting samples.
     virtual bool isOpen() const = 0;
+    // Returns the most recent implementation error.
     virtual const std::string& lastError() const = 0;
+    // Returns the active output path.
     virtual const std::string& filePath() const = 0;
+    // Returns the source-package identifier written to metadata.
     virtual const UMID32& sourcePackageUMID() const = 0;
 };
 

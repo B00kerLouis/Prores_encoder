@@ -1,21 +1,27 @@
+// Decodes compressed ProRes samples and normalizes supported decoder outputs to
+// 10-bit 4:2:0 bi-planar pixel buffers for compressed-output encoders.
+
 import Foundation
 import AVFoundation
 import CoreMedia
 import CoreVideo
 import VideoToolbox
 
+/// Synchronizes one asynchronous decompression callback with its submitting thread.
 private final class NativeDecodeWaiter {
     let semaphore = DispatchSemaphore(value: 0)
     var status: OSStatus = noErr
     var pixelBuffer: CVPixelBuffer?
 }
 
+/// Pixel layouts accepted from the platform decompression session.
 private enum ProResNativeDecodeMode {
     case p010
     case x422
     case y416
 }
 
+/// Owns the compressed reader, decompression session, and format-conversion pool.
 final class ProResNativeDecodeSession: @unchecked Sendable {
     private let reader: AVAssetReader
     private let output: AVAssetReaderTrackOutput
@@ -26,6 +32,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
     private var decodeMode: ProResNativeDecodeMode?
     private var pendingPixelBuffer: CVPixelBuffer?
 
+    /// Opens compressed track output and probes decoder formats using the first sample.
     init(
         asset: AVAsset,
         videoTrack: AVAssetTrack,
@@ -117,6 +124,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         )
     }
 
+    /// Cancels pending reads and invalidates the decompression session.
     deinit {
         reader.cancelReading()
         if let session {
@@ -124,6 +132,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         }
     }
 
+    /// Returns the next decoded P010 frame, or nil after the compressed track ends.
     func nextPixelBuffer() throws -> CVPixelBuffer? {
         if let pendingPixelBuffer {
             self.pendingPixelBuffer = nil
@@ -160,6 +169,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         return try convertToP010(decoded)
     }
 
+    /// Tries supported output layouts in preference order and retains the first result.
     private func configureSessionAndDecodeFirstFrame(
         firstSample: CMSampleBuffer,
         formatDescription: CMFormatDescription
@@ -200,6 +210,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         )
     }
 
+    /// Creates a decompression session configured for one candidate pixel layout.
     private func makeSession(
         formatDescription: CMFormatDescription,
         pixelFormat: OSType
@@ -242,6 +253,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         return session
     }
 
+    /// Submits one sample and waits for its callback with bounded timeout handling.
     private func decode(
         sampleBuffer: CMSampleBuffer,
         with session: VTDecompressionSession
@@ -288,6 +300,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         return pixelBuffer
     }
 
+    /// Maps a decoder pixel-format code to the corresponding conversion path.
     private func mode(for pixelFormat: OSType) throws -> ProResNativeDecodeMode {
         switch pixelFormat {
         case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
@@ -307,6 +320,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         }
     }
 
+    /// Passes through P010 or converts 4:2:2 and 4:4:4 decoder output to P010.
     private func convertToP010(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
         switch try mode(for: CVPixelBufferGetPixelFormatType(source)) {
         case .p010:
@@ -318,6 +332,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         }
     }
 
+    /// Allocates a destination from the pool, flushing excess buffers before fallback.
     private func makeDestinationP010PixelBuffer() throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         var status = CVPixelBufferPoolCreatePixelBuffer(
@@ -355,6 +370,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         return pixelBuffer
     }
 
+    /// Copies 10-bit luma and vertically averages 4:2:2 chroma into 4:2:0.
     private func downsampleX422ToP010(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
         let destination = try makeDestinationP010PixelBuffer()
 
@@ -414,6 +430,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         return destination
     }
 
+    /// Quantizes 16-bit packed components and averages each 2x2 chroma footprint.
     private func convertY416ToP010(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
         let destination = try makeDestinationP010PixelBuffer()
 
@@ -484,12 +501,14 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
     }
 }
 
+/// Averages two left-aligned 10-bit samples with integer rounding.
 private func averageP010(_ a: UInt16, _ b: UInt16) -> UInt16 {
     let a10 = Int(a) >> 6
     let b10 = Int(b) >> 6
     return UInt16(((a10 + b10 + 1) / 2) << 6)
 }
 
+/// Quantizes and averages a 2x2 group into one left-aligned 10-bit sample.
 private func average4Quantized(_ a: UInt16, _ b: UInt16, _ c: UInt16, _ d: UInt16) -> UInt16 {
     let a10 = Int(quantize16To10Bit(a))
     let b10 = Int(quantize16To10Bit(b))
@@ -498,14 +517,17 @@ private func average4Quantized(_ a: UInt16, _ b: UInt16, _ c: UInt16, _ d: UInt1
     return UInt16(((a10 + b10 + c10 + d10 + 2) / 4) << 6)
 }
 
+/// Rounds a full 16-bit code value to an unsigned 10-bit value.
 private func quantize16To10Bit(_ value: UInt16) -> UInt16 {
     UInt16(min((Int(value) + 32) >> 6, 1023))
 }
 
+/// Converts a full 16-bit code value to left-aligned P010 storage.
 private func quantize16ToP010(_ value: UInt16) -> UInt16 {
     quantize16To10Bit(value) << 6
 }
 
+/// Formats a media subtype for decoder diagnostics.
 private func proResDecodeFourCCString(_ code: FourCharCode) -> String {
     let bytes = [
         UInt8((code >> 24) & 0xff),

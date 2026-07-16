@@ -1,7 +1,12 @@
+// Defines analysis errors, media descriptors, per-frame measurements, and
+// exported metadata records used by the GPU analysis pipeline.
+
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
 
+/// Errors surfaced while validating media, running GPU analysis, or exporting
+/// metadata artifacts.
 enum CMUError: LocalizedError {
     case invalidMasteringBrightness(String)
     case noVideoTrack(URL)
@@ -67,6 +72,7 @@ enum CMUError: LocalizedError {
     }
 }
 
+/// Supported PQ analysis gamuts and their chromaticity metadata.
 enum CMUPrimaries: String, Codable, Sendable {
     case p3D65 = "p3d65"
     case rec2020 = "rec2020"
@@ -111,6 +117,7 @@ enum CMUPrimaries: String, Codable, Sendable {
     }
 }
 
+/// Maps decoded signal range to XML terminology and pixel-buffer formats.
 enum CMUSignalRange: String, Codable, Sendable {
     case full
     case video
@@ -126,12 +133,14 @@ enum CMUSignalRange: String, Codable, Sendable {
     }
 }
 
+/// Identifies the media stage whose pixels produced an analysis document.
 enum CMUAnalysisSource: String, Codable, Sendable {
     case input
     case output
     case transformedInput = "transformed-input"
 }
 
+/// Stores an exact frame-rate rational and its serialized representation.
 struct CMURational: Codable, Sendable {
     let numerator: Int
     let denominator: Int
@@ -145,6 +154,7 @@ struct CMURational: Codable, Sendable {
     }
 }
 
+/// Captures the media and color properties required to configure analysis.
 struct CMUAssetDescriptor: Codable, Sendable {
     let path: String
     let fileName: String
@@ -159,6 +169,7 @@ struct CMUAssetDescriptor: Codable, Sendable {
 
     var isEligible: Bool { true }
 
+    /// Returns the descriptor expected after applying a resolved PQ transform.
     func applying(_ transform: ResolvedColorTransform) -> CMUAssetDescriptor {
         let outputPrimaries: CMUPrimaries =
             transform.outputGamut == .p3D65 ? .p3D65 : .rec2020
@@ -176,6 +187,7 @@ struct CMUAssetDescriptor: Codable, Sendable {
         )
     }
 
+    /// Reads track metadata and rejects media outside the supported PQ gamuts.
     static func inspect(url: URL) async throws -> CMUAssetDescriptor {
         let asset = AVURLAsset(
             url: url,
@@ -249,6 +261,7 @@ struct CMUAssetDescriptor: Codable, Sendable {
     }
 }
 
+/// Stores luminance, channel, percentile, and saturation measurements for one frame.
 struct CMUFrameStats: Codable, Sendable {
     let frameIndex: Int64
     let ptsSeconds: Double
@@ -268,13 +281,16 @@ struct CMUFrameStats: Codable, Sendable {
     let avgSaturation: Float
 }
 
+/// Stores the aggregate minimum, midpoint, and maximum PQ anchors.
 struct CMULevel1Like: Codable, Sendable {
     let min: Float
     let mid: Float
     let max: Float
 }
 
+/// Records the resolved start timecode and the source from which it was derived.
 struct CMUTimecodeReference: Codable, Sendable {
+    /// Source used to establish the record start frame.
     enum Origin: String, Codable, Sendable {
         case quickTime = "quicktime"
         case ffoa
@@ -287,6 +303,7 @@ struct CMUTimecodeReference: Codable, Sendable {
     let origin: Origin
 }
 
+/// Complete serializable result of one media analysis run.
 struct CMUAnalysisDocument: Codable, Sendable {
     let schemaVersion: String
     let generatedAtUTC: String
@@ -310,10 +327,12 @@ struct CMUAnalysisDocument: Codable, Sendable {
     let frames: [CMUFrameStats]
 }
 
+/// URLs created by the metadata exporter.
 struct CMUOutputArtifacts: Sendable {
     let xmlURL: URL
 }
 
+/// Parses and bounds a command-line mastering peak in nits.
 func cmuParseMasteringBrightness(_ value: String) throws -> Float {
     guard let parsed = Float(value),
           parsed.isFinite,
@@ -324,6 +343,7 @@ func cmuParseMasteringBrightness(_ value: String) throws -> Float {
     return parsed
 }
 
+/// Converts a four-character media code to a printable string.
 func cmuFourCC(_ code: OSType) -> String {
     let bytes = [
         UInt8((code >> 24) & 0xff),
@@ -334,6 +354,7 @@ func cmuFourCC(_ code: OSType) -> String {
     return String(bytes: bytes, encoding: .ascii) ?? "\(code)"
 }
 
+/// Derives an exact edit rate from frame duration, with asset metadata fallback.
 private func cmuEditRate(asset: AVAsset, track: AVAssetTrack) async -> CMURational {
     if let minDuration = try? await track.load(.minFrameDuration),
        minDuration.isNumeric,
@@ -350,6 +371,7 @@ private func cmuEditRate(asset: AVAsset, track: AVAssetTrack) async -> CMURation
     return CMURational(numerator: fallback.numerator, denominator: fallback.denominator)
 }
 
+/// Returns a positive divisor for rational-rate reduction.
 private func cmuGCD(_ lhs: Int, _ rhs: Int) -> Int {
     var a = abs(lhs)
     var b = abs(rhs)

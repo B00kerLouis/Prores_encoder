@@ -1,4 +1,4 @@
-// AV1Bridge.mm — SVT-AV1 encoder bridge used by Swift MOV pipeline.
+// Implements the AV1 encoder bridge used by the Swift MOV pipeline.
 
 #import "../include/AV1Bridge.h"
 
@@ -19,10 +19,12 @@ namespace {
 static constexpr OSType kPixelFormatP010 = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
 static constexpr OSType kPixelFormatNV12 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
+// Reads an unsigned 16-bit big-endian value.
 static uint16_t readBE16(const uint8_t *p) {
     return static_cast<uint16_t>((p[0] << 8) | p[1]);
 }
 
+// Reads an unsigned 32-bit big-endian value.
 static uint32_t readBE32(const uint8_t *p) {
     return (static_cast<uint32_t>(p[0]) << 24) |
            (static_cast<uint32_t>(p[1]) << 16) |
@@ -30,10 +32,12 @@ static uint32_t readBE32(const uint8_t *p) {
            static_cast<uint32_t>(p[3]);
 }
 
+// Formats an encoder operation and numeric error code.
 static NSString *errorString(const char *operation, EbErrorType err) {
     return [NSString stringWithFormat:@"%s failed: 0x%08x", operation, static_cast<uint32_t>(err)];
 }
 
+// Clamps a requested bitrate to the encoder's unsigned 32-bit range.
 static uint32_t clampedBitrate(int64_t bitrate) {
     if (bitrate <= 0) {
         return 1;
@@ -44,6 +48,7 @@ static uint32_t clampedBitrate(int64_t bitrate) {
     ));
 }
 
+// Converts binary mastering-display metadata to the encoder configuration form.
 static std::string masteringDisplayString(NSData *data) {
     if (!data || data.length < 24) {
         return {};
@@ -69,6 +74,7 @@ static std::string masteringDisplayString(NSData *data) {
     return std::string(buf);
 }
 
+// Converts binary content-light metadata to the encoder configuration form.
 static std::string contentLightString(NSData *data) {
     if (!data || data.length < 4) {
         return {};
@@ -79,6 +85,7 @@ static std::string contentLightString(NSData *data) {
     return std::string(buf);
 }
 
+// Reads a bounded unsigned LEB128 value and advances the cursor.
 static bool readLeb128(const uint8_t *data, size_t size, size_t &cursor, size_t &value) {
     uint64_t result = 0;
     uint32_t shift = 0;
@@ -94,6 +101,7 @@ static bool readLeb128(const uint8_t *data, size_t size, size_t &cursor, size_t 
     return false;
 }
 
+// Extracts the first complete sequence-header OBU from stream-header data.
 static std::vector<uint8_t> sequenceHeaderOBU(const std::vector<uint8_t> &data) {
     size_t cursor = 0;
     while (cursor < data.size()) {
@@ -129,10 +137,13 @@ static std::vector<uint8_t> sequenceHeaderOBU(const std::vector<uint8_t> &data) 
     return {};
 }
 
+// Reads fixed-width fields from an AV1 sequence-header payload.
 class BitReader {
 public:
+    // Creates a reader over an unowned byte range.
     BitReader(const uint8_t *data, size_t size) : data_(data), size_(size) {}
 
+    // Reads up to 32 bits in most-significant-bit order.
     bool read(uint32_t bits, uint32_t &value) {
         value = 0;
         for (uint32_t i = 0; i < bits; ++i) {
@@ -147,11 +158,13 @@ public:
         return true;
     }
 
+    // Advances by a fixed number of bits.
     bool skip(uint32_t bits) {
         uint32_t ignored = 0;
         return read(bits, ignored);
     }
 
+    // Reads one Boolean bit.
     bool readBool(bool &value) {
         uint32_t bit = 0;
         if (!read(1, bit)) {
@@ -161,6 +174,7 @@ public:
         return true;
     }
 
+    // Skips the sequence-header variable-bit representation.
     bool skipUleb128() {
         uint32_t leadingZeroCount = 0;
         bool bit = false;
@@ -185,6 +199,7 @@ private:
     size_t bitOffset_ = 0;
 };
 
+// Returns the first operating point's sequence level, or 31 when unavailable.
 static uint8_t parsedSequenceLevel(const std::vector<uint8_t> &sequenceOBU) {
     if (sequenceOBU.empty()) {
         return 31;
@@ -270,6 +285,7 @@ static uint8_t parsedSequenceLevel(const std::vector<uint8_t> &sequenceOBU) {
     return firstLevel;
 }
 
+// Builds an av1C record containing profile, level, chroma, and sequence header.
 static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &streamHeader) {
     std::vector<uint8_t> sequenceOBU = sequenceHeaderOBU(streamHeader);
     const uint8_t level = parsedSequenceLevel(sequenceOBU);
@@ -287,6 +303,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
 } // namespace
 
 @implementation AV1BridgeConfig
+// Initializes dimensions, frame rate, and bitrate defaults.
 - (instancetype)init {
     if ((self = [super init])) {
         _width = 1920;
@@ -300,6 +317,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
 @end
 
 @implementation AV1BridgePacket
+// Creates one immutable encoded packet.
 - (instancetype)initWithData:(NSData *)data
            presentationIndex:(int64_t)presentationIndex
                     keyframe:(BOOL)keyframe {
@@ -324,6 +342,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     BOOL _sentEOS;
 }
 
+// Configures the encoder, initializes it, and captures its sequence header.
 - (BOOL)openWithConfig:(AV1BridgeConfig *)config {
     [self close];
     self.lastError = nil;
@@ -410,6 +429,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     return YES;
 }
 
+// Submits one source frame and returns packets currently ready for delivery.
 - (nullable NSArray<AV1BridgePacket *> *)encodePixelBuffer:(CVPixelBufferRef)pixelBuffer
                                          presentationIndex:(int64_t)presentationIndex {
     if (!_opened || !_encoder) {
@@ -422,6 +442,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     return [self drainPacketsBlocking:NO];
 }
 
+// Sends end-of-stream, drains delayed packets, and closes the encoder.
 - (nullable NSArray<AV1BridgePacket *> *)finish {
     if (!_opened || !_encoder) {
         return @[];
@@ -443,6 +464,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     return packets;
 }
 
+// Releases initialized encoder state and clears session flags.
 - (void)close {
     if (_encoder) {
         if (_opened) {
@@ -455,10 +477,12 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     _sentEOS = NO;
 }
 
+// Releases encoder resources when the bridge is destroyed.
 - (void)dealloc {
     [self close];
 }
 
+// Converts bi-planar source pixels to planar 10-bit storage and submits a frame.
 - (BOOL)fillAndSendPixelBuffer:(CVPixelBufferRef)pixelBuffer
              presentationIndex:(int64_t)presentationIndex {
     const OSType pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer);
@@ -541,6 +565,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     return YES;
 }
 
+// Collects output packets, filtering end-of-stream and alternate-reference units.
 - (nullable NSArray<AV1BridgePacket *> *)drainPacketsBlocking:(BOOL)blocking {
     NSMutableArray<AV1BridgePacket *> *packets = [NSMutableArray array];
     while (true) {

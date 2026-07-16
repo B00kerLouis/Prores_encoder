@@ -1,9 +1,12 @@
+// Converts encoded MXF clip metadata into linked AAF sequences or per-clip files.
+
 import Foundation
 import swiftaaf_Framework
 
 private let swiftAAFVideoPhysicalTrackNumber: UInt32 = 0x15011700
 private let swiftAAFAudioPhysicalTrackNumber: UInt32 = 0x16010100
 
+/// Writes one linked sequence and verifies that the requested output file exists.
 func generateAAFWithSwiftAAF(clips: [AAFClipInfo], outputPath: String, sequenceName: String) -> Bool {
     guard !clips.isEmpty else {
         print("[AAF] No clips to sequence.")
@@ -36,6 +39,7 @@ func generateAAFWithSwiftAAF(clips: [AAFClipInfo], outputPath: String, sequenceN
     }
 }
 
+/// Writes one linked AAF per clip and returns false if any individual export fails.
 func generateAAFPerClipWithSwiftAAF(clips: [AAFClipInfo], outputDir: URL, basename: String) -> Bool {
     guard !clips.isEmpty else {
         print("[AAF] No clips to export.")
@@ -52,6 +56,7 @@ func generateAAFPerClipWithSwiftAAF(clips: [AAFClipInfo], outputDir: URL, basena
     return ok
 }
 
+/// Maps project clip metadata to a linked video record and its audio references.
 private func makeSwiftAAFClip(from clip: AAFClipInfo) throws -> swiftaaf_Framework.AAFLinkedMXFClip {
     let editRate = swiftaaf_Framework.AAFRational(Int64(clip.fpsNumerator), Int64(clip.fpsDenominator))
     let videoMobID = try sourceMobID(from: clip.videoMXFUMID, label: "video")
@@ -78,6 +83,7 @@ private func makeSwiftAAFClip(from clip: AAFClipInfo) throws -> swiftaaf_Framewo
     )
 }
 
+/// Builds separate OP-Atom audio references or the audio slot shared by OP-1a media.
 private func makeSwiftAAFAudioTracks(
     from clip: AAFClipInfo,
     editRate: swiftaaf_Framework.AAFRational
@@ -129,6 +135,7 @@ private func makeSwiftAAFAudioTracks(
     ]
 }
 
+/// Returns validated per-track channel counts, filling absent values from clip defaults.
 private func normalizedAudioChannelCounts(for clip: AAFClipInfo) -> [Int] {
     let counts = clip.audioChannelCounts.filter { $0 > 0 }
     if !counts.isEmpty {
@@ -140,6 +147,7 @@ private func normalizedAudioChannelCounts(for clip: AAFClipInfo) -> [Int] {
     return Array(repeating: max(clip.audioChannels, 1), count: clip.audioTrackCount)
 }
 
+/// Validates and converts a 32-byte source-package identifier.
 private func sourceMobID(from data: Data, label: String) throws -> swiftaaf_Framework.MobID {
     let bytes = Array(data)
     guard bytes.count == 32, bytes.contains(where: { $0 != 0 }) else {
@@ -148,11 +156,13 @@ private func sourceMobID(from data: Data, label: String) throws -> swiftaaf_Fram
     return try swiftaaf_Framework.MobID(bytesLE: bytes)
 }
 
+/// Uses the video media basename as the sequence name when one is available.
 private func clipSequenceName(_ clip: AAFClipInfo, fallback: String) -> String {
     let name = URL(fileURLWithPath: clip.videoMXFPath).deletingPathExtension().lastPathComponent
     return name.isEmpty ? fallback : name
 }
 
+/// Input validation errors raised while constructing linked media records.
 private enum AAFExportError: LocalizedError {
     case invalidSourceMobID(String)
 

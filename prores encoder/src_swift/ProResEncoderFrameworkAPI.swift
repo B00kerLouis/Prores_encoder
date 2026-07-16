@@ -1,25 +1,31 @@
+// Exposes file, folder, and timeline encoding workflows as a Swift API.
+
 import Foundation
 @preconcurrency import AVFoundation
 import Metal
 import VideoToolbox
 
+/// Container layouts available to framework clients.
 public enum ProResOutputFormat: String, Sendable {
     case mov
     case op1a
     case opatom
 }
 
+/// Controls whether MXF encoding also creates linked AAF output.
 public enum ProResAAFMode: Sendable {
     case none
     case sequence
     case perClip
 }
 
+/// Supported timeline document formats for conversion.
 public enum ProResTimelineFormat: String, Sendable {
     case aaf
     case xml
 }
 
+/// Target color gamuts accepted by direct and LUT output declarations.
 public enum ProResColorGamut: String, Sendable {
     case rec709
     case rec2020
@@ -27,6 +33,7 @@ public enum ProResColorGamut: String, Sendable {
     case p3D65 = "p3d65"
 }
 
+/// Target transfer functions accepted by the Metal color pipeline.
 public enum ProResTransferFunction: String, Sendable {
     case gamma24 = "gamma2.4"
     case gamma26 = "gamma2.6"
@@ -34,6 +41,7 @@ public enum ProResTransferFunction: String, Sendable {
     case hlg
 }
 
+/// Dynamic HDR profiles supported by compressed-output workflows.
 public enum ProResDolbyVisionProfile: String, Sendable {
     case profile76 = "76"
     case profile81 = "81"
@@ -42,11 +50,13 @@ public enum ProResDolbyVisionProfile: String, Sendable {
     case profile104 = "104"
 }
 
+/// Direct gamut, transfer, and peak-luminance mapping request.
 public struct ProResColorConversion: Sendable {
     public var gamut: ProResColorGamut
     public var transferFunction: ProResTransferFunction
     public var targetPeakNits: Float
 
+    /// Creates a direct color-conversion declaration.
     public init(
         gamut: ProResColorGamut,
         transferFunction: ProResTransferFunction,
@@ -57,6 +67,7 @@ public struct ProResColorConversion: Sendable {
         self.targetPeakNits = targetPeakNits
     }
 
+    /// Converts public values to the validated internal request model.
     fileprivate func makeRequest() throws -> ColorTransformRequest {
         try ColorTransformRequest(
             gamut: gamut.rawValue,
@@ -66,6 +77,38 @@ public struct ProResColorConversion: Sendable {
     }
 }
 
+/// LUT file plus the color space and peak luminance produced by that table.
+public struct ProResLUTColorConversion: Sendable {
+    public var lutURL: URL
+    public var gamut: ProResColorGamut
+    public var transferFunction: ProResTransferFunction
+    public var targetPeakNits: Float
+
+    /// Creates a LUT burn-in declaration and its post-LUT output metadata.
+    public init(
+        lutURL: URL,
+        gamut: ProResColorGamut,
+        transferFunction: ProResTransferFunction,
+        targetPeakNits: Float
+    ) {
+        self.lutURL = lutURL
+        self.gamut = gamut
+        self.transferFunction = transferFunction
+        self.targetPeakNits = targetPeakNits
+    }
+
+    /// Loads and validates the LUT through the internal request model.
+    fileprivate func makeRequest() throws -> ColorTransformRequest {
+        try ColorTransformRequest(
+            gamut: gamut.rawValue,
+            oetf: transferFunction.rawValue,
+            nits: String(targetPeakNits),
+            lutURL: lutURL
+        )
+    }
+}
+
+/// Options shared by single-file, folder, and timeline encoding.
 public struct ProResEncodeOptions: Sendable {
     public var quality: String
     public var extraAudioURL: URL?
@@ -77,12 +120,14 @@ public struct ProResEncodeOptions: Sendable {
     public var dolbyVisionProfile: ProResDolbyVisionProfile?
     public var audioChannelsPerMXFFile: Int
     public var colorConversion: ProResColorConversion?
+    public var lutColorConversion: ProResLUTColorConversion?
     public var cmuMasteringNits: Float?
     public var includeGeneratedDolbyVisionMetadata: Bool
     public var useDolbyVisionCodecTag: Bool
     public var dolbyVisionDualOutput: Bool
     public var aafMode: ProResAAFMode
 
+    /// Creates an option set with MOV 422 HQ defaults and optional advanced features.
     public init(
         quality: String = "422hq",
         extraAudioURL: URL? = nil,
@@ -94,6 +139,7 @@ public struct ProResEncodeOptions: Sendable {
         dolbyVisionProfile: ProResDolbyVisionProfile? = nil,
         audioChannelsPerMXFFile: Int = 1,
         colorConversion: ProResColorConversion? = nil,
+        lutColorConversion: ProResLUTColorConversion? = nil,
         cmuMasteringNits: Float? = nil,
         includeGeneratedDolbyVisionMetadata: Bool = false,
         useDolbyVisionCodecTag: Bool = false,
@@ -110,14 +156,27 @@ public struct ProResEncodeOptions: Sendable {
         self.dolbyVisionProfile = dolbyVisionProfile
         self.audioChannelsPerMXFFile = audioChannelsPerMXFFile
         self.colorConversion = colorConversion
+        self.lutColorConversion = lutColorConversion
         self.cmuMasteringNits = cmuMasteringNits
         self.includeGeneratedDolbyVisionMetadata = includeGeneratedDolbyVisionMetadata
         self.useDolbyVisionCodecTag = useDolbyVisionCodecTag
         self.dolbyVisionDualOutput = dolbyVisionDualOutput
         self.aafMode = aafMode
     }
+
+    /// Enforces mutual exclusion between direct conversion and LUT burn-in.
+    fileprivate func makeColorTransformRequest() throws -> ColorTransformRequest? {
+        guard colorConversion == nil || lutColorConversion == nil else {
+            throw ColorTransformError.conflictingColorModes
+        }
+        if let lutColorConversion {
+            return try lutColorConversion.makeRequest()
+        }
+        return try colorConversion?.makeRequest()
+    }
 }
 
+/// Files and media properties produced by one encoded input.
 public struct ProResEncodeResult: Sendable {
     public let outputURLs: [URL]
     public let framesEncoded: Int64?
@@ -126,6 +185,7 @@ public struct ProResEncodeResult: Sendable {
     public let aafURL: URL?
     fileprivate let frameworkAAFClipInfo: AAFClipInfo?
 
+    /// Creates a result for clients that already know all generated file URLs.
     public init(
         outputURLs: [URL],
         framesEncoded: Int64? = nil,
@@ -141,6 +201,7 @@ public struct ProResEncodeResult: Sendable {
         frameworkAAFClipInfo = nil
     }
 
+    /// Creates a result from the internal output bundle used by encoder workflows.
     fileprivate init(
         outputURLs: [URL],
         framesEncoded: Int64?,
@@ -158,16 +219,19 @@ public struct ProResEncodeResult: Sendable {
     }
 }
 
+/// Per-clip results and optional sequence-level AAF from a folder workflow.
 public struct ProResBatchEncodeResult: Sendable {
     public let clips: [ProResEncodeResult]
     public let sequenceAAFURL: URL?
 
+    /// Creates a batch result in input processing order.
     public init(clips: [ProResEncodeResult], sequenceAAFURL: URL? = nil) {
         self.clips = clips
         self.sequenceAAFURL = sequenceAAFURL
     }
 }
 
+/// Public validation, missing-file, and encoding failures.
 public enum ProResEncoderError: LocalizedError, Sendable {
     case inputNotFound(String)
     case auxiliaryFileNotFound(String)
@@ -188,17 +252,19 @@ public enum ProResEncoderError: LocalizedError, Sendable {
     }
 }
 
+/// Stateless entry point for media encoding and timeline conversion.
 public final class ProResEncoder: Sendable {
-    public static let version = "1.2.0"
+    public static let version = "1.2.2"
 
+    /// Initializes GPU discovery and registers platform codec components.
     public init() {
-        // Match the CLI startup path before any asynchronous work leaves the
-        // caller's thread. Professional ProRes encoders can otherwise remain
-        // undiscoverable when a framework client creates its first session.
+        // Initialize GPU and codec discovery on the caller's thread before
+        // asynchronous work begins.
         _ = MTLCreateSystemDefaultDevice()
         VTRegisterProfessionalVideoWorkflowVideoEncoders()
     }
 
+    /// Encodes one media file and returns every generated output URL.
     public func encode(
         inputURL: URL,
         outputURL: URL,
@@ -216,6 +282,10 @@ public final class ProResEncoder: Sendable {
         if let dolbyVisionXMLURL = options.dolbyVisionXMLURL,
            !fileManager.fileExists(atPath: dolbyVisionXMLURL.path) {
             throw ProResEncoderError.auxiliaryFileNotFound(dolbyVisionXMLURL.path)
+        }
+        if let lutURL = options.lutColorConversion?.lutURL,
+           !fileManager.fileExists(atPath: lutURL.path) {
+            throw ProResEncoderError.auxiliaryFileNotFound(lutURL.path)
         }
 
         let quality = normalizedProResQuality(options.quality)
@@ -262,7 +332,7 @@ public final class ProResEncoder: Sendable {
             )
         }
 
-        let colorTransform = try options.colorConversion?.makeRequest()
+        let colorTransform = try options.makeColorTransformRequest()
         if colorTransform != nil && quality == "pass" {
             throw ProResEncoderError.invalidOption(
                 ColorTransformError.passthroughNotSupported.localizedDescription
@@ -276,6 +346,12 @@ public final class ProResEncoder: Sendable {
             && internalProfile?.usesHLGBaseLayer != true {
             throw ProResEncoderError.invalidOption(
                 ColorTransformError.dolbyVisionNotSupported.localizedDescription
+            )
+        }
+        if colorTransform?.hasLUT == true,
+           options.dolbyVisionXMLURL != nil || options.includeGeneratedDolbyVisionMetadata {
+            throw ProResEncoderError.invalidOption(
+                "LUT burn-in cannot be combined with Dolby Vision XML or generated Dolby Vision metadata. Generate metadata from the graded output in a separate workflow."
             )
         }
         if let internalProfile,
@@ -391,6 +467,7 @@ public final class ProResEncoder: Sendable {
         }
     }
 
+    /// Encodes supported media files in a folder and optionally writes a sequence AAF.
     public func encodeFolder(
         inputFolderURL: URL,
         outputDirectoryURL: URL,
@@ -485,6 +562,7 @@ public final class ProResEncoder: Sendable {
         )
     }
 
+    /// Parses and encodes a linked AAF or XML timeline to a MOV output.
     public func encodeTimeline(
         inputTimelineURL: URL,
         outputURL: URL,
@@ -493,6 +571,10 @@ public final class ProResEncoder: Sendable {
     ) async throws -> ProResEncodeResult {
         guard FileManager.default.fileExists(atPath: inputTimelineURL.path) else {
             throw ProResEncoderError.inputNotFound(inputTimelineURL.path)
+        }
+        if let lutURL = options.lutColorConversion?.lutURL,
+           !FileManager.default.fileExists(atPath: lutURL.path) {
+            throw ProResEncoderError.auxiliaryFileNotFound(lutURL.path)
         }
         let quality = normalizedProResQuality(options.quality)
         guard !isHEVCQuality(quality), !isAV1Quality(quality) else {
@@ -515,6 +597,12 @@ public final class ProResEncoder: Sendable {
                 "includeGeneratedDolbyVisionMetadata requires cmuMasteringNits."
             )
         }
+        let colorTransform = try options.makeColorTransformRequest()
+        if colorTransform?.hasLUT == true, options.includeGeneratedDolbyVisionMetadata {
+            throw ProResEncoderError.invalidOption(
+                "LUT burn-in cannot be combined with generated Dolby Vision metadata. Generate metadata from the graded output in a separate workflow."
+            )
+        }
         let descriptor = try timelineDescriptor(
             from: inputTimelineURL,
             mediaSearchURLs: mediaSearchURLs
@@ -524,7 +612,6 @@ public final class ProResEncoder: Sendable {
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let colorTransform = try options.colorConversion?.makeRequest()
         guard await encodeTimelineMOV(
             composition: composition,
             descriptor: descriptor,
@@ -564,6 +651,7 @@ public final class ProResEncoder: Sendable {
         )
     }
 
+    /// Converts a timeline document without encoding its linked media.
     public func transformTimeline(
         inputURL: URL,
         outputURL: URL,
@@ -599,6 +687,7 @@ public final class ProResEncoder: Sendable {
         return finalURL
     }
 
+    /// Parses the requested timeline format into the common descriptor model.
     private func timelineDescriptor(
         from inputURL: URL,
         mediaSearchURLs: [URL]
@@ -629,6 +718,7 @@ public final class ProResEncoder: Sendable {
         }
     }
 
+    /// Runs the MOV pipeline and post-encode metadata workflow for one asset.
     private func encodeMOVFile(
         inputURL: URL,
         outputURL: URL,
@@ -762,6 +852,7 @@ public final class ProResEncoder: Sendable {
         )
     }
 
+    /// Runs OP-1a or OP-Atom encoding and creates requested linked AAF files.
     private func encodeMXFFiles(
         inputURL: URL,
         outputDirectoryURL: URL,
@@ -873,6 +964,7 @@ public final class ProResEncoder: Sendable {
         )
     }
 
+    /// Maps encoded MXF outputs and source media properties to an AAF clip record.
     private func makeAAFClipInfo(
         asset: AVAsset,
         result: MXFEncodeResult,

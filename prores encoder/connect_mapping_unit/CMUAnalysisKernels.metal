@@ -1,3 +1,5 @@
+// Computes PQ frame statistics and Profile 7 residual planes on the GPU.
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -5,6 +7,7 @@ constant uint CMU_HISTOGRAM_BINS = 4096;
 constant float CMU_LOG_MAX = 13.2878566f; // log2(10001)
 constant float CMU_EXTREMA_SCALE = 1000.0f;
 
+// Image geometry and color interpretation for one statistics dispatch.
 struct CMUUniforms {
     uint width;
     uint height;
@@ -13,17 +16,20 @@ struct CMUUniforms {
     float4 lumaCoefficients;
 };
 
+// Per-workgroup sums reduced by the CPU after command completion.
 struct CMUPartialStats {
     float4 sums0; // luma, red, green, blue
     float4 sums1; // saturation, count, reserved, reserved
 };
 
+// Returns luma coefficients for the supported YCbCr matrix identifier.
 inline float3 cmu_luma_coefficients(uint matrixID) {
     return matrixID == 0
         ? float3(0.2126f, 0.7152f, 0.0722f)
         : float3(0.2627f, 0.6780f, 0.0593f);
 }
 
+// Reconstructs encoded RGB from normalized YCbCr components.
 inline float3 cmu_ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     const float3 k = cmu_luma_coefficients(matrixID);
     const float r = y + 2.0f * (1.0f - k.r) * cr;
@@ -32,6 +38,7 @@ inline float3 cmu_ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     return float3(r, g, b);
 }
 
+// Converts normalized PQ code values to absolute luminance in nits.
 inline float3 cmu_pq_to_nits(float3 signal) {
     constexpr float m1 = 2610.0f / 16384.0f;
     constexpr float m2 = 2523.0f / 32.0f;
@@ -44,6 +51,7 @@ inline float3 cmu_pq_to_nits(float3 signal) {
     return 10000.0f * pow(numerator / denominator, float3(1.0f / m1));
 }
 
+// Accumulates extrema, a log-luminance histogram, and per-workgroup channel sums.
 kernel void cmu_analyze_yuv(
     texture2d<float, access::read> sourceY [[texture(0)]],
     texture2d<float, access::read> sourceUV [[texture(1)]],
@@ -146,6 +154,7 @@ kernel void cmu_analyze_yuv(
     }
 }
 
+// Averages each 2x2 luma residual into the half-resolution enhancement layer.
 kernel void p7_make_luma_residual(
     texture2d<float, access::read> sourceY [[texture(0)]],
     texture2d<float, access::read> reconstructedY [[texture(1)]],
@@ -172,6 +181,7 @@ kernel void p7_make_luma_residual(
     enhancementY.write(float4(enhancementCode / 1023.0f), position);
 }
 
+// Averages each 2x2 chroma residual into the enhancement-layer UV plane.
 kernel void p7_make_chroma_residual(
     texture2d<float, access::read> sourceUV [[texture(0)]],
     texture2d<float, access::read> reconstructedUV [[texture(1)]],

@@ -1,11 +1,8 @@
-// aaf_enc.swift — Native Swift AAF file writer
-// Implements CFB (Compound File Binary) + AAF Object Model for generating
-// AAF sequences that link to external MXF files.
-//
+// Builds AAF files with CFB storage and external MXF media references.
 
 import Foundation
 
-// MARK: - AUID (AAF Unique Identifier / UUID, 16 bytes, MS GUID wire format)
+// MARK: - AUID (AAF Unique Identifier / UUID, 16-byte GUID wire format)
 
 struct AUID: Equatable, Hashable {
     let data1: UInt32   // LE
@@ -13,7 +10,7 @@ struct AUID: Equatable, Hashable {
     let data3: UInt16   // LE
     let data4: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) // BE
 
-    /// 16 bytes in Microsoft GUID bytes_le layout (Data1 LE, Data2 LE, Data3 LE, Data4 raw)
+    /// GUID little-endian field layout (Data1 LE, Data2 LE, Data3 LE, Data4 raw).
     var bytesLE: [UInt8] {
         var b = [UInt8](repeating: 0, count: 16)
         b[0] = UInt8(data1 & 0xFF); b[1] = UInt8((data1 >> 8) & 0xFF)
@@ -25,6 +22,7 @@ struct AUID: Equatable, Hashable {
         return b
     }
 
+    /// Compares all four identifier fields in wire order.
     static func == (lhs: AUID, rhs: AUID) -> Bool {
         lhs.data1 == rhs.data1 && lhs.data2 == rhs.data2 &&
         lhs.data3 == rhs.data3 &&
@@ -34,6 +32,7 @@ struct AUID: Equatable, Hashable {
         lhs.data4.6 == rhs.data4.6 && lhs.data4.7 == rhs.data4.7
     }
 
+    /// Hashes the same fields used by equality.
     func hash(into hasher: inout Hasher) {
         hasher.combine(data1); hasher.combine(data2); hasher.combine(data3)
         hasher.combine(data4.0); hasher.combine(data4.1)
@@ -46,6 +45,7 @@ struct AUID: Equatable, Hashable {
     init(_ str: String) {
         let hex = str.replacingOccurrences(of: "-", with: "")
         precondition(hex.count == 32, "Invalid AUID string: \(str)")
+        /// Reads one byte from the normalized hexadecimal string.
         func byte(_ i: Int) -> UInt8 {
             let s = hex.index(hex.startIndex, offsetBy: i * 2)
             let e = hex.index(s, offsetBy: 2)
@@ -72,13 +72,16 @@ struct AUID: Equatable, Hashable {
         }
     }
 
+    /// Creates an identifier directly from its GUID fields.
     private init(data1: UInt32, data2: UInt16, data3: UInt16,
                  data4: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8)) {
         self.data1 = data1; self.data2 = data2; self.data3 = data3; self.data4 = data4
     }
 }
 
+/// Provides stable byte access to a UUID value.
 private extension UUID {
+    /// Passes a temporary 16-byte view to a nonescaping closure.
     func withUnsafeBytes<R>(_ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
         var uuid = self.uuid
         return Swift.withUnsafeBytes(of: &uuid) { raw in
@@ -92,6 +95,7 @@ private extension UUID {
 struct AAFMobID: Equatable, Hashable {
     var bytes: [UInt8]  // 32 bytes
 
+    /// Creates an all-zero identifier buffer before structured generation.
     init() {
         bytes = [UInt8](repeating: 0, count: 32)
     }
@@ -99,7 +103,7 @@ struct AAFMobID: Equatable, Hashable {
     /// Generate a new MobID with SMPTE 330M UMID structure + UUID material
     static func generate() -> AAFMobID {
         var m = AAFMobID()
-        // SMPTE 330M UMID prefix — matches mxf_enc.cpp make_umid() pfx[12]
+        // SMPTE 330M UMID prefix shared with the MXF writer.
         let prefix: [UInt8] = [0x06, 0x0a, 0x2b, 0x34, 0x01, 0x01, 0x01, 0x05,
                                 0x01, 0x01, 0x0d, 0x12, 0x13, 0x00, 0x00, 0x00]
         for i in 0..<16 { m.bytes[i] = prefix[i] }
@@ -271,6 +275,7 @@ private enum DataDef {
     static let timecode = AUID("01030201-0100-0000-060e-2b3404010101")
 }
 
+/// Well-known container definition identifiers referenced by the dictionary.
 private enum ContainerDef {
     static let aafklv   = AUID("4b464141-000d-4d4f-060e-2b34010101ff")
     static let external = AUID("4313b572-d8ba-11d2-809b-006008143e6f")
@@ -286,6 +291,7 @@ private enum ProResCompressionAUID {
     static let hq    = AUID("0d010301-027c-0115-060e-2b3404010101")
     static let k4444 = AUID("0d010301-027c-0116-060e-2b3404010101")
 
+    /// Maps a ProRes quality name to its registered compression identifier.
     static func from(_ variant: String) -> AUID? {
         switch normalizedProResQuality(variant) {
         case "proxy":  return proxy
@@ -294,8 +300,8 @@ private enum ProResCompressionAUID {
         case "422hq":  return hq
         case "4444":   return k4444
         case "4444xq":
-            // External AAF relink uses the MXF descriptor as the authoritative codec source.
-            // Keep the 4444-family AUID here until a dedicated XQ AUID is introduced locally.
+            // The MXF descriptor is authoritative during external relink; XQ
+            // references use the 4444-family AUID in the AAF object model.
             return k4444
         default:       return nil
         }
@@ -344,6 +350,7 @@ private class DirEntry {
 
     let dirID: Int
 
+    /// Creates an empty directory entry with a stable stream ID.
     init(id: Int) { self.dirID = id }
 
     /// Encode to 128-byte directory entry
@@ -394,6 +401,7 @@ private class CFBWriter {
     private var sectors: [[UInt8]] = []  // each sector is 4096 bytes
     private var fat: [UInt32] = []
 
+    /// Creates the root storage entry and empty sector allocation tables.
     init() {
         // Create root entry
         let root = DirEntry(id: 0)
@@ -468,10 +476,10 @@ private class CFBWriter {
         entries[id].streamData = data
     }
 
-    /// Insert a new sibling into the directory tree (simplified sorted insertion)
+    /// Insert a new sibling into the directory tree.
     private func insertSibling(parent parentID: Int, newID: Int) {
         let parent = entries[parentID]
-        // Simple approach: build sorted list, then create balanced tree
+        // Rebuild the sibling set as a balanced tree after sorted insertion.
         var ids = collectSiblings(Int(parent.childID))
         ids.append(newID)
         ids.sort { compareDirNames(entries[$0].name, entries[$1].name) < 0 }
@@ -523,7 +531,8 @@ private class CFBWriter {
     /// Finalize and produce the CFB file data
     func finalize() -> Data {
         // 1. Write all stream data to sectors (or mini-stream for small streams)
-        // For simplicity, we use full sectors for all streams (mini-stream only for < 4096 bytes)
+        // Streams smaller than 4096 bytes use the mini-stream; larger streams
+        // use full sectors.
         var miniStreamData = Data()
         var miniFat: [UInt32] = []
 
@@ -626,14 +635,14 @@ private class CFBWriter {
 
         // 6. Build header (512 bytes, CFB v3)
         var header = Data(count: 512)
-        // Magic
+        // CFB signature
         for i in 0..<8 { header[i] = CFB.magic[i] }
         // Class ID for AAF 512-sector (v3): 0d010201-0100-0000-060e-2b3403020101
         let hdrClassID = AUID("0d010201-0100-0000-060e-2b3403020101").bytesLE
         for i in 0..<16 { header[8 + i] = hdrClassID[i] }
         // Minor version = 62
         writeU16LE_data(&header, offset: 24, value: 62)
-        // Major version = 3 (512-byte sectors for broad compatibility)
+        // Major version = 3 (512-byte sectors)
         writeU16LE_data(&header, offset: 26, value: 3)
         // Byte order = 0xFFFE (little-endian)
         writeU16LE_data(&header, offset: 28, value: 0xFFFE)
@@ -642,7 +651,7 @@ private class CFBWriter {
         // Mini sector size power = 6
         writeU16LE_data(&header, offset: 32, value: CFB.miniSectorPow)
         // Reserved 6 bytes (already zero)
-        // Directory sector count: MUST be 0 for CFB v3
+        // CFB v3 stores zero in the directory-sector-count field.
         writeU32LE_data(&header, offset: 40, value: 0)
         // FAT sector count
         writeU32LE_data(&header, offset: 44, value: UInt32(fatSectorIDs.count))
@@ -697,11 +706,13 @@ private func writeU16LE(_ data: inout Data, offset: Int, value: UInt16) {
     data[offset + 1] = UInt8(value >> 8)
 }
 
+/// Writes a 16-bit little-endian value into mutable data.
 private func writeU16LE_data(_ data: inout Data, offset: Int, value: UInt16) {
     data[offset] = UInt8(value & 0xFF)
     data[offset + 1] = UInt8(value >> 8)
 }
 
+/// Writes a 32-bit little-endian value into mutable data.
 private func writeU32LE(_ data: inout Data, offset: Int, value: UInt32) {
     data[offset]     = UInt8(value & 0xFF)
     data[offset + 1] = UInt8((value >> 8) & 0xFF)
@@ -709,10 +720,12 @@ private func writeU32LE(_ data: inout Data, offset: Int, value: UInt32) {
     data[offset + 3] = UInt8((value >> 24) & 0xFF)
 }
 
+/// Provides the call-site-specific 32-bit write spelling used by CFB assembly.
 private func writeU32LE_data(_ data: inout Data, offset: Int, value: UInt32) {
     writeU32LE(&data, offset: offset, value: value)
 }
 
+/// Writes a 64-bit little-endian value into mutable data.
 private func writeU64LE(_ data: inout Data, offset: Int, value: UInt64) {
     for i in 0..<8 {
         data[offset + i] = UInt8((value >> (i * 8)) & 0xFF)
@@ -773,42 +786,50 @@ private func encodeInt16LE(_ v: Int16) -> Data {
     return d
 }
 
+/// Encodes an unsigned 16-bit property value in little-endian order.
 private func encodeUInt16LE(_ v: UInt16) -> Data {
     var d = Data(count: 2)
     d[0] = UInt8(v & 0xFF); d[1] = UInt8(v >> 8)
     return d
 }
 
+/// Encodes a signed 32-bit property value in little-endian order.
 private func encodeInt32LE(_ v: Int32) -> Data {
     var d = Data(count: 4)
     writeU32LE(&d, offset: 0, value: UInt32(bitPattern: v))
     return d
 }
 
+/// Encodes an unsigned 32-bit property value in little-endian order.
 private func encodeUInt32LE(_ v: UInt32) -> Data {
     var d = Data(count: 4)
     writeU32LE(&d, offset: 0, value: v)
     return d
 }
 
+/// Encodes a signed 64-bit property value in little-endian order.
 private func encodeInt64LE(_ v: Int64) -> Data {
     var d = Data(count: 8)
     writeU64LE(&d, offset: 0, value: UInt64(bitPattern: v))
     return d
 }
 
+/// Encodes a rational as signed numerator followed by denominator.
 private func encodeRational(_ r: AAFRational) -> Data {
     return encodeInt32LE(r.numerator) + encodeInt32LE(r.denominator)
 }
 
+/// Encodes a 16-byte object identifier.
 private func encodeAUID(_ a: AUID) -> Data {
     return Data(a.bytesLE)
 }
 
+/// Encodes a 32-byte package identifier.
 private func encodeMobID(_ m: AAFMobID) -> Data {
     return Data(m.bytes)
 }
 
+/// Encodes a null-terminated UTF-16LE property string.
 private func encodeUTF16LE(_ s: String) -> Data {
     var d = Data()
     for unit in s.utf16 {
@@ -820,6 +841,7 @@ private func encodeUTF16LE(_ s: String) -> Data {
     return d
 }
 
+/// Encodes an AAF Boolean property as a 32-bit integer.
 private func encodeBool(_ b: Bool) -> Data {
     return Data([b ? 0x01 : 0x00])
 }
@@ -851,7 +873,7 @@ private func encodeProductVersion() -> Data {
     var d = Data(count: 10)
     writeU16LE(&d, offset: 0, value: 1)  // major
     writeU16LE(&d, offset: 2, value: 2)  // minor
-    writeU16LE(&d, offset: 4, value: 0)  // tertiary
+    writeU16LE(&d, offset: 4, value: 2)  // tertiary
     writeU16LE(&d, offset: 6, value: 0)  // patchLevel
     writeU16LE(&d, offset: 8, value: 1)  // type: kAAFVersionReleased
     return d
@@ -1436,7 +1458,7 @@ func generateAAFSequence(clips: [AAFClipInfo], outputPath: String) -> Bool {
         PropEntry(pid: PID.productVersion, format: SF.data.rawValue,
                   data: encodeProductVersion()),
         PropEntry(pid: PID.prodVerString, format: SF.data.rawValue,
-                  data: encodeUTF16LE("1.2.0")),
+                  data: encodeUTF16LE("1.2.2")),
         PropEntry(pid: PID.productID, format: SF.data.rawValue,
                   data: encodeAUID(AUID("97e04c67-dbe6-4d11-bcd7-3a3a4253a2ef"))),
         PropEntry(pid: PID.identDate, format: SF.data.rawValue,

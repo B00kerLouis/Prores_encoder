@@ -1,3 +1,6 @@
+// Produces Profile 7 base and enhancement layers, reconstructs the base layer,
+// generates residual pixels on the GPU, and combines both layers with metadata.
+
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
@@ -5,7 +8,9 @@ import CoreVideo
 import Metal
 import VideoToolbox
 
+/// Creates errors in the Profile 7 pipeline's diagnostic domain.
 private enum DolbyVisionProfile7Error {
+    /// Wraps a localized failure message and numeric status.
     static func make(_ message: String, code: Int = 1) -> NSError {
         NSError(
             domain: "DolbyVisionProfile7",
@@ -15,19 +20,23 @@ private enum DolbyVisionProfile7Error {
     }
 }
 
+/// Receives one asynchronous reconstruction result.
 private final class Profile7DecodeWaiter {
     let semaphore = DispatchSemaphore(value: 0)
     var status: OSStatus = noErr
     var pixelBuffer: CVPixelBuffer?
 }
 
+/// Decodes encoded base-layer samples to the pixels used for residual generation.
 private final class Profile7ReconstructionDecoder {
     private var session: VTDecompressionSession?
 
+    /// Releases the active reconstruction session.
     deinit {
         invalidate()
     }
 
+    /// Decodes one base-layer sample and returns its reconstructed pixel buffer.
     func decode(_ sampleBuffer: CMSampleBuffer) throws -> CVPixelBuffer {
         if session == nil {
             try createSession(for: sampleBuffer)
@@ -74,6 +83,7 @@ private final class Profile7ReconstructionDecoder {
         return pixelBuffer
     }
 
+    /// Invalidates and clears the current decompression session.
     func invalidate() {
         if let session {
             VTDecompressionSessionInvalidate(session)
@@ -81,6 +91,7 @@ private final class Profile7ReconstructionDecoder {
         }
     }
 
+    /// Creates a session from the first sample's video format description.
     private func createSession(for sampleBuffer: CMSampleBuffer) throws {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             throw DolbyVisionProfile7Error.make(
@@ -130,8 +141,10 @@ private final class Profile7ReconstructionDecoder {
     }
 }
 
+/// Supplies the module bundle used while locating packaged GPU functions.
 private final class Profile7MetalBundleToken {}
 
+/// Computes a 10-bit enhancement-layer residual from source and reconstructed pixels.
 private final class Profile7MetalResidualGenerator {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -142,6 +155,7 @@ private final class Profile7MetalResidualGenerator {
     let width: Int
     let height: Int
 
+    /// Creates textures, pipeline state, and a reusable residual pixel-buffer pool.
     init(baseLayerWidth: Int, baseLayerHeight: Int) throws {
         guard baseLayerWidth > 0, baseLayerHeight > 0,
               baseLayerWidth.isMultiple(of: 4),
@@ -210,6 +224,7 @@ private final class Profile7MetalResidualGenerator {
         pixelBufferPool = pool
     }
 
+    /// Runs the residual kernel for one source/reconstruction pair.
     func makeEnhancementLayer(
         source: CVPixelBuffer,
         reconstructedBaseLayer: CVPixelBuffer
@@ -307,6 +322,7 @@ private final class Profile7MetalResidualGenerator {
         return outputPixelBuffer
     }
 
+    /// Encodes one compute pass with the supplied textures and dimensions.
     private func encode(
         commandBuffer: MTLCommandBuffer,
         pipeline: MTLComputePipelineState,
@@ -335,6 +351,7 @@ private final class Profile7MetalResidualGenerator {
         encoder.endEncoding()
     }
 
+    /// Binds a pixel-buffer plane to a Metal texture and retains the backing wrapper.
     private func makeTexture(
         pixelBuffer: CVPixelBuffer,
         plane: Int,
@@ -367,6 +384,7 @@ private final class Profile7MetalResidualGenerator {
         return texture
     }
 
+    /// Loads the residual function from embedded or packaged GPU code.
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
         EmbeddedMetalLibrary.load(
             device: device,
@@ -379,6 +397,7 @@ private final class Profile7MetalResidualGenerator {
     }
 }
 
+/// Carries the muxed sample and its independently encoded layer components.
 struct DolbyVisionProfile7EncodedFrame {
     let muxedSample: CMSampleBuffer
     let baseLayerSample: CMSampleBuffer
@@ -386,12 +405,15 @@ struct DolbyVisionProfile7EncodedFrame {
     let rpuNALUnit: Data
 }
 
+/// Coordinates base encode, reconstruction, residual generation, enhancement encode,
+/// metadata generation, and final sample assembly.
 final class DolbyVisionProfile7Encoder: @unchecked Sendable {
     private let baseLayerEncoder: ProResSession
     private let enhancementLayerEncoder: ProResSession
     private let reconstructionDecoder = Profile7ReconstructionDecoder()
     private let residualGenerator: Profile7MetalResidualGenerator
 
+    /// Configures both layer encoders and the reconstruction/residual stages.
     init(
         width: Int,
         height: Int,
@@ -439,6 +461,7 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
         )
     }
 
+    /// Encodes one source frame and returns its muxed Profile 7 representation.
     func encode(
         sourcePixelBuffer: CVPixelBuffer,
         pts: CMTime,
@@ -489,11 +512,13 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
         )
     }
 
+    /// Flushes delayed frames from both layer encoders.
     func finish() {
         baseLayerEncoder.flush()
         enhancementLayerEncoder.flush()
     }
 
+    /// Releases decoder and encoder resources after completion or failure.
     func invalidate() {
         reconstructionDecoder.invalidate()
         baseLayerEncoder.invalidate()

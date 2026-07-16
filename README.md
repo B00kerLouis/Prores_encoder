@@ -1,4 +1,4 @@
-# ProRes Encoder 1.2.1
+# ProRes Encoder 1.2.2
 
 Native macOS CLI and Framework for professional video encoding, HDR color
 conversion, dynamic metadata processing, MOV/MXF mastering, linked timeline
@@ -8,27 +8,18 @@ All supported MOV outputs are written as `.mov` files. The encoder does not
 create MP4 containers; Profile 7.6 can optionally emit separate BL/EL HEVC
 elementary streams with `--dual`.
 
-## What’s New in 1.2.1
+## What’s New in 1.2.2
 
-- Dolby Vision Profile 7.6 verifier compliance updates for BL/EL HEVC output.
-- Optional `--dual` output for Profile 7.6 BL/EL `.hevc` elementary streams.
-- Default verifier-oriented AV1 sample entry remains `av01`; `-df` keeps the
-  explicit `dav1` compatibility path.
-- Native 10-bit long-GOP encoding paths for MOV output.
-- Native 10-bit HEVC encoding with configurable bitrate.
-- Dynamic HDR metadata workflows for HEVC and AV1 output.
-- Profile-dependent metadata Application ID handling.
-- Final-stream metadata detection and failure when requested metadata injection
-  is absent.
-- Verifier-oriented sample-entry defaults with an optional alternate sample
-  entry flag when explicitly required.
-- MOV external-audio passthrough plus source-audio deletion.
-- GPU-based HDR gamut, transfer-function, and luminance conversion.
-- GPU-based metadata analysis with optional sidecar inclusion.
-- Synthetic or preserved MOV timecode.
-- MOV, MXF OP-1a, MXF OP-Atom, AAF, XML/FCPXML timeline, folder batch, and
-  external-audio workflows.
-- Public `ProResEncoderFramework` target with CLI feature parity.
+- Native Metal `.cube` LUT burn-in without an additional runtime dependency.
+- Standard 1D, 3D, and combined 1D+3D LUT parsing with domain and input-range
+  directives.
+- `--lut` plus atomic LUT output declarations through `--gamut-lut`,
+  `--oetf-lut`, and `--nit-lut`.
+- `--color-space-lut` alias for `--gamut-lut`, alongside the direct-mapping
+  `--gamut` and `--color-space` aliases.
+- Correct red-fastest cube ordering and texel-centered linear Metal sampling.
+- Explicit rejection of conflicting direct color mapping and LUT output
+  declarations.
 
 ## License
 
@@ -194,14 +185,14 @@ encoding is refused.
 
 ```bash
 proresencoder -i hdr.mov -o sdr.mov -q 422hq \
-  --gamunt rec709 \
+  --gamut rec709 \
   --oetf gamma2.4 \
   --nit 100
 ```
 
 Supported targets:
 
-- `--gamunt rec709|rec2020|p3d65`
+- `--gamut` or `--color-space` `rec709|rec2020|rec2020lm|p3d65`
 - `--oetf gamma2.4|gamma2.6|pq|hlg`
 - `--nit <target peak nits>`, from 1 through 10000
 
@@ -219,6 +210,32 @@ the detected source peak to the requested target peak.
 
 When these options are omitted, the encoder keeps its previous behavior and
 does not perform color conversion or tone mapping.
+
+`--gamunt` was the original misspelled option. It remains accepted for backward
+compatibility and prints a deprecation warning.
+
+## Metal LUT Burn-In
+
+Burn a `.cube` LUT into the encoded pixels with the LUT's declared output color
+space. LUT processing is native Swift parsing plus Metal texture sampling; it
+does not use FFmpeg or another third-party runtime.
+
+```bash
+proresencoder -i input.mov -o graded.mov -q 422hq \
+  --lut look.cube \
+  --gamut-lut rec709 \
+  --oetf-lut gamma2.4 \
+  --nit-lut 100
+```
+
+`--color-space-lut` is an alias for `--gamut-lut`. The LUT form supports 1D,
+3D, and combined 1D+3D `.cube` files, including `TITLE`, comments,
+`DOMAIN_MIN`, `DOMAIN_MAX`, `LUT_1D_INPUT_RANGE`, and `LUT_3D_INPUT_RANGE`.
+The 1D table is applied first, followed by the 3D table with Metal linear
+sampling. `--lut` and its three `*-lut` target options are atomic and cannot
+be combined with direct `--gamut`/`--color-space`, `--oetf`, and `--nit`
+mapping. LUT burn-in is also rejected with Dolby Vision XML/RPU metadata,
+because those metadata must be generated from the graded pixels.
 
 ## Metadata Analysis and Inclusion
 

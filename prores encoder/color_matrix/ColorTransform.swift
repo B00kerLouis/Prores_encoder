@@ -1,11 +1,17 @@
+// Resolves direct color conversion and LUT output declarations into the values
+// consumed by the Metal pipeline and container metadata writers.
+
 import Foundation
 import AVFoundation
 import CoreMedia
 import CoreVideo
 import simd
 
+/// Invalid option combinations and unsupported source color metadata.
 enum ColorTransformError: LocalizedError {
     case incompleteArguments
+    case incompleteLUTArguments
+    case conflictingColorModes
     case invalidGamut(String)
     case invalidOETF(String)
     case invalidTargetNits(String)
@@ -19,9 +25,13 @@ enum ColorTransformError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .incompleteArguments:
-            return "--gamunt, --oetf, and --nit must be specified together. Encoding was refused."
+            return "--gamut / --color-space, --oetf, and --nit must be specified together. Encoding was refused."
+        case .incompleteLUTArguments:
+            return "--lut, --gamut-lut / --color-space-lut, --oetf-lut, and --nit-lut must be specified together. Encoding was refused."
+        case .conflictingColorModes:
+            return "Direct color mapping (--gamut / --color-space, --oetf, --nit) and LUT color mapping (--lut, --gamut-lut / --color-space-lut, --oetf-lut, --nit-lut) are mutually exclusive."
         case .invalidGamut(let value):
-            return "Unsupported --gamunt '\(value)'. Use rec709, rec2020, rec2020lm, or p3d65."
+            return "Unsupported --gamut / --color-space value '\(value)'. Use rec709, rec2020, rec2020lm, or p3d65."
         case .invalidOETF(let value):
             return "Unsupported --oetf '\(value)'. Use gamma2.4, gamma2.6, pq, or hlg."
         case .invalidTargetNits(let value):
@@ -42,12 +52,14 @@ enum ColorTransformError: LocalizedError {
     }
 }
 
+/// Supported RGB primaries and the metadata/matrix values associated with them.
 enum VideoGamut: UInt32, Sendable {
     case rec709 = 0
     case rec2020 = 1
     case p3D65 = 2
     case rec2020LimitedToP3D65 = 3
 
+    /// Parses command-line aliases for a target gamut.
     init(argument: String) throws {
         switch argument.lowercased().replacingOccurrences(of: "-", with: "") {
         case "rec709", "bt709", "709":
@@ -56,7 +68,7 @@ enum VideoGamut: UInt32, Sendable {
             self = .rec2020
         case "rec2020lm", "bt2020lm", "2020lm":
             self = .rec2020LimitedToP3D65
-        case "p3d65", "displayp3":
+        case "p3d65", "displayp3", "d65":
             self = .p3D65
         default:
             throw ColorTransformError.invalidGamut(argument)
@@ -132,12 +144,14 @@ enum VideoGamut: UInt32, Sendable {
     }
 }
 
+/// Supported output transfer functions and their container identifiers.
 enum VideoOETF: UInt32, Sendable {
     case gamma24 = 0
     case gamma26 = 1
     case pq = 2
     case hlg = 3
 
+    /// Parses command-line aliases for an output transfer function.
     init(argument: String) throws {
         let normalized = argument.lowercased().replacingOccurrences(of: "-", with: "")
         switch normalized {
@@ -195,18 +209,22 @@ enum VideoOETF: UInt32, Sendable {
     }
 }
 
+/// Validated user request for direct mapping or LUT burn-in.
 struct ColorTransformRequest: Sendable {
     let outputGamut: VideoGamut
     let outputOETF: VideoOETF
     let targetNits: Float
+    let lut: CubeLUT?
 
-    init(gamut: String, oetf: String, nits: String) throws {
+    /// Parses target declarations and optionally loads the LUT before encoding starts.
+    init(gamut: String, oetf: String, nits: String, lutURL: URL? = nil) throws {
         outputGamut = try VideoGamut(argument: gamut)
         outputOETF = try VideoOETF(argument: oetf)
         guard let parsed = Float(nits), parsed.isFinite, parsed >= 1, parsed <= 10_000 else {
             throw ColorTransformError.invalidTargetNits(nits)
         }
         targetNits = parsed
+        lut = try lutURL.map(CubeLUT.init(url:))
     }
 
     var label: String {
@@ -219,8 +237,11 @@ struct ColorTransformRequest: Sendable {
                 || outputGamut == .rec2020LimitedToP3D65
                 || outputGamut == .p3D65)
     }
+
+    var hasLUT: Bool { lut != nil }
 }
 
+/// Normalized source gamut, transfer, YCbCr matrix, and peak luminance.
 struct SourceColorProfile: Sendable, Equatable {
     let gamut: VideoGamut
     let oetf: VideoOETF
@@ -228,19 +249,23 @@ struct SourceColorProfile: Sendable, Equatable {
     let peakNits: Float
 }
 
+/// Source and target values prepared for one concrete media pipeline.
 struct ResolvedColorTransform: Sendable {
     let input: SourceColorProfile
     let outputGamut: VideoGamut
     let outputOETF: VideoOETF
     let targetNits: Float
     let matrixColumns: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
+    let lut: CubeLUT?
 
+    /// Combines detected source metadata with the validated user request.
     init(input: SourceColorProfile, request: ColorTransformRequest) {
         self.input = input
         outputGamut = request.outputGamut
         outputOETF = request.outputOETF
         targetNits = request.targetNits
         matrixColumns = Self.conversionMatrix(from: input.gamut, to: request.outputGamut)
+        lut = request.lut
     }
 
     var outputColorSpace: SourceColorSpace {
@@ -260,6 +285,7 @@ struct ResolvedColorTransform: Sendable {
         outputGamut == .rec709 ? 1 : 9
     }
 
+    /// Builds the linear-light matrix between two D65 RGB gamuts.
     private static func conversionMatrix(
         from source: VideoGamut,
         to destination: VideoGamut
@@ -274,7 +300,7 @@ struct ResolvedColorTransform: Sendable {
         )
     }
 
-    // Same D65 chromaticities used by OpenColorIO ColorMatrixHelpers.cpp.
+    // D65 RGB-to-XYZ matrices for the supported gamut definitions.
     private static func rgbToXYZ(_ gamut: VideoGamut) -> simd_float3x3 {
         switch gamut {
         case .rec709:
@@ -299,6 +325,7 @@ struct ResolvedColorTransform: Sendable {
     }
 }
 
+/// Converts container color tags and luminance metadata to a supported source profile.
 func resolveSourceColorProfile(from colorSpace: SourceColorSpace) throws -> SourceColorProfile {
     let gamut: VideoGamut
     if colorSpace.primaries == (kCMFormatDescriptionColorPrimaries_ITU_R_709_2 as String) {
@@ -341,6 +368,7 @@ func resolveSourceColorProfile(from colorSpace: SourceColorSpace) throws -> Sour
     )
 }
 
+/// Resolves one file's source tags against a transform request.
 func resolveColorTransform(
     request: ColorTransformRequest,
     sourceColorSpace: SourceColorSpace
@@ -351,6 +379,7 @@ func resolveColorTransform(
     )
 }
 
+/// Verifies consistent timeline source color and uses the highest detected source peak.
 func resolveTimelineColorTransform(
     request: ColorTransformRequest,
     descriptor: TimelineDescriptor
@@ -394,6 +423,7 @@ func resolveTimelineColorTransform(
     return ResolvedColorTransform(input: merged, request: request)
 }
 
+/// Selects the intermediate pixel layout required by the requested output codec.
 func colorPipelinePixelFormat(for quality: String) -> OSType {
     if isCompressedHDRQuality(quality) {
         return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
@@ -404,6 +434,7 @@ func colorPipelinePixelFormat(for quality: String) -> OSType {
     return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
 }
 
+/// Chooses mastering peak, then content-light peak, then a transfer-specific default.
 private func detectedSourcePeakNits(colorSpace: SourceColorSpace, oetf: VideoOETF) -> Float {
     // The display mastering peak defines the source mastering range used by
     // the EETF. MaxCLL describes measured content and can legitimately exceed

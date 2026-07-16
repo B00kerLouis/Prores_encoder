@@ -1,5 +1,4 @@
-// MXFBridge.mm — Objective-C++ bridge for mxf::Encoder
-// Wraps the C++ mxf::Encoder into an ObjC interface callable from Swift.
+// Adapts the C++ MXF encoder interface for Swift callers.
 
 #import "../include/MXFBridge.h"
 #include "../include/mxf_enc.h"
@@ -10,6 +9,7 @@
 //  MXFBridgeConfig
 // ============================================================
 @implementation MXFBridgeConfig
+// Initializes the bridge configuration with 1080p25 OP-1a defaults.
 - (instancetype)init {
     if ((self = [super init])) {
         _proResVariant = 4; _opFormat = 0;
@@ -36,6 +36,7 @@
 
 @implementation MXFBridge
 
+// Creates the owned C++ encoder instance.
 - (instancetype)init {
     if ((self = [super init])) {
         _enc = std::make_unique<mxf::Encoder>();
@@ -43,6 +44,7 @@
     return self;
 }
 
+// Validates bridge values, maps them to C++ configuration, and opens the writer.
 - (BOOL)openWithPath:(NSString *)path config:(MXFBridgeConfig *)cfg {
     if (cfg.fpsNum <= 0 || cfg.fpsDen <= 0) {
         _lastError = @"invalid frame rate";
@@ -97,6 +99,7 @@
     return YES;
 }
 
+// Forwards one compressed video frame and its audio chunks to the writer.
 - (BOOL)writeFrameVideo:(const void *)video
               videoSize:(size_t)videoSize
                   audio:(NSArray<NSData *> *)audioChunks {
@@ -113,6 +116,7 @@
     return YES;
 }
 
+// Extracts compressed bytes from a sample buffer before forwarding one edit unit.
 - (BOOL)writeFrameSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           audio:(NSArray<NSData *> *)audioChunks {
     CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sampleBuffer);
@@ -143,6 +147,7 @@
     return [self writeFrameVideo:contiguous.bytes videoSize:contiguous.length audio:audioChunks];
 }
 
+// Finalizes the writer and exposes any deferred error.
 - (BOOL)close {
     if (!_enc->close()) {
         _lastError = @(_enc->lastError().c_str());
@@ -151,8 +156,11 @@
     return YES;
 }
 
+// Returns the number of edit units accepted by the writer.
 - (int64_t)frameCount { return _enc->frameCount(); }
+// Returns the most recent bridge or writer error.
 - (NSString *)lastError { return _lastError; }
+// Returns the source-package UMID emitted in MXF metadata.
 - (NSData *)sourcePackageUMID {
     const auto& u = _enc->sourcePackageUMID();
     return [NSData dataWithBytes:u.data() length:32];
@@ -163,6 +171,7 @@
 // ============================================================
 //  C helper
 // ============================================================
+// Exposes exact audio cadence calculation to Swift.
 extern "C" int mxf_samples_for_frame(int64_t frameIdx, int fpsNum, int fpsDen, int sampleRate) {
     return mxf::samplesForFrame(frameIdx, fpsNum, fpsDen, sampleRate);
 }

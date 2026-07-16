@@ -1,6 +1,5 @@
-// cli.swift — CLI entry point & orchestration for ProRes Encoder
-// Replaces main.swift: argument parsing, single/batch/XML dispatch,
-// MXF → AAF generation, Metal pre-warm.
+// Parses command-line options and dispatches single-file, batch, XML, and AAF
+// workflows after GPU initialization.
 
 import Foundation
 @preconcurrency import AVFoundation
@@ -8,7 +7,7 @@ import Metal
 
 #if PRORES_ENCODER_CLI
 
-private let proResEncoderCLIVersion = "1.2.0"
+private let proResEncoderCLIVersion = "1.2.2"
 
 // MARK: - CLI Config (Sendable, passed by value)
 
@@ -18,6 +17,7 @@ enum AAFMode: Sendable {
     case perClip    // -ea-all: one AAF per clip
 }
 
+/// Supported timeline-to-timeline conversion targets.
 enum TransformMode: Sendable {
     case outputAAF
     case outputXML
@@ -41,6 +41,7 @@ enum TransformMode: Sendable {
     }
 }
 
+/// Fully validated command configuration passed to file and timeline processors.
 struct CLIConfig: Sendable {
     let quality:        String
     let exportFormat:   String
@@ -63,6 +64,7 @@ struct CLIConfig: Sendable {
 
 @main
 enum ProResEncoderCLI {
+    /// Parses arguments, validates cross-option constraints, and dispatches one workflow.
     static func main() async {
         // Pre-warm GPU services on the main thread before codec setup.
         _ = MTLCreateSystemDefaultDevice()
@@ -89,6 +91,11 @@ enum ProResEncoderCLI {
         var targetGamut: String? = nil
         var targetOETF: String? = nil
         var targetNits: String? = nil
+        var lutPath = ""
+        var lutTargetGamut: String? = nil
+        var lutTargetOETF: String? = nil
+        var lutTargetNits: String? = nil
+        var usedDeprecatedGamunt = false
         var cmuMasteringNits: Float? = nil
         var cmuInclude = false
         var dvFlag = false
@@ -96,6 +103,7 @@ enum ProResEncoderCLI {
 
         let args = CommandLine.arguments
         var idx = 1
+        /// Advances to and returns an option value, exiting when it is absent.
         func requireValue(for option: String) -> String {
             let valueIndex = idx + 1
             guard valueIndex < args.count else {
@@ -175,12 +183,23 @@ enum ProResEncoderCLI {
                 }
             case "--media-search-path":
                 mediaSearchPaths.append(requireValue(for: args[idx]))
+            case "--gamut", "--color-space":
+                targetGamut = requireValue(for: args[idx])
             case "--gamunt":
                 targetGamut = requireValue(for: args[idx])
+                usedDeprecatedGamunt = true
             case "--oetf":
                 targetOETF = requireValue(for: args[idx])
             case "--nit":
                 targetNits = requireValue(for: args[idx])
+            case "--lut":
+                lutPath = requireValue(for: args[idx])
+            case "--gamut-lut", "--color-space-lut":
+                lutTargetGamut = requireValue(for: args[idx])
+            case "--oetf-lut":
+                lutTargetOETF = requireValue(for: args[idx])
+            case "--nit-lut":
+                lutTargetNits = requireValue(for: args[idx])
             case "--cmu":
                 let raw = requireValue(for: args[idx])
                 do {
@@ -230,8 +249,22 @@ enum ProResEncoderCLI {
         let colorArgumentCount = [targetGamut, targetOETF, targetNits]
             .compactMap { $0 }
             .count
+        let lutArgumentCount = [
+            lutPath.isEmpty ? nil : lutPath,
+            lutTargetGamut,
+            lutTargetOETF,
+            lutTargetNits
+        ].compactMap { $0 }.count
         if colorArgumentCount != 0 && colorArgumentCount != 3 {
             print("[Error] \(ColorTransformError.incompleteArguments.localizedDescription)")
+            exit(1)
+        }
+        if lutArgumentCount != 0 && lutArgumentCount != 4 {
+            print("[Error] \(ColorTransformError.incompleteLUTArguments.localizedDescription)")
+            exit(1)
+        }
+        if colorArgumentCount != 0 && lutArgumentCount != 0 {
+            print("[Error] \(ColorTransformError.conflictingColorModes.localizedDescription)")
             exit(1)
         }
         let colorTransform: ColorTransformRequest?
@@ -242,12 +275,22 @@ enum ProResEncoderCLI {
                     oetf: targetOETF,
                     nits: targetNits
                 )
+            } else if let lutTargetGamut, let lutTargetOETF, let lutTargetNits {
+                colorTransform = try ColorTransformRequest(
+                    gamut: lutTargetGamut,
+                    oetf: lutTargetOETF,
+                    nits: lutTargetNits,
+                    lutURL: URL(fileURLWithPath: lutPath)
+                )
             } else {
                 colorTransform = nil
             }
         } catch {
             print("[Error] \(error.localizedDescription)")
             exit(1)
+        }
+        if usedDeprecatedGamunt {
+            print("[Warning] --gamunt is deprecated; use --gamut or --color-space.")
         }
 
         if let transformMode {
@@ -329,6 +372,11 @@ enum ProResEncoderCLI {
             print("[Error] \(ColorTransformError.dolbyVisionNotSupported.localizedDescription)")
             exit(1)
         }
+        if colorTransform?.hasLUT == true,
+           !dolbyVisionXMLPath.isEmpty || cmuInclude {
+            print("[Error] LUT burn-in cannot be combined with Dolby Vision XML or generated Dolby Vision metadata. Generate metadata from the graded output in a separate workflow.")
+            exit(1)
+        }
         let wantsHEVC = isHEVCQuality(quality)
         let wantsAV1 = isAV1Quality(quality)
         let wantsCompressedHDR = wantsHEVC || wantsAV1
@@ -336,7 +384,7 @@ enum ProResEncoderCLI {
         if let profile = dolbyVisionProfile,
            profile.usesHLGBaseLayer,
            colorTransform?.isDolbyVisionHLGCompatible != true {
-            print("[Error] -dp \(profile.rawValue) requires --gamunt rec2020, rec2020lm, or p3d65 together with --oetf hlg.")
+            print("[Error] -dp \(profile.rawValue) requires --gamut / --color-space rec2020, rec2020lm, or p3d65 together with --oetf hlg.")
             exit(1)
         }
         if let profile = dolbyVisionProfile,
@@ -882,6 +930,7 @@ private func uniqueSearchPaths(for inputURL: URL, explicitPaths: [String]) -> [S
     return result
 }
 
+/// Returns whether a regular output exists with a nonzero byte count.
 private func fileHasContent(_ url: URL) -> Bool {
     guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
           let fileSize = attributes[.size] as? NSNumber else {
@@ -890,6 +939,7 @@ private func fileHasContent(_ url: URL) -> Bool {
     return fileSize.int64Value > 0
 }
 
+/// Checks every file produced by the selected container mode before starting work.
 private func encodingOutputExists(for requestedURL: URL, config: CLIConfig) -> Bool {
     guard config.exportFormat != "mov" else {
         return fileHasContent(requestedURL)
@@ -907,6 +957,7 @@ private func encodingOutputExists(for requestedURL: URL, config: CLIConfig) -> B
     }
 }
 
+/// Parses AAF or XML input and returns a common timeline descriptor.
 private func timelineDescriptor(
     from inputURL: URL,
     mediaSearchPaths: [String]
@@ -927,6 +978,7 @@ private func timelineDescriptor(
     }
 }
 
+/// Converts a timeline document between supported interchange formats.
 private func runSwiftTimelineTransform(
     inputURL: URL,
     outputPath: String,
@@ -962,6 +1014,7 @@ private func runSwiftTimelineTransform(
     }
 }
 
+/// Resolves a directory output to a named movie path and preserves explicit file paths.
 private func resolvedTimelineOutputURL(baseOutputURL: URL, fallbackName: String) -> URL {
     if !baseOutputURL.pathExtension.isEmpty {
         return baseOutputURL.deletingPathExtension().appendingPathExtension("mov")
@@ -969,6 +1022,7 @@ private func resolvedTimelineOutputURL(baseOutputURL: URL, fallbackName: String)
     return baseOutputURL.appendingPathComponent("\(fallbackName).mov")
 }
 
+/// Distributes source audio channels across the requested number of mono/grouped files.
 private func audioChannelCountsForOPAtom(sourceChannels: Int, channelsPerFile: Int, fileCount: Int) -> [Int] {
     guard fileCount > 0 else {
         return []
@@ -983,6 +1037,7 @@ private func audioChannelCountsForOPAtom(sourceChannels: Int, channelsPerFile: I
     }
 }
 
+/// Returns encoder preset candidates in preference order for a timeline quality.
 private func timelineExportPresetCandidates(for quality: String) -> [String] {
     switch normalizedProResQuality(quality) {
     case "4444", "4444xq":
@@ -995,6 +1050,7 @@ private func timelineExportPresetCandidates(for quality: String) -> [String] {
     }
 }
 
+/// Exports a prepared timeline composition using the first compatible preset.
 private func exportTimelineComposition(
     composition: AVMutableComposition,
     descriptor: TimelineDescriptor,
@@ -1063,6 +1119,7 @@ private func exportTimelineComposition(
     return false
 }
 
+/// Builds and encodes one parsed timeline, then performs optional metadata analysis.
 private func processTimelineComposition(
     composition: AVMutableComposition,
     descriptor: TimelineDescriptor,
@@ -1121,6 +1178,7 @@ private func processTimelineComposition(
     return true
 }
 
+/// Prints command syntax, option groups, and accepted values.
 private func printUsage() {
     print("""
     Usage:
@@ -1154,9 +1212,13 @@ private func printUsage() {
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio
       --start-timecode,-ffoa  <TC>    MOV only; synthesize QuickTime TC from this start value when the source has no TC (default: 01:00:00:00)
       --dolby-vision-xml,-dovi <file> MOV only; embed ProRes PHDR metadata, or generate RPU for -q hevc/-q av1
-      --gamunt <rec709|rec2020|rec2020lm|p3d65> Target gamut; rec2020lm is Rec.2020 tagged with P3-D65 gamut limiting
+      --gamut, --color-space <rec709|rec2020|rec2020lm|p3d65>  Direct target gamut; rec2020lm is Rec.2020 tagged with P3-D65 gamut limiting
       --oetf <gamma2.4|gamma2.6|pq|hlg> Target opto-electronic transfer function
       --nit <nits>                     Target peak luminance, 1 <= nits <= 10000
+      --lut <file.cube>                Burn a native Metal 1D/3D .cube LUT into the encoded pixels
+      --gamut-lut, --color-space-lut <rec709|rec2020|rec2020lm|p3d65>  LUT output gamut
+      --oetf-lut <gamma2.4|gamma2.6|pq|hlg>  LUT output transfer function
+      --nit-lut <nits>                 LUT output peak luminance, 1 <= nits <= 10000
       --cmu <nits>                     Metal-only HDR analysis; ProRes/MXF exports XML, HEVC/AV1 keep it internal
       --cmu-include,-ci                    Use the internally generated CMU XML directly as ProRes PHDR metadata, or to generate HEVC/AV1 RPU; requires --cmu and no -dovi
       --audio-ch-per-file <N>         Channels per OP-Atom audio MXF (default: 1)

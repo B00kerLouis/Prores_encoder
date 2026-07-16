@@ -1,13 +1,19 @@
 import Foundation
 
+// Serializes analysis documents to deterministic XML and validates the result
+// before writing a sidecar file.
+
+/// Minimal indentation-aware XML builder for known analysis schema elements.
 private final class CMUXMLBuilder {
     private var lines: [String] = []
     private var indentation = 0
 
+    /// Appends the XML declaration.
     func declaration() {
         lines.append(#"<?xml version="1.0" encoding="UTF-8"?>"#)
     }
 
+    /// Opens an element, sorting attributes for deterministic output.
     func open(_ name: String, attributes: [String: String] = [:]) {
         let attributesText = attributes
             .sorted { $0.key < $1.key }
@@ -17,11 +23,13 @@ private final class CMUXMLBuilder {
         indentation += 1
     }
 
+    /// Closes an element and decreases indentation.
     func close(_ name: String) {
         indentation -= 1
         lines.append(indent + "</\(name)>")
     }
 
+    /// Appends an escaped single-line element with optional attributes.
     func element(_ name: String, _ value: String, attributes: [String: String] = [:]) {
         let attributesText = attributes
             .sorted { $0.key < $1.key }
@@ -30,6 +38,7 @@ private final class CMUXMLBuilder {
         lines.append(indent + "<\(name)\(attributesText)>\(escape(value))</\(name)>")
     }
 
+    /// Returns the assembled document with a final newline.
     func build() -> String {
         lines.joined(separator: "\n") + "\n"
     }
@@ -38,6 +47,7 @@ private final class CMUXMLBuilder {
         String(repeating: "  ", count: indentation)
     }
 
+    /// Escapes XML metacharacters in element and attribute content.
     private func escape(_ value: String) -> String {
         value
             .replacingOccurrences(of: "&", with: "&amp;")
@@ -48,7 +58,9 @@ private final class CMUXMLBuilder {
     }
 }
 
+/// Builds, validates, and writes analysis metadata sidecars.
 enum CMUExporter {
+    /// Writes one XML sidecar next to the supplied base URL.
     static func write(
         document: CMUAnalysisDocument,
         sidecarBaseURL: URL
@@ -74,6 +86,7 @@ enum CMUExporter {
         return CMUOutputArtifacts(xmlURL: xmlURL)
     }
 
+    /// Maps the analysis document to its complete XML hierarchy.
     private static func makeXML(_ document: CMUAnalysisDocument) -> String {
         let builder = CMUXMLBuilder()
         let primaries = document.media.primaries
@@ -181,6 +194,7 @@ enum CMUExporter {
         return builder.build()
     }
 
+    /// Writes named RGB and white-point chromaticities.
     private static func writePrimaries(
         _ primaries: CMUPrimaries,
         builder: CMUXMLBuilder
@@ -192,6 +206,7 @@ enum CMUExporter {
         builder.close("Primaries")
     }
 
+    /// Writes mastering primaries and luminance limits.
     private static func writeMasteringDisplay(
         _ document: CMUAnalysisDocument,
         builder: CMUXMLBuilder
@@ -213,6 +228,7 @@ enum CMUExporter {
         builder.close("MasteringDisplay")
     }
 
+    /// Writes the fixed set of target-display definitions used by the metadata model.
     private static func writeTargetDisplays(_ builder: CMUXMLBuilder) {
         writeTargetDisplay(
             id: 1,
@@ -249,6 +265,7 @@ enum CMUExporter {
         )
     }
 
+    /// Writes one target display with application type and peak luminance.
     private static func writeTargetDisplay(
         id: Int,
         name: String,
@@ -277,6 +294,7 @@ enum CMUExporter {
         builder.close("TargetDisplay")
     }
 
+    /// Parses generated XML and verifies required output, track, shot, and frame fields.
     private static func validateXML(
         _ data: Data,
         document: CMUAnalysisDocument
@@ -308,6 +326,7 @@ enum CMUExporter {
     }
 }
 
+/// Formats a finite decimal and removes redundant fractional zeros.
 private func cmuFormatNumber(_ value: Double, digits: Int) -> String {
     guard value.isFinite else { return "0" }
     var text = String(format: "%.\(digits)f", locale: Locale(identifier: "en_US_POSIX"), value)

@@ -1,9 +1,13 @@
+// Parses linked AAF compositions into the project's timeline descriptor model.
+
 import Foundation
 import AVFoundation
 import CoreMedia
 import swiftaaf_Framework
 
+/// Resolves composition slots, source-reference chains, and media locators.
 public final class AAFTimelineParser {
+    /// Media URL and source timing resolved from a source-package descriptor.
     private struct ResolvedSource {
         let url: URL
         let sourceStart: CMTime
@@ -11,13 +15,16 @@ public final class AAFTimelineParser {
         let height: Int?
     }
 
+    /// File location and deduplicated directories used for locator recovery.
     private struct ParseContext {
         let aafURL: URL
         let searchPaths: [URL]
     }
 
+    /// Creates a stateless parser instance.
     public init() {}
 
+    /// Reads the top-level composition and returns nil after reporting parse failures.
     public func parse(url: URL, mediaSearchPaths: [URL] = []) -> TimelineDescriptor? {
         do {
             let file = try AAFFile(url: url, mode: "r")
@@ -111,6 +118,7 @@ public final class AAFTimelineParser {
         }
     }
 
+    /// Recursively flattens supported component containers into timeline clips.
     private func appendClips(
         from component: AAFObject,
         timelineStartUnits: Int64,
@@ -222,6 +230,7 @@ public final class AAFTimelineParser {
         ))
     }
 
+    /// Walks source clips through package slots until a file descriptor is reached.
     private func resolveSource(
         for clip: AAFObject,
         mediaType: AVMediaType,
@@ -272,6 +281,7 @@ public final class AAFTimelineParser {
         return nil
     }
 
+    /// Selects the sequence component containing an edit unit and returns its local offset.
     private func component(in sequence: AAFObject, at editUnit: Int64) throws -> (component: AAFObject, localOffset: Int64) {
         var fallback: (AAFObject, Int64)?
         for (_, position, component) in try sequence.sequencePositions() {
@@ -289,6 +299,7 @@ public final class AAFTimelineParser {
         throw AAFParserError.emptySequence
     }
 
+    /// Resolves a candidate file descriptor to media location, start time, and dimensions.
     private func sourceFromDescriptor(
         _ descriptor: AAFObject,
         sourceSlotID: UInt32?,
@@ -315,6 +326,7 @@ public final class AAFTimelineParser {
         return nil
     }
 
+    /// Selects descriptors by linked slot, then by media kind when a multiple descriptor is used.
     private func descriptorCandidates(
         from descriptor: AAFObject,
         sourceSlotID: UInt32?,
@@ -343,6 +355,7 @@ public final class AAFTimelineParser {
         return byKind.isEmpty ? descriptors : byKind
     }
 
+    /// Returns the first locator that resolves to a usable local media URL.
     private func locatorURL(from descriptor: AAFObject, context: ParseContext) throws -> URL? {
         let descriptors: [AAFObject]
         if descriptor.isAAFInstance(named: "MultipleDescriptor"),
@@ -367,6 +380,7 @@ public final class AAFTimelineParser {
         return nil
     }
 
+    /// Expands a locator through absolute paths, mounted volumes, and search directories.
     private func resolve(locator: String, context: ParseContext) -> URL? {
         let fm = FileManager.default
         let decoded = locator.removingPercentEncoding ?? locator
@@ -412,6 +426,7 @@ public final class AAFTimelineParser {
         return nil
     }
 
+    /// Infers picture or sound media type from data definition with slot-name fallback.
     private func mediaType(for segment: AAFObject, slotName: String) -> AVMediaType? {
         let mediaKind = ((try? segment.mediaKind) ?? "").lowercased()
         if mediaKind.contains("picture") {
@@ -431,6 +446,7 @@ public final class AAFTimelineParser {
         return nil
     }
 
+    /// Converts Vn and An slot names to project timeline track indices.
     private func trackIndexFromSlotName(_ slotName: String, mediaType: AVMediaType) -> Int? {
         let upper = slotName.uppercased()
         let prefix = mediaType == .video ? "V" : "A"
@@ -440,6 +456,7 @@ public final class AAFTimelineParser {
         return mediaType == .video ? max(value - 1, 0) : max(value, 1)
     }
 
+    /// Standardizes and removes duplicate search-directory URLs while preserving order.
     private func uniqueURLs(_ urls: [URL]) -> [URL] {
         var seen = Set<String>()
         return urls.compactMap { url in
@@ -449,28 +466,33 @@ public final class AAFTimelineParser {
         }
     }
 
+    /// Converts an edit rate to one-frame duration.
     private static func frameDuration(for editRate: swiftaaf_Framework.AAFRational) -> CMTime {
         let num = max(Int64(editRate.numerator), 1)
         let den = max(Int64(editRate.denominator), 1)
         return CMTime(value: CMTimeValue(den), timescale: CMTimeScale(num))
     }
 
+    /// Converts an edit-unit count to exact media time.
     private static func time(fromEditUnits units: Int64, editRate: swiftaaf_Framework.AAFRational) -> CMTime {
         let num = max(Int64(editRate.numerator), 1)
         let den = max(Int64(editRate.denominator), 1)
         return CMTime(value: CMTimeValue(units * den), timescale: CMTimeScale(num))
     }
 
+    /// Converts supported signed and unsigned integer storage to `Int`.
     private static func intValue(_ value: Any?) -> Int? {
         guard let int64 = int64Value(value) else { return nil }
         return Int(int64)
     }
 
+    /// Converts a nonnegative stored integer to `UInt32`.
     private static func uint32Value(_ value: Any?) -> UInt32? {
         guard let int64 = int64Value(value), int64 >= 0 else { return nil }
         return UInt32(int64)
     }
 
+    /// Normalizes supported integer representations to `Int64` without overflow.
     private static func int64Value(_ value: Any?) -> Int64? {
         switch value {
         case let value as Int:
@@ -496,6 +518,7 @@ public final class AAFTimelineParser {
         }
     }
 
+    /// Formats a nominal frame count using the timecode separator carried by the source.
     private static func timecodeString(fromFrames frames: Int64, fps: Int, drop: Bool) -> String {
         let safeFPS = max(fps, 1)
         let separator = drop ? ";" : ":"
@@ -508,6 +531,7 @@ public final class AAFTimelineParser {
     }
 }
 
+/// Errors raised when a required component container has no usable child.
 private enum AAFParserError: LocalizedError {
     case emptySequence
 

@@ -1,6 +1,11 @@
+// Selects the eligible media stage for GPU metadata analysis and coordinates
+// analysis, timecode resolution, and XML export.
+
 import Foundation
 @preconcurrency import AVFoundation
 
+/// Validates mastering brightness and confirms that either the input or planned
+/// output can supply PQ pixels in a supported gamut.
 func cmuPreflight(
     inputAsset: AVAsset,
     quality: String,
@@ -81,6 +86,8 @@ func cmuPreflight(
 }
 
 @discardableResult
+/// Analyzes the encoded output when eligible, otherwise analyzes the input, and
+/// writes the resulting metadata beside `sidecarBaseURL`.
 func runCMUAnalysisAfterEncode(
     inputAsset: AVAsset,
     encodedOutputURL: URL,
@@ -126,6 +133,8 @@ func runCMUAnalysisAfterEncode(
 }
 
 @discardableResult
+/// Analyzes input pixels before compressed encoding, optionally applying the
+/// resolved PQ color transform used by the later encoder.
 func runCMUAnalysisBeforeCompressedEncode(
     inputAsset: AVAsset,
     sidecarBaseURL: URL,
@@ -171,6 +180,7 @@ func runCMUAnalysisBeforeCompressedEncode(
     )
 }
 
+/// Runs the common analyzer and exporter path for the selected source.
 private func runCMUAnalysis(
     selectedURL: URL,
     descriptor: CMUAssetDescriptor,
@@ -218,6 +228,7 @@ private func runCMUAnalysis(
 }
 
 @discardableResult
+/// Analyzes a completed timeline output and writes its metadata sidecar.
 func runCMUAnalysisOnOutput(
     outputURL: URL,
     masteringPeakNits: Float,

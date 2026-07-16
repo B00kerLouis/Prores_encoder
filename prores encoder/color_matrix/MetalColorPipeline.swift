@@ -1,10 +1,15 @@
+// Converts decoded pixel buffers through direct color mapping or native LUT
+// burn-in and emits pixel buffers tagged for the declared output space.
+
 import Foundation
 import CoreMedia
 import CoreVideo
 import Metal
 
+/// Supplies the module bundle used to locate packaged color kernels.
 private final class MetalColorResourceBundleToken: NSObject {}
 
+/// GPU setup, texture binding, LUT upload, and command-execution failures.
 enum MetalColorPipelineError: LocalizedError {
     case metalUnavailable
     case commandQueueUnavailable
@@ -14,6 +19,7 @@ enum MetalColorPipelineError: LocalizedError {
     case pixelBufferAllocationFailed(CVReturn)
     case unsupportedPixelFormat(OSType)
     case textureCreationFailed(String, CVReturn)
+    case lutTextureCreationFailed(String)
     case commandEncodingFailed
     case commandExecutionFailed(String)
 
@@ -35,6 +41,8 @@ enum MetalColorPipelineError: LocalizedError {
             return "Metal color conversion does not support pixel format \(fourCC(format))."
         case .textureCreationFailed(let plane, let status):
             return "Metal color conversion could not bind the \(plane) texture: \(status)."
+        case .lutTextureCreationFailed(let detail):
+            return "Metal color conversion could not upload the LUT texture: \(detail)."
         case .commandEncodingFailed:
             return "Metal color conversion could not create a command buffer/encoder."
         case .commandExecutionFailed(let detail):
@@ -43,6 +51,7 @@ enum MetalColorPipelineError: LocalizedError {
     }
 }
 
+/// CPU layout mirrored by `ColorUniforms` in the Metal source.
 private struct MetalColorUniforms {
     var matrix0: SIMD4<Float>
     var matrix1: SIMD4<Float>
@@ -57,8 +66,17 @@ private struct MetalColorUniforms {
     var gamutLimitMode: UInt32
     var inputLuma: SIMD4<Float>
     var outputLuma: SIMD4<Float>
+    var lut1DMin: SIMD4<Float>
+    var lut1DScale: SIMD4<Float>
+    var lut3DMin: SIMD4<Float>
+    var lut3DScale: SIMD4<Float>
+    var hasLUT1D: UInt32
+    var hasLUT3D: UInt32
+    var reserved0: UInt32
+    var reserved1: UInt32
 }
 
+/// Owns reusable textures, output buffers, LUT textures, and compute pipelines.
 final class MetalColorPipeline: @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -66,6 +84,8 @@ final class MetalColorPipeline: @unchecked Sendable {
     private let outputPool: CVPixelBufferPool
     private let linearTexture: MTLTexture
     private let encodedTexture: MTLTexture
+    private let lut1DTexture: MTLTexture
+    private let lut3DTexture: MTLTexture
     private let decodeYUV: MTLComputePipelineState
     private let decodeBGRA: MTLComputePipelineState
     private let transform: MTLComputePipelineState
@@ -79,6 +99,7 @@ final class MetalColorPipeline: @unchecked Sendable {
     private var uniforms: MetalColorUniforms
     private let processLock = NSLock()
 
+    /// Validates dimensions/format and allocates all resources before frame processing.
     init(
         transform resolved: ResolvedColorTransform,
         width: Int,
@@ -150,6 +171,10 @@ final class MetalColorPipeline: @unchecked Sendable {
         linearTexture = linear
         encodedTexture = encoded
 
+        let lutTextures = try Self.makeLUTTextures(device: device, lut: resolved.lut)
+        lut1DTexture = lutTextures.oneDimensional
+        lut3DTexture = lutTextures.threeDimensional
+
         guard let library = Self.loadLibrary(device: device) else {
             throw MetalColorPipelineError.libraryUnavailable
         }
@@ -175,10 +200,19 @@ final class MetalColorPipeline: @unchecked Sendable {
             chromaVerticalSubsampling: verticalSubsampling,
             gamutLimitMode: resolved.outputGamut.gamutLimitMode,
             inputLuma: resolved.input.gamut.lumaCoefficients,
-            outputLuma: resolved.outputGamut.lumaCoefficients
+            outputLuma: resolved.outputGamut.lumaCoefficients,
+            lut1DMin: SIMD4(resolved.lut?.oneDimensional?.domainMin ?? SIMD3(repeating: 0), 0),
+            lut1DScale: SIMD4(resolved.lut?.oneDimensional?.domainScale ?? SIMD3(repeating: 1), 0),
+            lut3DMin: SIMD4(resolved.lut?.threeDimensional?.domainMin ?? SIMD3(repeating: 0), 0),
+            lut3DScale: SIMD4(resolved.lut?.threeDimensional?.domainScale ?? SIMD3(repeating: 1), 0),
+            hasLUT1D: resolved.lut?.oneDimensional == nil ? 0 : 1,
+            hasLUT3D: resolved.lut?.threeDimensional == nil ? 0 : 1,
+            reserved0: 0,
+            reserved1: 0
         )
     }
 
+    /// Converts one decoded frame and returns a newly tagged output pixel buffer.
     func process(_ source: CVPixelBuffer, pts: CMTime) throws -> CVPixelBuffer {
         processLock.lock()
         defer { processLock.unlock() }
@@ -260,13 +294,7 @@ final class MetalColorPipeline: @unchecked Sendable {
             )
         }
 
-        try encode(
-            pipeline: transform,
-            commandBuffer: commandBuffer,
-            textures: [linearTexture, encodedTexture],
-            width: width,
-            height: height
-        )
+        try encodeTransform(commandBuffer: commandBuffer)
 
         if pixelFormat == kCVPixelFormatType_32BGRA {
             let outputTexture = try makeTexture(
@@ -335,6 +363,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         return destination
     }
 
+    /// Encodes a generic compute pass for a fixed list of textures.
     private func encode(
         pipeline: MTLComputePipelineState,
         commandBuffer: MTLCommandBuffer,
@@ -364,6 +393,130 @@ final class MetalColorPipeline: @unchecked Sendable {
         encoder.endEncoding()
     }
 
+    /// Binds direct/LUT transform resources and dispatches the full image grid.
+    private func encodeTransform(commandBuffer: MTLCommandBuffer) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalColorPipelineError.commandEncodingFailed
+        }
+        encoder.setComputePipelineState(transform)
+        encoder.setTexture(linearTexture, index: 0)
+        encoder.setTexture(encodedTexture, index: 1)
+        encoder.setTexture(lut1DTexture, index: 2)
+        encoder.setTexture(lut3DTexture, index: 3)
+        withUnsafeBytes(of: &uniforms) { bytes in
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        let threadWidth = max(transform.threadExecutionWidth, 1)
+        let threadHeight = max(
+            min(transform.maxTotalThreadsPerThreadgroup / threadWidth, 16),
+            1
+        )
+        encoder.dispatchThreads(
+            MTLSize(width: width, height: height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadWidth, height: threadHeight, depth: 1)
+        )
+        encoder.endEncoding()
+    }
+
+    /// Creates actual or identity textures so shader bindings are always complete.
+    private static func makeLUTTextures(
+        device: MTLDevice,
+        lut: CubeLUT?
+    ) throws -> (oneDimensional: MTLTexture, threeDimensional: MTLTexture) {
+        let oneDimensional = try makeLUT1DTexture(device: device, lut: lut?.oneDimensional)
+        let threeDimensional = try makeLUT3DTexture(device: device, lut: lut?.threeDimensional)
+        return (oneDimensional, threeDimensional)
+    }
+
+    /// Uploads a one-row RGBA float texture for per-channel LUT sampling.
+    private static func makeLUT1DTexture(
+        device: MTLDevice,
+        lut: CubeLUT1D?
+    ) throws -> MTLTexture {
+        let size = lut?.size ?? 2
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float,
+            width: size,
+            height: 1,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw MetalColorPipelineError.lutTextureCreationFailed("could not allocate the 1D LUT texture.")
+        }
+        texture.label = lut == nil ? "identity 1D LUT" : "cube 1D LUT"
+        let values = lut?.values ?? [
+            SIMD4<Float>(0, 0, 0, 1),
+            SIMD4<Float>(1, 1, 1, 1)
+        ]
+        values.withUnsafeBufferPointer { buffer in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, size, 1),
+                mipmapLevel: 0,
+                withBytes: buffer.baseAddress!,
+                bytesPerRow: size * MemoryLayout<SIMD4<Float>>.stride
+            )
+        }
+        return texture
+    }
+
+    /// Uploads red-fastest RGB samples without changing .cube axis order.
+    private static func makeLUT3DTexture(
+        device: MTLDevice,
+        lut: CubeLUT3D?
+    ) throws -> MTLTexture {
+        let size = lut?.size ?? 2
+        let descriptor = MTLTextureDescriptor()
+        descriptor.textureType = .type3D
+        descriptor.pixelFormat = .rgba32Float
+        descriptor.width = size
+        descriptor.height = size
+        descriptor.depth = size
+        descriptor.mipmapLevelCount = 1
+        descriptor.storageMode = .shared
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw MetalColorPipelineError.lutTextureCreationFailed("could not allocate the 3D LUT texture.")
+        }
+        texture.label = lut == nil ? "identity 3D LUT" : "cube 3D LUT"
+        // Both .cube storage and Metal 3D textures use the X coordinate as the
+        // fastest-varying dimension, so the parsed RGB table is uploaded as-is.
+        let values = lut?.values ?? identity3DLUTValues(size: size)
+        values.withUnsafeBufferPointer { buffer in
+            texture.replace(
+                region: MTLRegionMake3D(0, 0, 0, size, size, size),
+                mipmapLevel: 0,
+                slice: 0,
+                withBytes: buffer.baseAddress!,
+                bytesPerRow: size * MemoryLayout<SIMD4<Float>>.stride,
+                bytesPerImage: size * size * MemoryLayout<SIMD4<Float>>.stride
+            )
+        }
+        return texture
+    }
+
+    /// Generates a red-fastest identity cube for pipelines without a 3D table.
+    private static func identity3DLUTValues(size: Int) -> [SIMD4<Float>] {
+        let maxIndex = Float(max(size - 1, 1))
+        var values: [SIMD4<Float>] = []
+        values.reserveCapacity(size * size * size)
+        for blue in 0..<size {
+            for green in 0..<size {
+                for red in 0..<size {
+                    values.append(SIMD4<Float>(
+                        Float(red) / maxIndex,
+                        Float(green) / maxIndex,
+                        Float(blue) / maxIndex,
+                        1
+                    ))
+                }
+            }
+        }
+        return values
+    }
+
+    /// Binds one pixel-buffer plane and retains its texture wrapper for command lifetime.
     private func makeTexture(
         from pixelBuffer: CVPixelBuffer,
         plane: Int,
@@ -395,6 +548,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         return texture
     }
 
+    /// Attaches output primaries, transfer, matrix, and timing to a converted buffer.
     private func attachOutputColorMetadata(to pixelBuffer: CVPixelBuffer) {
         if let primaries = outputColorSpace.primaries {
             CVBufferSetAttachment(
@@ -422,6 +576,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         }
     }
 
+    /// Resolves a named kernel and creates its compute pipeline state.
     private static func makePipeline(
         _ functionName: String,
         library: MTLLibrary,
@@ -433,6 +588,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         return try device.makeComputePipelineState(function: function)
     }
 
+    /// Loads all required color kernels from embedded or packaged GPU code.
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
         EmbeddedMetalLibrary.load(
             device: device,
@@ -448,6 +604,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         )
     }
 
+    /// Returns whether the pipeline has decode and pack kernels for a pixel format.
     private static func isSupported(_ format: OSType) -> Bool {
         format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             || format == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
@@ -455,6 +612,7 @@ final class MetalColorPipeline: @unchecked Sendable {
     }
 }
 
+/// Formats a pixel-format code for diagnostics.
 private func fourCC(_ code: OSType) -> String {
     let bytes = [
         UInt8((code >> 24) & 0xff),

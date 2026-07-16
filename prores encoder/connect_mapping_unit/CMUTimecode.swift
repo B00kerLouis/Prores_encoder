@@ -1,7 +1,11 @@
+// Resolves, parses, and formats the record timecode used by metadata analysis.
+
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
 
+/// Chooses timecode in priority order: analyzed media, fallback input, forced
+/// start value, then a zero-based non-drop reference.
 func cmuResolveTimecodeReference(
     analyzedURL: URL,
     fallbackInputURL: URL?,
@@ -40,6 +44,7 @@ func cmuResolveTimecodeReference(
         origin: .zero
     )
 }
+/// Reads the first signed frame number and format flags from a timecode track.
 private func cmuReadQuickTimeTimecode(url: URL) async throws -> CMUTimecodeReference? {
     let asset = AVURLAsset(
         url: url,
@@ -90,6 +95,7 @@ private func cmuReadQuickTimeTimecode(url: URL) async throws -> CMUTimecodeRefer
     )
 }
 
+/// Maps a rational edit rate to its nominal integer timecode frame count.
 private func cmuTimecodeFrameQuanta(_ editRate: CMURational) -> Int {
     let fps = editRate.fps
     let known: [(Double, Int)] = [
@@ -108,6 +114,7 @@ private func cmuTimecodeFrameQuanta(_ editRate: CMURational) -> Int {
     return max(Int(fps.rounded()), 1)
 }
 
+/// Converts a four-field timecode string to an absolute frame number.
 private func cmuParseTimecodeFrame(
     _ value: String,
     fps: Int,
@@ -139,6 +146,7 @@ private func cmuParseTimecodeFrame(
     return nominal - dropFrames * (totalMinutes - totalMinutes / 10)
 }
 
+/// Formats an absolute frame number as drop-frame or non-drop timecode.
 private func cmuFormatTimecode(frame: Int64, fps: Int, dropFrame: Bool) -> String {
     let safeFrame = max(frame, 0)
     if dropFrame, fps == 30 || fps == 60 {

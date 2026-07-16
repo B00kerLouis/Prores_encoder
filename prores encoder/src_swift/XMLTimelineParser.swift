@@ -1,16 +1,13 @@
-// XMLTimelineParser.swift
-// Parses supported XML timeline roots.
-// into a unified TimelineDescriptor for use by CompositionBuilder.
+// Parses supported XML timeline structures into a unified timeline descriptor.
 
 import Foundation
 import AVFoundation
 import CoreMedia
 
 // MARK: - XMLElement XPath helper
-// Foundation's XMLElement provides elements(forName:) for direct children only.
-// This extension adds a non-throwing elements(forXPath:) wrapper around
-// XMLNode.nodes(forXPath:throws:) that returns [XMLElement].
+// Adds a non-throwing, element-only XPath wrapper for parser call sites.
 private extension XMLNode {
+    /// Returns only element nodes from a non-throwing XPath query.
     func elements(forXPath xPath: String) -> [XMLElement] {
         (try? nodes(forXPath: xPath))?.compactMap { $0 as? XMLElement } ?? []
     }
@@ -26,6 +23,7 @@ public struct ClipDescriptor {
     public let mediaType:      AVMediaType
 }
 
+/// Common timeline representation consumed by composition and interchange writers.
 public struct TimelineDescriptor {
     public let name:           String
     public let frameRate:      CMTime         // as a rational fraction (value/timescale = 1/fps)
@@ -48,6 +46,7 @@ public final class XMLTimelineParser: NSObject {
     private var mediasByID:  [String: XMLElement] = [:]
     private var fcp7FilePathsByID: [String: String] = [:]
 
+    /// Cached frame duration and raster dimensions for a referenced format resource.
     private struct FCPXMLFormat {
         var frameDuration: CMTime
         var width: Int
@@ -131,6 +130,7 @@ public final class XMLTimelineParser: NSObject {
             clips:         clips)
     }
 
+    /// Indexes asset, format, and nested-media resources before spine parsing.
     private func buildResourceTables(root: XMLElement, baseURL: URL) {
         // <asset id="r1" src="file:///..." />
         for asset in root.elements(forXPath: ".//resources/asset") {
@@ -245,6 +245,7 @@ public final class XMLTimelineParser: NSObject {
         }
     }
 
+    /// Parses a direct asset clip and emits its video/audio descriptors.
     private func parseClipElement(
         _ elem: XMLElement,
         timelineStart: CMTime,
@@ -270,6 +271,7 @@ public final class XMLTimelineParser: NSObject {
         }
     }
 
+    /// Resolves a referenced media sequence while preventing circular expansion.
     private func parseRefClip(
         ref: String,
         timelineStart: CMTime,
@@ -302,6 +304,7 @@ public final class XMLTimelineParser: NSObject {
         clips.append(contentsOf: offsetted)
     }
 
+    /// Flattens synchronized child clips into the parent timeline range.
     private func parseSyncClip(
         _ elem: XMLElement,
         timelineStart: CMTime,
@@ -328,7 +331,7 @@ public final class XMLTimelineParser: NSObject {
         }
     }
 
-    // MARK: - Legacy XML parsing
+    // MARK: - Sequence-based XML parsing
 
     private func parseFCP7XML(root: XMLElement, baseURL: URL) -> TimelineDescriptor? {
         guard let sequence = root.elements(forXPath: ".//sequence").first else {
@@ -394,6 +397,7 @@ public final class XMLTimelineParser: NSObject {
             clips:         clips)
     }
 
+    /// Parses sequence clip items for one media type and timeline track index.
     private func parseFCP7ClipItems(
         _ clipitem: XMLElement,
         trackIndex: Int,
@@ -410,6 +414,7 @@ public final class XMLTimelineParser: NSObject {
 
         guard inFrame >= 0, outFrame > inFrame, startF >= 0, endF > startF else { return [] }
 
+        /// Converts a sequence frame number to exact media time.
         func frameToTime(_ f: Int) -> CMTime {
             let v  = CMTimeValue(f) * CMTimeValue(isNTSC ? 1001 : 1)
             let ts = CMTimeScale(timebase * (isNTSC ? 1000 : 1))
@@ -463,6 +468,7 @@ public final class XMLTimelineParser: NSObject {
             mediaType:     mediaType)]
     }
 
+    /// Intersects nested clips with a requested window and rebases retained ranges.
     private func trimNestedSubClips(
         _ subClips: [ClipDescriptor],
         parentTimelineRange: CMTimeRange,
@@ -509,10 +515,12 @@ public final class XMLTimelineParser: NSObject {
         return .zero
     }
 
+    /// Parses an optional rational time string, returning zero when absent.
     private func parseFCPXMLTime(_ s: String?) -> CMTime {
         XMLTimelineParser.parseFCPXMLTime(s)
     }
 
+    /// Parses integer seconds or rational seconds into exact media time.
     private func parseFCPXMLTime(_ s: String) -> CMTime {
         XMLTimelineParser.parseFCPXMLTime(s)
     }
@@ -538,11 +546,12 @@ public final class XMLTimelineParser: NSObject {
         return String(format: "%02d:%02d:%02d:%02d", hh, mm, ss, ff)
     }
 
-    /// Resolve a potentially file:// or relative src string to an absolute POSIX path
+    /// Convert a file URL or relative source string to an absolute POSIX path.
     private func resolveFilePath(_ src: String, baseURL: URL) -> String {
         normalizeMediaPath(src, baseURL: baseURL)
     }
 
+    /// Indexes file IDs and normalized paths used by sequence clip items.
     private func buildFCP7FileTable(root: XMLElement, baseURL: URL) {
         for file in root.elements(forXPath: ".//file") {
             guard let fileID = file.attribute(forName: "id")?.stringValue,
@@ -553,13 +562,16 @@ public final class XMLTimelineParser: NSObject {
         }
     }
 
+    /// Decodes and repairs absolute, relative, and mounted-volume media paths.
     private func normalizeMediaPath(_ src: String, baseURL: URL) -> String {
         let fm = FileManager.default
 
+        /// Expands a relative path against the timeline document directory.
         func expanded(_ path: String) -> String {
             (path as NSString).expandingTildeInPath
         }
 
+        /// Adds the mounted-volume prefix when the stored path omitted it.
         func repairedVolumePath(_ path: String) -> String {
             guard path.hasPrefix("/"), !path.hasPrefix("/Volumes/") else { return path }
             return "/Volumes" + path
@@ -609,6 +621,7 @@ public final class XMLTimelineParser: NSObject {
         return (0, 1) // flatten upper lanes to primary
     }
 
+    /// Returns clips with timeline ranges shifted by a common offset.
     private func offsetClips(_ clips: [ClipDescriptor], by offset: CMTime) -> [ClipDescriptor] {
         clips.map { c in
             ClipDescriptor(

@@ -1,11 +1,16 @@
+// Measures per-frame PQ luminance and color statistics with a bounded set of
+// GPU buffers, then aggregates the measurements into an analysis document.
+
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
 import CoreVideo
 import Metal
 
+/// Supplies the module bundle used to locate packaged GPU functions.
 private final class CMUMetalResourceBundleToken: NSObject {}
 
+/// Per-dispatch image geometry, range, matrix, and luma coefficients.
 private struct CMUMetalUniforms {
     var width: UInt32
     var height: UInt32
@@ -14,16 +19,19 @@ private struct CMUMetalUniforms {
     var lumaCoefficients: SIMD4<Float>
 }
 
+/// Workgroup sums written by the analysis kernel.
 private struct CMUPartialStatsGPU {
     var sums0: SIMD4<Float>
     var sums1: SIMD4<Float>
 }
 
+/// Reusable shared buffers for one in-flight frame analysis.
 private final class CMUStatsSlot {
     let histogram: MTLBuffer
     let extrema: MTLBuffer
     let partials: MTLBuffer
 
+    /// Allocates histogram, extrema, and workgroup-partial storage.
     init?(device: MTLDevice, groupCount: Int) {
         guard let histogram = device.makeBuffer(
             length: 4096 * MemoryLayout<UInt32>.stride,
@@ -44,6 +52,7 @@ private final class CMUStatsSlot {
         self.partials = partials
     }
 
+    /// Clears accumulators and restores the minimum-luminance sentinel.
     func reset() {
         histogram.contents().initializeMemory(
             as: UInt8.self,
@@ -57,6 +66,7 @@ private final class CMUStatsSlot {
     }
 }
 
+/// Retains resources until a submitted command buffer can be reduced on the CPU.
 private final class CMUPendingFrame {
     let commandBuffer: MTLCommandBuffer
     let slot: CMUStatsSlot
@@ -66,6 +76,7 @@ private final class CMUPendingFrame {
     let ptsSeconds: Double
     let groupCount: Int
 
+    /// Captures the command, buffers, timing, and retained textures for one frame.
     init(
         commandBuffer: MTLCommandBuffer,
         slot: CMUStatsSlot,
@@ -84,6 +95,7 @@ private final class CMUPendingFrame {
         self.groupCount = groupCount
     }
 
+    /// Waits for GPU completion and reduces shared buffers into frame statistics.
     func finish() throws -> CMUFrameStats {
         commandBuffer.waitUntilCompleted()
         withExtendedLifetime(pixelBuffer) {}
@@ -146,12 +158,14 @@ private final class CMUPendingFrame {
     }
 }
 
+/// Streams decoded frames through a three-slot GPU analysis queue.
 final class CMUMetalAnalyzer {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let textureCache: CVMetalTextureCache
 
+    /// Creates the GPU device, command queue, compute pipeline, and texture cache.
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw CMUError.metalUnavailable
@@ -183,6 +197,8 @@ final class CMUMetalAnalyzer {
         textureCache = cache
     }
 
+    /// Decodes all frames, optionally applies a color transform, and returns exact
+    /// frame/timing statistics with aggregate metadata values.
     func analyze(
         url: URL,
         descriptor: CMUAssetDescriptor,
@@ -340,7 +356,7 @@ final class CMUMetalAnalyzer {
             generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
             author: "Dolby Laboratories",
             software: "Connect Mapping Unit",
-            softwareVersion: "1.2.0",
+            softwareVersion: "1.2.2",
             analysisSource: source,
             media: descriptor,
             masteringPeakNits: masteringPeakNits,
@@ -359,6 +375,7 @@ final class CMUMetalAnalyzer {
         )
     }
 
+    /// Encodes one analysis dispatch and returns an object that owns in-flight resources.
     private func submit(
         pixelBuffer: CVPixelBuffer,
         slot: CMUStatsSlot,
@@ -432,6 +449,7 @@ final class CMUMetalAnalyzer {
         )
     }
 
+    /// Binds one pixel-buffer plane to a Metal texture.
     private func makeTexture(
         pixelBuffer: CVPixelBuffer,
         plane: Int,
@@ -463,6 +481,7 @@ final class CMUMetalAnalyzer {
         return texture
     }
 
+    /// Loads the required analysis kernel from embedded or packaged GPU code.
     private static func loadLibrary(device: MTLDevice) -> MTLLibrary? {
         EmbeddedMetalLibrary.load(
             device: device,
@@ -472,6 +491,7 @@ final class CMUMetalAnalyzer {
     }
 }
 
+/// Converts a histogram rank to absolute PQ luminance in nits.
 private func cmuPercentile(
     _ histogram: UnsafeMutablePointer<UInt32>,
     fraction: Double
@@ -493,6 +513,7 @@ private func cmuPercentile(
     return 10_000
 }
 
+/// Derives bounded minimum, midpoint, and maximum anchors from frame percentiles.
 private func cmuBuildLevel1(_ frames: [CMUFrameStats]) -> CMULevel1Like {
     let minimum = min(
         min(max(cmuNitsToPQNormalized(frames.map(\.minLumaNits).min() ?? 0), 0), 1),
@@ -516,6 +537,7 @@ private func cmuBuildLevel1(_ frames: [CMUFrameStats]) -> CMULevel1Like {
     )
 }
 
+/// Converts absolute luminance to a normalized PQ code value.
 private func cmuNitsToPQNormalized(_ nits: Float) -> Float {
     let m1 = 2610.0 / 16384.0
     let m2 = 2523.0 / 32.0
@@ -527,6 +549,7 @@ private func cmuNitsToPQNormalized(_ nits: Float) -> Float {
     return Float(pow((c1 + c2 * powered) / (1 + c3 * powered), m2))
 }
 
+/// Returns the median of a finite list, averaging the middle pair when needed.
 private func cmuMedian(_ values: [Float]) -> Float {
     guard !values.isEmpty else { return 0 }
     let sorted = values.sorted()

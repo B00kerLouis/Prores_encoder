@@ -1,6 +1,11 @@
+// Rewrites a completed ProRes MOV to include generated timed metadata without
+// re-encoding its video samples.
+
 import Foundation
 @preconcurrency import AVFoundation
 
+/// Writes metadata into a temporary passthrough MOV and atomically replaces the
+/// original output after the writer succeeds.
 func includeGeneratedCMUXMLInProResMOV(
     outputURL: URL,
     xmlURL: URL

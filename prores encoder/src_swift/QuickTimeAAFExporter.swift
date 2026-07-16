@@ -1,8 +1,11 @@
+// Writes an AAF timeline whose source mobs link directly to QuickTime media.
+
 import Foundation
 import AVFoundation
 import CoreMedia
 import swiftaaf_Framework
 
+/// Exports a parsed timeline and reports failure without propagating errors to the CLI.
 func generateLinkedAAFWithSwiftAAF(
     descriptor: TimelineDescriptor,
     outputPath: String,
@@ -23,6 +26,7 @@ func generateLinkedAAFWithSwiftAAF(
     }
 }
 
+/// Constructs source, master, and composition mobs for linked movie media.
 private final class QuickTimeLinkedTimelineAAFWriter {
     private static let timecodeSlotID: UInt32 = 1
     private static let firstTimelineSlotID: UInt32 = 2
@@ -44,6 +48,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         get throws { try swiftaaf_Framework.AUID("3c06dc73-0276-4c4c-ba3f-3f47120cd1e9") }
     }
 
+    /// Associates one media URL with its source/master mobs and measured extents.
     private struct SourceBinding {
         let url: URL
         let name: String
@@ -56,6 +61,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         let audioChannels: Int
     }
 
+    /// Builds the complete object graph and closes the output file after all mobs are attached.
     func write(descriptor: TimelineDescriptor, to url: URL, sequenceName: String) throws {
         guard !descriptor.clips.isEmpty else {
             throw QuickTimeAAFExportError.noClips
@@ -92,6 +98,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         try file.close()
     }
 
+    /// Groups clips by media path and creates linked picture and sound descriptors.
     private func buildSourceBindings(
         file: AAFFile,
         descriptor: TimelineDescriptor,
@@ -203,6 +210,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return bindings
     }
 
+    /// Creates timeline slots, timecode, fillers, and source references for each layer.
     private func createCompositionMob(
         file: AAFFile,
         descriptor: TimelineDescriptor,
@@ -277,6 +285,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return mob
     }
 
+    /// Converts ordered clips into source clips separated by fillers in edit-unit time.
     private func timelineComponents(
         file: AAFFile,
         clips: [ClipDescriptor],
@@ -324,6 +333,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return (components, cursor)
     }
 
+    /// Appends a sequence containing the composition start-timecode component.
     private func appendTimecodeSlot(
         to mob: AAFObject,
         editRate: swiftaaf_Framework.AAFRational,
@@ -345,6 +355,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         )
     }
 
+    /// Adds a zero-mob source clip that terminates a source-package reference chain.
     private func appendSourceTerminatorSlot(
         to mob: AAFObject,
         slotID: UInt32,
@@ -370,6 +381,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         )
     }
 
+    /// Adds a master-mob slot that references a matching source-mob slot.
     private func appendLinkedSlot(
         to mob: AAFObject,
         slotID: UInt32,
@@ -398,6 +410,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         )
     }
 
+    /// Creates a timeline slot and installs the supplied components as one sequence.
     private func appendSequenceSlot(
         to mob: AAFObject,
         slotID: UInt32,
@@ -414,6 +427,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         try slot.setSegment(sequence)
     }
 
+    /// Creates a linked 10-bit 4:2:2 video descriptor from timeline dimensions.
     private func createVideoDescriptor(
         file: AAFFile,
         url: URL,
@@ -454,6 +468,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return item
     }
 
+    /// Creates a linked 48 kHz PCM descriptor using the measured channel count.
     private func createAudioDescriptor(
         file: AAFFile,
         url: URL,
@@ -481,6 +496,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return item
     }
 
+    /// Sets project identification fields on the file's existing identification record.
     private func applyIdentification(file: AAFFile) throws {
         let identifications = try file.header.get("IdentificationList", allKeys: false) as? AAFStrongReferenceVectorProperty
         guard let identification = try identifications?.objects().first else { return }
@@ -489,11 +505,13 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         try identification.get("ProductVersionString")?.setDecodedValue(SwiftAAF.version)
     }
 
+    /// Applies the container and handler identifiers required by linked-media descriptors.
     private func applyAvidContainer(to descriptor: AAFObject) throws {
         try descriptor.setMediaContainerGUID(Self.avidAMAContainerGUID)
         try descriptor.setContainerHandlerGUID(Self.avidAMAContainerHandlerGUID)
     }
 
+    /// Returns the furthest source out-point in the requested edit-rate units.
     private func maxSourceLength(clips: [ClipDescriptor], editRate: swiftaaf_Framework.AAFRational) -> Int64 {
         clips.map {
             Self.editUnits(
@@ -503,6 +521,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         }.max() ?? 0
     }
 
+    /// Returns the furthest timeline out-point in the requested edit-rate units.
     private func maxTimelineLength(clips: [ClipDescriptor], editRate: swiftaaf_Framework.AAFRational) -> Int64 {
         clips.map {
             Self.editUnits(
@@ -512,6 +531,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         }.max() ?? 0
     }
 
+    /// Reads the first audio format description and returns its channel count.
     private func audioChannelEstimate(for url: URL) -> Int {
         let asset = AVURLAsset(url: url)
         guard let audioTrack = quickTimeAAFLoadAudioTracksSynchronously(from: asset).first,
@@ -524,6 +544,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return Int(streamDescription.pointee.mChannelsPerFrame)
     }
 
+    /// Orders clips by timeline start, then by source path for deterministic output.
     private func clipSortOrder(_ lhs: ClipDescriptor, _ rhs: ClipDescriptor) -> Bool {
         let compare = CMTimeCompare(lhs.timelineRange.start, rhs.timelineRange.start)
         if compare != 0 {
@@ -532,6 +553,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return lhs.sourceURL.path < rhs.sourceURL.path
     }
 
+    /// Converts the timeline frame duration to a positive video edit-rate rational.
     private static func videoEditRate(from descriptor: TimelineDescriptor) -> swiftaaf_Framework.AAFRational {
         guard descriptor.frameRate.value > 0, descriptor.frameRate.timescale > 0 else {
             return swiftaaf_Framework.AAFRational(24, 1)
@@ -539,6 +561,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return swiftaaf_Framework.AAFRational(Int64(descriptor.frameRate.timescale), Int64(descriptor.frameRate.value))
     }
 
+    /// Rounds a media time to the nearest unit of the supplied edit rate.
     private static func editUnits(from time: CMTime, editRate: swiftaaf_Framework.AAFRational) -> Int64 {
         let seconds = CMTimeGetSeconds(time)
         let rate = editRate.doubleValue
@@ -546,6 +569,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return Int64((seconds * rate).rounded())
     }
 
+    /// Parses four-field timecode into a nominal frame number.
     private static func timecodeFrames(_ value: String, fps: Int) -> Int64 {
         let parts = value.replacingOccurrences(of: ";", with: ":").split(separator: ":")
         guard parts.count == 4,
@@ -559,6 +583,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return (((hh * 60) + mm) * 60 + ss) * safeFPS + ff
     }
 
+    /// Encodes a local movie path in the locator URL form stored by the AAF descriptor.
     private static func avidURLString(for movieURL: URL) -> String {
         var path = movieURL.path
         if path.hasPrefix("/Volumes/") {
@@ -568,6 +593,7 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return "file://\(encodedPath)"
     }
 
+    /// Returns a reduced width-to-height rational string.
     private func reducedAspectRatio(width: Int, height: Int) -> String {
         let divisor = gcd(abs(width), abs(height))
         guard divisor > 0 else {
@@ -576,11 +602,13 @@ private final class QuickTimeLinkedTimelineAAFWriter {
         return "\(width / divisor)/\(height / divisor)"
     }
 
+    /// Computes a positive greatest common divisor for aspect-ratio reduction.
     private func gcd(_ a: Int, _ b: Int) -> Int {
         b == 0 ? a : gcd(b, a % b)
     }
 }
 
+/// Bridges asynchronous track loading for the synchronous object-graph builder.
 private func quickTimeAAFLoadAudioTracksSynchronously(from asset: AVAsset) -> [AVAssetTrack] {
     let semaphore = DispatchSemaphore(value: 0)
     let assetRef = SendableRef(asset)
@@ -593,6 +621,7 @@ private func quickTimeAAFLoadAudioTracksSynchronously(from asset: AVAsset) -> [A
     return box.value ?? []
 }
 
+/// Bridges asynchronous format-description loading for channel inspection.
 private func quickTimeAAFLoadFormatDescriptionsSynchronously(
     from track: AVAssetTrack
 ) -> [CMFormatDescription] {
@@ -607,10 +636,12 @@ private func quickTimeAAFLoadFormatDescriptionsSynchronously(
     return box.value ?? []
 }
 
+/// Holds a result transferred from an asynchronous task to a waiting caller.
 private final class QuickTimeAAFSynchronousResultBox<T>: @unchecked Sendable {
     var value: T?
 }
 
+/// Structural errors detected while building a linked timeline.
 private enum QuickTimeAAFExportError: LocalizedError {
     case noClips
     case missingSourceBinding(String)

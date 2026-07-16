@@ -1,14 +1,5 @@
-// BitstreamProcess.swift — VTCompressionSession ProRes encoder + audio/color pipeline
-// Handles:
-//  - VTCompressionSession creation & per-frame encode (ProRes)
-//  - Rigorous color-space detection & propagation (BT.709/BT.2020/P3/PQ/HLG)
-//  - Audio PCM extraction (24-bit 48 kHz LE) for MXF
-//  - SMPTE audio cadence
-//  - MXF encode pipeline (VT → mxf::Encoder via MXFBridge)
-//  - Source media analysis helpers (framerate, timecode, channel count, dimensions)
-//
-// Memory model: strictly one-frame-at-a-time in the encode loop.
-// For 4 h+ files only ~2 MB resides in memory at any moment.
+// Encodes ProRes video, extracts MXF audio, propagates color metadata, and
+// provides source-media analysis helpers. Samples are processed incrementally.
 
 import Foundation
 @preconcurrency import AVFoundation
@@ -18,7 +9,7 @@ import VideoToolbox
 private let kCMVideoCodecType_AppleProRes4444XQ: CMVideoCodecType = 0x61703478 // 'ap4x'
 
 // MARK: - MXF Color UL Constants (SMPTE 377-1)
-// Must match mxf_enc.cpp exactly.
+// Values mirror the identifiers declared by the MXF encoder interface.
 
 enum MXFColorUL {
     static let primariesBT709:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x06,
@@ -59,6 +50,7 @@ struct SourceColorSpace: Sendable {
     let mxfTransfer:  Data?
     let mxfMatrix:    Data?
 
+    /// Returns an HDR10 profile while preserving valid mastering/light metadata.
     static func hevcHDR10(
         basedOn source: SourceColorSpace?,
         masteringDisplayColorVolume fallbackMasteringDisplay: Data? = nil,
@@ -77,6 +69,7 @@ struct SourceColorSpace: Sendable {
     }
 }
 
+/// Supported dynamic HDR profile families and their bitstream signaling values.
 enum DolbyVisionHEVCProfile: String, Sendable {
     case profile76 = "76"
     case profile81 = "81"
@@ -170,6 +163,7 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 }
 
+/// Compressed encoder bitrate and optional dynamic HDR profile.
 struct HEVCEncodeOptions: Sendable {
     let bitrateMbps: Double
     let dvProfile: DolbyVisionHEVCProfile?
@@ -179,6 +173,7 @@ struct HEVCEncodeOptions: Sendable {
     }
 }
 
+/// Reads video color extensions and maps them to MOV strings and MXF identifiers.
 func detectColorSpace(from track: AVAssetTrack) async -> SourceColorSpace {
     guard let fmts = try? await track.load(.formatDescriptions),
           let fd = fmts.first else {
@@ -236,6 +231,7 @@ struct FramerateInfo: Sendable {
     var fps: Double { Double(numerator) / Double(denominator) }
 }
 
+/// Normalizes nominal frame rate to a known rational and drop-frame convention.
 func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
     guard let track = try? await asset.loadTracks(withMediaType: .video).first,
           let rate  = try? await track.load(.nominalFrameRate) else {
@@ -331,10 +327,12 @@ let supportedProResQualities: Set<String> = [
     "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "hevc", "av1"
 ]
 
+/// Normalizes a quality argument for comparisons and switches.
 func normalizedProResQuality(_ quality: String) -> String {
     quality.lowercased()
 }
 
+/// Returns a diagnostic when a quality argument is not explicitly supported.
 func proResQualityValidationError(_ quality: String) -> String? {
     let normalized = normalizedProResQuality(quality)
     if supportedProResQualities.contains(normalized) {
@@ -346,15 +344,18 @@ func proResQualityValidationError(_ quality: String) -> String? {
     return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc, av1."
 }
 
+/// Returns whether the requested output codec is HEVC.
 func isHEVCQuality(_ quality: String) -> Bool {
     normalizedProResQuality(quality) == "hevc"
 }
 
+/// Returns whether the requested ProRes variant carries 4:4:4 components.
 func is4444FamilyQuality(_ quality: String) -> Bool {
     let q = normalizedProResQuality(quality)
     return q == "4444" || q == "4444xq"
 }
 
+/// Selects the decoded pixel layout consumed by the chosen encoder path.
 func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
     let pixelFormat: OSType
     if isCompressedHDRQuality(quality) {
@@ -367,6 +368,7 @@ func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
     return [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
 }
 
+/// Maps a normalized quality argument to its platform codec identifier.
 func proResCodecType(_ quality: String) -> CMVideoCodecType {
     switch normalizedProResQuality(quality) {
     case "hevc":    return kCMVideoCodecType_HEVC
@@ -380,6 +382,7 @@ func proResCodecType(_ quality: String) -> CMVideoCodecType {
     }
 }
 
+/// Maps ProRes quality to the numeric variant stored by the MXF writer.
 func proResVariantInt(_ quality: String) -> Int {
     switch normalizedProResQuality(quality) {
     case "proxy":  return 1; case "422lt": return 2
@@ -389,6 +392,7 @@ func proResVariantInt(_ quality: String) -> Int {
     }
 }
 
+/// Bounds in-flight frame count by estimated memory use and active processor count.
 func proResPipelineChannelCapacity(width: Int, height: Int, quality: String) -> Int {
     let bytesPerPixel = isCompressedHDRQuality(quality) ? 2 : 4
     let frameBytes = max(width * height * bytesPerPixel, 1)
@@ -398,6 +402,7 @@ func proResPipelineChannelCapacity(width: Int, height: Int, quality: String) -> 
     return min(memoryLimited, coreLimited)
 }
 
+/// Formats a media subtype for diagnostics.
 private func fourCCString(_ code: FourCharCode) -> String {
     let bytes = [
         UInt8((code >> 24) & 0xff),
@@ -408,6 +413,7 @@ private func fourCCString(_ code: FourCharCode) -> String {
     return String(bytes: bytes, encoding: .ascii) ?? "\(code)"
 }
 
+/// Selects the pixel layout submitted to a codec session.
 private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
     if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_AV1 {
         return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
@@ -420,6 +426,7 @@ private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
     }
 }
 
+/// Builds preferred image-buffer attributes for encoder discovery.
 private func proResEncoderImageBufferAttributes(width: Int, height: Int, codecType: CMVideoCodecType) -> CFDictionary {
     [
         kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: proResSourcePixelFormat(codecType: codecType)),
@@ -428,18 +435,21 @@ private func proResEncoderImageBufferAttributes(width: Int, height: Int, codecTy
     ] as CFDictionary
 }
 
+/// Requires a hardware implementation for ProRes encoding.
 private func proResHardwareEncoderSpecification() -> CFDictionary {
     [
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: kCFBooleanTrue as Any
     ] as CFDictionary
 }
 
+/// Requests hardware acceleration for HEVC session creation.
 private func hevcHardwareEncoderSpecification() -> CFDictionary {
     [
         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: kCFBooleanTrue as Any
     ] as CFDictionary
 }
 
+/// Reads a Boolean codec-session property while preserving ownership semantics.
 private func vtSessionBooleanProperty(_ session: VTCompressionSession, key: CFString) -> Bool? {
     var unmanagedValue: Unmanaged<CFTypeRef>?
     let status = withUnsafeMutablePointer(to: &unmanagedValue) { pointer in
@@ -492,11 +502,13 @@ func estimateFrameCount(asset: AVAsset) async -> Int64 {
 
 /// Sendable wrappers for CoreMedia/CoreVideo types that lack conformance on macOS 13.
 struct SendableSampleBuffer: @unchecked Sendable { let buf: CMSampleBuffer }
+/// Transfers a retained pixel buffer between pipeline tasks.
 struct SendablePixelBuffer: @unchecked Sendable { let buf: CVPixelBuffer }
 
 /// Lightweight bounded FIFO channel for Swift async/await pipelines.
 /// Producers back-pressure when full; consumers suspend when empty.
 final class AsyncChannel<T: Sendable>: @unchecked Sendable {
+    /// Producer state retained while the bounded buffer is full.
     private enum PendingProducer {
         case async(T, CheckedContinuation<Void, Never>)
         case blocking(T, DispatchSemaphore)
@@ -509,6 +521,7 @@ final class AsyncChannel<T: Sendable>: @unchecked Sendable {
     private var waitingConsumers: [CheckedContinuation<T?, Never>] = []
     private var waitingProducers: [PendingProducer] = []
 
+    /// Creates a FIFO with a fixed buffering capacity.
     init(capacity: Int) {
         self.capacity = capacity
         buffer.reserveCapacity(capacity)
@@ -618,12 +631,16 @@ final class AsyncChannel<T: Sendable>: @unchecked Sendable {
     }
 }
 
+/// Enables asynchronous iteration until the channel is finished and drained.
 extension AsyncChannel: AsyncSequence {
     typealias Element = T
+    /// Iterator forwarding reads to its channel.
     struct AsyncIterator: AsyncIteratorProtocol {
         let channel: AsyncChannel<T>
+        /// Returns the next buffered value or nil after completion.
         mutating func next() async -> T? { await channel.next() }
     }
+    /// Creates an iterator sharing this channel's state.
     func makeAsyncIterator() -> AsyncIterator { AsyncIterator(channel: self) }
 }
 
@@ -641,6 +658,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
     private var asyncFlushRequested = false
     private var asyncChannelFinished = false
 
+    /// Switches callback delivery from synchronous storage to an asynchronous channel.
     func configureAsyncChannel(_ channel: AsyncChannel<SendableSampleBuffer>) {
         asyncStateLock.lock()
         asyncChannel = channel
@@ -652,12 +670,14 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         asyncStateLock.unlock()
     }
 
+    /// Increments the count of frames expected to produce callbacks.
     func willSubmitAsyncFrame() {
         asyncStateLock.lock()
         asyncSubmittedCount += 1
         asyncStateLock.unlock()
     }
 
+    /// Reverts a failed submission and checks whether flush can finish the channel.
     func revertAsyncSubmission() -> AsyncChannel<SendableSampleBuffer>? {
         asyncStateLock.lock()
         asyncSubmittedCount = max(0, asyncSubmittedCount - 1)
@@ -666,6 +686,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         return channel
     }
 
+    /// Records callback completion and checks whether flush can finish the channel.
     func completeAsyncFrame() -> AsyncChannel<SendableSampleBuffer>? {
         asyncStateLock.lock()
         asyncCompletedCount += 1
@@ -674,6 +695,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         return channel
     }
 
+    /// Marks submission complete and returns the channel if no work remains.
     func requestAsyncFlush() -> AsyncChannel<SendableSampleBuffer>? {
         asyncStateLock.lock()
         asyncFlushRequested = true
@@ -682,6 +704,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         return channel
     }
 
+    /// Delivers callback output without blocking the codec callback thread.
     func dispatchAsyncDelivery(of sampleBuffer: CMSampleBuffer) {
         asyncStateLock.lock()
         guard let channel = asyncChannel else {
@@ -698,6 +721,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         }
     }
 
+    /// Decrements delivery count and checks whether deferred finish can proceed.
     private func completeAsyncDelivery() -> AsyncChannel<SendableSampleBuffer>? {
         asyncStateLock.lock()
         asyncDeliveryPendingCount = max(0, asyncDeliveryPendingCount - 1)
@@ -706,6 +730,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         return channel
     }
 
+    /// Returns the channel once after flush, callbacks, and deliveries all drain.
     private func finishChannelIfDrainedLocked() -> AsyncChannel<SendableSampleBuffer>? {
         guard asyncFlushRequested,
               !asyncChannelFinished,
@@ -751,6 +776,7 @@ final class ProResSession: @unchecked Sendable {
     private let hevcMasteringDisplayColorVolume: Data?
     private let hevcContentLightLevelInfo: Data?
 
+    /// Creates and configures a compression session for ProRes or HEVC output.
     init(width: Int, height: Int, codecType: CMVideoCodecType,
          fpsHint: Int, colorSpace: SourceColorSpace?,
          hevcOptions: HEVCEncodeOptions? = nil) throws {
@@ -920,14 +946,17 @@ final class ProResSession: @unchecked Sendable {
         rc.requestAsyncFlush()?.finish()
     }
 
+    /// Completes all submitted frames for synchronous callers.
     func flush() {
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
     }
 
+    /// Invalidates the codec session and prevents further submission.
     func invalidate() {
         if session != nil { VTCompressionSessionInvalidate(session); session = nil }
     }
 
+    /// Propagates static HDR and color attachments to HEVC input frames.
     private func attachHEVCMetadataIfNeeded(to pixelBuffer: CVPixelBuffer) {
         guard isHEVCSession else { return }
         if let p = hevcColorSpace?.primaries {
@@ -966,6 +995,7 @@ final class ProResSession: @unchecked Sendable {
                 .shouldPropagate)
         }
     }
+    /// Releases the codec session if the owner did not invalidate it explicitly.
     deinit { invalidate() }
 }
 
@@ -981,6 +1011,7 @@ final class VideoFrameSource: @unchecked Sendable {
     private let fpsNum: Int32
     private var frameIndex: Int64 = 0
 
+    /// Creates a passthrough or re-encoding frame source with exact rate timing.
     init(output: AVAssetReaderTrackOutput, vtSession: ProResSession?,
          fpsNum: Int, fpsDen: Int) {
         self.output = output; self.vtSession = vtSession
@@ -999,6 +1030,7 @@ final class VideoFrameSource: @unchecked Sendable {
         return vt.encode(pixelBuffer: pb, pts: pts, duration: dur)
     }
 
+    /// Flushes and invalidates the optional re-encoding session.
     func finish() { vtSession?.flush(); vtSession?.invalidate() }
 }
 
@@ -1006,9 +1038,12 @@ final class VideoFrameSource: @unchecked Sendable {
 
 /// Reads audio from source as float32 PCM and converts to MXF-compatible PCM per edit-unit cadence.
 /// Ring-buffer approach: ~32 KB resident memory regardless of file length.
+/// Allows the bridge handle to move between MXF pipeline tasks.
 extension MXFBridge: @unchecked Sendable {}
+/// Allows immutable bridge configuration to move between pipeline tasks.
 extension MXFBridgeConfig: @unchecked Sendable {}
 
+/// Streams decoded float PCM through a bounded ring and emits MXF sample groups.
 final class MXFAudioContext: @unchecked Sendable {
     private let reader: AVAssetReader
     private let output: AVAssetReaderTrackOutput
@@ -1019,6 +1054,7 @@ final class MXFAudioContext: @unchecked Sendable {
     private let bitDepth: Int
     private var exhausted = false
 
+    /// Configures float PCM decoding and selects a contiguous output channel range.
     init(asset: AVAsset, audioTrack: AVAssetTrack,
          sourceCh: Int, ch0: Int, outCh: Int,
          sampleRate: Int, bitDepth: Int) throws {
@@ -1087,6 +1123,7 @@ final class MXFAudioContext: @unchecked Sendable {
     }
 }
 
+/// Splits an interleaved PCM frame into consecutive channel groups.
 private func splitInterleavedPCM(
     _ pcm: Data,
     sourceChannels: Int,
@@ -1154,6 +1191,7 @@ struct MXFEncodeResult: Sendable {
     let audioMXFUMIDs: [Data]       // 32 bytes each, per audio MXF (OP-Atom only)
 }
 
+/// Runs video encode, audio extraction, MXF writing, and OP-Atom audio fan-out.
 func encodeMXF(
     asset: AVAsset,
     sourceURL: URL,

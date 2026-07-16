@@ -5,13 +5,17 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 
+/// Transfers the bridge between the task that owns its session lifecycle.
 extension AV1Bridge: @unchecked Sendable {}
+/// Transfers immutable encoded packets between pipeline stages.
 extension AV1BridgePacket: @unchecked Sendable {}
+/// Transfers immutable session configuration to the bridge owner.
 extension AV1BridgeConfig: @unchecked Sendable {}
 
 private let av1CodecType: CMVideoCodecType = kCMVideoCodecType_AV1
 private let av1DecodeFallbackPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
 
+/// Bitrate, color, and dynamic HDR settings for one AV1 encoding session.
 struct AV1EncodeOptions: Sendable {
     let bitrateMbps: Double
     let dvProfile: DolbyVisionHEVCProfile?
@@ -21,14 +25,17 @@ struct AV1EncodeOptions: Sendable {
     }
 }
 
+/// Returns whether a quality argument selects AV1 encoding.
 func isAV1Quality(_ quality: String) -> Bool {
     normalizedProResQuality(quality) == "av1"
 }
 
+/// Returns whether a quality argument uses a compressed 10-bit HDR codec.
 func isCompressedHDRQuality(_ quality: String) -> Bool {
     isHEVCQuality(quality) || isAV1Quality(quality)
 }
 
+/// Builds the bridge configuration from dimensions, rate, bitrate, and color tags.
 func makeAV1BridgeConfig(
     width: Int,
     height: Int,
@@ -52,6 +59,7 @@ func makeAV1BridgeConfig(
     return config
 }
 
+/// Creates an AV1 sample description with codec configuration and HDR extensions.
 func makeAV1FormatDescription(
     width: Int,
     height: Int,
@@ -97,6 +105,7 @@ func makeAV1FormatDescription(
     return formatDescription
 }
 
+/// Maps project color primaries to the AV1 CICP value.
 private func av1ColorPrimaries(from colorSpace: SourceColorSpace?) -> Int32 {
     if colorSpace?.primaries == (kCMFormatDescriptionColorPrimaries_ITU_R_709_2 as String) {
         return 1
@@ -107,6 +116,7 @@ private func av1ColorPrimaries(from colorSpace: SourceColorSpace?) -> Int32 {
     return 9
 }
 
+/// Maps project transfer metadata to the AV1 CICP value.
 private func av1TransferCharacteristics(from colorSpace: SourceColorSpace?) -> Int32 {
     if colorSpace?.transfer == (kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String) {
         return 1
@@ -120,10 +130,12 @@ private func av1TransferCharacteristics(from colorSpace: SourceColorSpace?) -> I
     return 16
 }
 
+/// Maps project YCbCr matrix metadata to the AV1 CICP value.
 private func av1MatrixCoefficients(from colorSpace: SourceColorSpace?) -> Int32 {
     colorSpace?.matrix == (kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2 as String) ? 1 : 9
 }
 
+/// Wraps one encoded temporal unit in a timing-preserving sample buffer.
 func makeAV1SampleBuffer(
     packet: AV1BridgePacket,
     formatDescription: CMFormatDescription,
@@ -204,6 +216,7 @@ func makeAV1SampleBuffer(
     return sampleBuffer
 }
 
+/// Removes temporal delimiter OBUs before storing a temporal unit in a sample.
 private func stripAV1TemporalDelimiterOBUs(from data: Data) -> Data {
     var cursor = data.startIndex
     var output = Data()
@@ -247,6 +260,7 @@ private func stripAV1TemporalDelimiterOBUs(from data: Data) -> Data {
     return output.isEmpty ? data : output
 }
 
+/// Probes whether the platform reader can decode the source to a supported pixel format.
 func av1DecodeProbeFailure(asset: AVAsset, videoTrack: AVAssetTrack) async -> String? {
     guard let reader = try? AVAssetReader(asset: asset) else {
         return "AVAssetReader probe could not be created for AV1 decode."
@@ -286,6 +300,7 @@ func av1DecodeProbeFailure(asset: AVAsset, videoTrack: AVAssetTrack) async -> St
     return "AVAssetReader produced no decoded video samples during the AV1 probe."
 }
 
+/// Inserts one dynamic HDR metadata OBU at the required temporal-unit position.
 func sampleBufferByInjectingAV1RPU(
     _ sampleBuffer: CMSampleBuffer,
     rpuNALUnit: Data
@@ -371,6 +386,7 @@ func sampleBufferByInjectingAV1RPU(
     return injectedSample
 }
 
+/// Returns whether a sample contains the expected registered metadata payload.
 func sampleBufferContainsAV1DolbyVisionRPU(_ sampleBuffer: CMSampleBuffer) -> Bool {
     guard let data = compressedData(from: sampleBuffer) else {
         return false
@@ -423,6 +439,7 @@ func sampleBufferContainsAV1DolbyVisionRPU(_ sampleBuffer: CMSampleBuffer) -> Bo
     return false
 }
 
+/// Locates the insertion point after leading temporal and sequence headers.
 private func av1MetadataInsertionOffset(in data: Data) throws -> Data.Index {
     var cursor = data.startIndex
     var fallback: Data.Index?
@@ -470,6 +487,7 @@ private func av1MetadataInsertionOffset(in data: Data) throws -> Data.Index {
     )
 }
 
+/// Converts an HEVC RPU NAL unit to an AV1 registered metadata OBU.
 private func makeAV1DolbyVisionMetadataOBU(fromHEVCRPU rpuNALUnit: Data) throws -> Data {
     let rawRPU = try regularRPUData(fromHEVCNALUnit: rpuNALUnit)
     let completeT35 = try av1T35PayloadComplete(fromRegularRPU: rawRPU)
@@ -485,6 +503,7 @@ private func makeAV1DolbyVisionMetadataOBU(fromHEVCRPU rpuNALUnit: Data) throws 
     return obu
 }
 
+/// Removes the HEVC NAL header and emulation-prevention bytes from an RPU.
 private func regularRPUData(fromHEVCNALUnit nalu: Data) throws -> Data {
     var payload = nalu
     if payload.count >= 2, payload[payload.startIndex] == 0x7c, payload[payload.index(after: payload.startIndex)] == 0x01 {
@@ -501,6 +520,7 @@ private func regularRPUData(fromHEVCNALUnit nalu: Data) throws -> Data {
     return cleared
 }
 
+/// Packs regular RPU bits into the complete registered user-data payload.
 private func av1T35PayloadComplete(fromRegularRPU rpu: Data) throws -> Data {
     guard rpu.first == 0x19 else {
         throw NSError(
@@ -537,6 +557,7 @@ private func av1T35PayloadComplete(fromRegularRPU rpu: Data) throws -> Data {
     return complete
 }
 
+/// Writes EMDF framing fields and the metadata payload to a bit writer.
 private func writeEMDFContainer(payload: Data, to writer: inout AV1MSBBitWriter) {
     writer.write(0, bitCount: 2)
     writer.write(6, bitCount: 3)
@@ -552,6 +573,7 @@ private func writeEMDFContainer(payload: Data, to writer: inout AV1MSBBitWriter)
     writer.write(0, bitCount: 8)
 }
 
+/// Writes an EMDF variable-width integer in continuation groups.
 private func writeEMDFVariableBits(_ value: UInt32, bits: Int, to writer: inout AV1MSBBitWriter) {
     let maxValue = UInt32(1 << bits)
     if value > maxValue {
@@ -574,6 +596,7 @@ private func writeEMDFVariableBits(_ value: UInt32, bits: Int, to writer: inout 
     writer.writeBit(false)
 }
 
+/// Removes inserted 0x03 bytes after two zero bytes in a NAL payload.
 private func clearHEVCStartCodeEmulationPrevention(_ data: Data) -> Data {
     var output = Data()
     output.reserveCapacity(data.count)
@@ -593,6 +616,7 @@ private func clearHEVCStartCodeEmulationPrevention(_ data: Data) -> Data {
     return output
 }
 
+/// Reads a bounded unsigned LEB128 value and advances the data cursor.
 private func readAV1LEB128(in data: Data, cursor: inout Data.Index) throws -> Int {
     var value = 0
     var shift = 0
@@ -612,6 +636,7 @@ private func readAV1LEB128(in data: Data, cursor: inout Data.Index) throws -> In
     )
 }
 
+/// Encodes a nonnegative integer as unsigned LEB128 bytes.
 private func av1LEB128Data(_ value: Int) -> Data {
     var remaining = value
     var bytes = Data()
@@ -626,12 +651,14 @@ private func av1LEB128Data(_ value: Int) -> Data {
     return bytes
 }
 
+/// Appends fields most-significant bit first and flushes partial bytes with zero fill.
 private struct AV1MSBBitWriter {
     private(set) var data = Data()
     private var bitOffset = 0
 
     var isByteAligned: Bool { bitOffset == 0 }
 
+    /// Appends one bit to the current byte.
     mutating func writeBit(_ bit: Bool) {
         if bitOffset == 0 {
             data.append(0)
@@ -643,6 +670,7 @@ private struct AV1MSBBitWriter {
         bitOffset = (bitOffset + 1) & 7
     }
 
+    /// Appends the requested high-to-low bit range from an integer.
     mutating func write(_ value: UInt64, bitCount: Int) {
         guard bitCount > 0 else { return }
         for bitIndex in stride(from: bitCount - 1, through: 0, by: -1) {
@@ -650,6 +678,7 @@ private struct AV1MSBBitWriter {
         }
     }
 
+    /// Appends byte-aligned payload data, preserving bit order when unaligned.
     mutating func writeBytes(_ bytes: Data) {
         for byte in bytes {
             write(UInt64(byte), bitCount: 8)
@@ -657,7 +686,9 @@ private struct AV1MSBBitWriter {
     }
 }
 
+/// Helpers for propagating the first Core Media status failure.
 private extension OSStatus {
+    /// Executes the next operation only when the receiver is `noErr`.
     func flatMapNoErr(_ body: () -> OSStatus) -> OSStatus {
         self == noErr ? body() : self
     }

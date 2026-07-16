@@ -1,14 +1,7 @@
-// mxf_opatom_enc.cpp — MXF OP-Atom encoder (clip-wrapped essence model)
-//
-// Key differences from previous OP-Atom implementation:
-//   1. KAG-512 alignment with KLV fill after header metadata and body partition
-//   2. Video clip-wrapping: single EE key + BER9 placeholder, all ProRes frames
-//      contiguous (no per-frame KLV). BER9 length patched on close().
-//   3. VBR index table in footer (not separate index partition)
-//   4. Body partition rewrite on close (update BER9 essence length)
-//   5. Audio clip-wrapping: single EE key + BER9, CBR index in footer
-//
-// References: SMPTE 377-1:2011, SMPTE RDD-36, OP-Atom partition/index behavior
+// Writes clip-wrapped OP-Atom video or audio essence.
+// Partitions use KAG-512 alignment; the footer contains video VBR or audio CBR
+// index data, and close() patches clip length and partition links.
+// Implements SMPTE 377-1:2011, SMPTE RDD-36, and OP-Atom partition behavior.
 
 #include "../include/mxf_common.h"
 
@@ -19,18 +12,28 @@ namespace mxf {
 // ============================================================
 class OpAtomEncoder final : public EncoderImpl {
 public:
+    // Creates an idle clip-wrapped writer.
     OpAtomEncoder() = default;
+    // Finalizes an active stream before destruction.
     ~OpAtomEncoder() override { if(phase_ == Phase::Streaming) close(); }
 
+    // Writes header/body partitions and starts the clip-wrapped essence item.
     bool open(const std::string& path, const Config& cfg) override;
+    // Appends raw video or PCM bytes to the active clip-wrapped item.
     bool writeFrame(const uint8_t* video, size_t videoSize,
                     const std::vector<const uint8_t*>& audio,
                     const std::vector<size_t>& audioSizes) override;
+    // Writes footer/index/RIP data and patches partition and essence lengths.
     bool close() override;
+    // Returns the number of accepted edit units.
     int64_t frameCount() const override { return nb_frames_; }
+    // Reports whether essence bytes can still be appended.
     bool isOpen() const override { return phase_ == Phase::Streaming; }
+    // Returns the most recent writer error.
     const std::string& lastError() const override { return error_; }
+    // Returns the active output path.
     const std::string& filePath() const override { return path_; }
+    // Returns the source-package UMID written in header metadata.
     const UMID32& sourcePackageUMID() const override { return srcUMID_; }
 
 private:
@@ -72,6 +75,7 @@ private:
     int fps_round_ = 0;
     int64_t tc_offset_ = 0;
 
+    // Writes the aligned body partition and reserves the patchable essence length.
     void writeBodyPartition();
 };
 
@@ -369,7 +373,7 @@ bool OpAtomEncoder::close() {
     }
 }
 
-// Factory function (called from mxf_enc.cpp dispatcher)
+// Factory used by the MXF dispatcher.
 std::unique_ptr<EncoderImpl> createOpAtomEncoder() {
     return std::make_unique<OpAtomEncoder>();
 }

@@ -1,8 +1,9 @@
-// DolbyVisionHEVCBitstreamProcessor — Dolby Vision RPU generation and HEVC sample injection
+// Parses and injects dynamic HDR metadata in HEVC samples.
 
 import Foundation
 import AVFoundation
 
+/// Static mastering and content-light payloads used to construct prefix SEI NAL units.
 struct HEVCHDR10Metadata: Sendable {
     let masteringDisplayColorVolume: Data?
     let contentLightLevelInfo: Data?
@@ -12,6 +13,7 @@ struct HEVCHDR10Metadata: Sendable {
     }
 }
 
+/// Reads the NAL length-prefix width from the sample format description.
 private func hevcNALUnitLengthSize(from sampleBuffer: CMSampleBuffer) -> Int {
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
         return 4
@@ -32,6 +34,7 @@ private func hevcNALUnitLengthSize(from sampleBuffer: CMSampleBuffer) -> Int {
     return 4
 }
 
+/// Decodes a big-endian NAL length prefix from sample data.
 private func readLengthPrefix(_ data: Data, at offset: Int, byteCount: Int) -> Int {
     var value = 0
     for byte in data[offset..<(offset + byteCount)] {
@@ -40,6 +43,7 @@ private func readLengthPrefix(_ data: Data, at offset: Int, byteCount: Int) -> I
     return value
 }
 
+/// Encodes a NAL byte count using the sample's prefix width.
 private func lengthPrefixData(_ value: Int, byteCount: Int) -> Data {
     var bytes = [UInt8](repeating: 0, count: byteCount)
     for idx in 0..<byteCount {
@@ -49,11 +53,13 @@ private func lengthPrefixData(_ value: Int, byteCount: Int) -> Data {
     return Data(bytes)
 }
 
+/// Returns the six-bit HEVC NAL unit type from its two-byte header.
 private func hevcNALType(_ nalu: Data) -> UInt8? {
     guard let first = nalu.first else { return nil }
     return (first >> 1) & 0x3f
 }
 
+/// Extracts VPS, SPS, and PPS data from a sample format description.
 private func hevcParameterSets(from sampleBuffer: CMSampleBuffer) -> [Data] {
     guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
         return []
@@ -93,6 +99,7 @@ private func hevcParameterSets(from sampleBuffer: CMSampleBuffer) -> [Data] {
     return parameterSets
 }
 
+/// Returns whether sample attachments mark the frame as independently decodable.
 private func sampleBufferIsSync(_ sampleBuffer: CMSampleBuffer) -> Bool {
     guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
         sampleBuffer,
@@ -105,14 +112,17 @@ private func sampleBufferIsSync(_ sampleBuffer: CMSampleBuffer) -> Bool {
     return !notSync
 }
 
+/// Returns whether a sample contains an RPU NAL unit.
 func sampleBufferContainsHEVCDolbyVisionRPU(_ sampleBuffer: CMSampleBuffer) -> Bool {
     sampleBufferContainsHEVCNALType(sampleBuffer, nalType: 62)
 }
 
+/// Returns whether a sample contains an enhancement-layer wrapper NAL unit.
 func sampleBufferContainsHEVCDolbyVisionEL(_ sampleBuffer: CMSampleBuffer) -> Bool {
     sampleBufferContainsHEVCNALType(sampleBuffer, nalType: 63)
 }
 
+/// Scans length-prefixed NAL units for any requested type.
 private func sampleBufferContainsHEVCNALType(
     _ sampleBuffer: CMSampleBuffer,
     nalType targetNALType: UInt8
@@ -137,6 +147,7 @@ private func sampleBufferContainsHEVCNALType(
     return false
 }
 
+/// Copies the contiguous or segmented compressed block buffer into `Data`.
 func compressedData(from sampleBuffer: CMSampleBuffer) -> Data? {
     guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
         return nil
@@ -150,6 +161,7 @@ func compressedData(from sampleBuffer: CMSampleBuffer) -> Data? {
     return data
 }
 
+/// Copies per-sample attachment dictionaries to a rebuilt sample buffer.
 func copySampleAttachments(from source: CMSampleBuffer, to destination: CMSampleBuffer) {
     guard let sourceArray = CMSampleBufferGetSampleAttachmentsArray(
         source,
@@ -170,6 +182,7 @@ func copySampleAttachments(from source: CMSampleBuffer, to destination: CMSample
     }
 }
 
+/// Inserts an RPU and optional static HDR SEI into one base-layer sample.
 func sampleBufferByInjectingHEVCRPU(
     _ sampleBuffer: CMSampleBuffer,
     rpuNALUnit: Data,
@@ -229,6 +242,7 @@ func sampleBufferByInjectingHEVCRPU(
     return try compressedSampleBuffer(output, using: sampleBuffer)
 }
 
+/// Combines base, enhancement, metadata, and required parameter sets into one sample.
 func sampleBufferByMuxingDolbyVisionProfile7(
     baseLayerSample: CMSampleBuffer,
     enhancementLayerSample: CMSampleBuffer,
@@ -289,8 +303,8 @@ func sampleBufferByMuxingDolbyVisionProfile7(
         output.append(hdr10SEINALUnit)
     }
 
-    // Match dovi_tool mux: every EL NAL except an RPU is nested behind an
-    // UNSPEC63 (0x7e01) header while preserving the complete original NAL.
+    // Each enhancement-layer NAL except metadata is nested behind an UNSPEC63
+    // (0x7e01) header while preserving the complete original NAL.
     if sampleBufferIsSync(enhancementLayerSample) {
         for parameterSet in hevcParameterSets(from: enhancementLayerSample) {
             var wrappedNALUnit = Data([0x7e, 0x01])
@@ -333,6 +347,7 @@ func sampleBufferByMuxingDolbyVisionProfile7(
     return try compressedSampleBuffer(output, using: baseLayerSample)
 }
 
+/// Rebuilds a compressed sample while preserving timing and attachments.
 private func compressedSampleBuffer(
     _ output: Data,
     using templateSampleBuffer: CMSampleBuffer
@@ -412,6 +427,7 @@ private func compressedSampleBuffer(
     return injectedSample
 }
 
+/// Builds one prefix SEI NAL containing available mastering and light-level messages.
 private func makeHEVCPrefixSEINALUnit(metadata: HEVCHDR10Metadata?) -> Data? {
     guard let metadata, metadata.hasAnyPayload else { return nil }
     var rbsp = Data()
@@ -430,6 +446,7 @@ private func makeHEVCPrefixSEINALUnit(metadata: HEVCHDR10Metadata?) -> Data? {
     return nalu
 }
 
+/// Derives enhancement-layer static HDR signaling from base metadata when valid.
 private func profile7EnhancementLayerHDR10Metadata(from metadata: HEVCHDR10Metadata?) -> HEVCHDR10Metadata? {
     guard let masteringDisplay = metadata?.masteringDisplayColorVolume,
           masteringDisplay.count == 24 else {
@@ -441,12 +458,14 @@ private func profile7EnhancementLayerHDR10Metadata(from metadata: HEVCHDR10Metad
     )
 }
 
+/// Appends one SEI payload type, size, and body to an RBSP buffer.
 private func appendSEIMessage(payloadType: Int, payload: Data, to rbsp: inout Data) {
     appendSEIEncodedInteger(payloadType, to: &rbsp)
     appendSEIEncodedInteger(payload.count, to: &rbsp)
     rbsp.append(payload)
 }
 
+/// Encodes an SEI type or size using repeated 255 bytes plus a remainder.
 private func appendSEIEncodedInteger(_ value: Int, to data: inout Data) {
     var remainder = value
     while remainder >= 255 {
@@ -456,6 +475,7 @@ private func appendSEIEncodedInteger(_ value: Int, to data: inout Data) {
     data.append(UInt8(remainder))
 }
 
+/// Inserts emulation-prevention bytes while converting RBSP to EBSP form.
 private func hevcEBSP(from rbsp: Data) -> Data {
     var output = Data()
     output.reserveCapacity(rbsp.count)
@@ -475,7 +495,7 @@ private func hevcEBSP(from rbsp: Data) -> Data {
     return output
 }
 
-// MARK: - Dolby Vision Profile 7.6 dual elementary-stream writer
+// MARK: - Profile 7.6 dual elementary-stream writer
 
 private enum HEVCBitstreamError: LocalizedError {
     case invalidData(String)
@@ -487,10 +507,12 @@ private enum HEVCBitstreamError: LocalizedError {
     }
 }
 
+/// Reads fixed-width and exponential-Golomb fields from an RBSP bit sequence.
 private struct HEVCBitReader {
     private let bytes: [UInt8]
     private var bitOffset = 0
 
+    /// Creates a reader positioned at the first bit.
     init(_ data: Data) {
         bytes = Array(data)
     }
@@ -503,6 +525,7 @@ private struct HEVCBitReader {
         bitCount - bitOffset
     }
 
+    /// Reads one bit and advances the cursor.
     mutating func readBit() throws -> Bool {
         guard bitOffset < bitCount else {
             throw HEVCBitstreamError.invalidData("Unexpected end of HEVC RBSP.")
@@ -513,6 +536,7 @@ private struct HEVCBitReader {
         return bit != 0
     }
 
+    /// Reads an unsigned fixed-width field up to 64 bits.
     mutating func readBits(_ count: Int) throws -> UInt64 {
         guard count >= 0, count <= 64, bitsRemaining >= count else {
             throw HEVCBitstreamError.invalidData("Could not read \(count) HEVC bits.")
@@ -524,6 +548,7 @@ private struct HEVCBitReader {
         return value
     }
 
+    /// Reads an unsigned exponential-Golomb value.
     mutating func readUE() throws -> UInt64 {
         var leadingZeroBits = 0
         while true {
@@ -545,6 +570,7 @@ private struct HEVCBitReader {
         return ((UInt64(1) << UInt64(leadingZeroBits)) - 1) + suffix
     }
 
+    /// Reads and unmaps a signed exponential-Golomb value.
     mutating func readSE() throws -> Int64 {
         let codeNum = try readUE()
         let magnitude = Int64((codeNum + 1) / 2)
@@ -552,11 +578,13 @@ private struct HEVCBitReader {
     }
 }
 
+/// Writes fixed-width and exponential-Golomb fields to an RBSP bit sequence.
 private struct HEVCBitWriter {
     private var bytes: [UInt8] = []
     private var currentByte: UInt8 = 0
     private var usedBits = 0
 
+    /// Appends one bit to the current byte.
     mutating func writeBit(_ bit: Bool) {
         if bit {
             currentByte |= UInt8(1 << (7 - usedBits))
@@ -569,6 +597,7 @@ private struct HEVCBitWriter {
         }
     }
 
+    /// Appends a fixed-width field most-significant bit first.
     mutating func writeBits(_ value: UInt64, count: Int) {
         guard count > 0 else { return }
         for index in stride(from: count - 1, through: 0, by: -1) {
@@ -576,6 +605,7 @@ private struct HEVCBitWriter {
         }
     }
 
+    /// Appends an unsigned exponential-Golomb value.
     mutating func writeUE(_ value: UInt64) {
         let codeNum = value + 1
         let bitWidth = max(1, 64 - codeNum.leadingZeroBitCount)
@@ -585,6 +615,7 @@ private struct HEVCBitWriter {
         writeBits(codeNum, count: bitWidth)
     }
 
+    /// Maps and appends a signed exponential-Golomb value.
     mutating func writeSE(_ value: Int64) {
         let codeNum: UInt64
         if value > 0 {
@@ -595,6 +626,7 @@ private struct HEVCBitWriter {
         writeUE(codeNum)
     }
 
+    /// Writes a one bit followed by zeros to reach a byte boundary.
     mutating func byteAlignWithOneBit() {
         writeBit(true)
         while usedBits != 0 {
@@ -602,10 +634,12 @@ private struct HEVCBitWriter {
         }
     }
 
+    /// Appends the required RBSP stop bit and alignment zeros.
     mutating func writeRBSPTrailingBits() {
         byteAlignWithOneBit()
     }
 
+    /// Returns the accumulated bytes.
     func data() -> Data {
         var output = bytes
         if usedBits > 0 {
@@ -615,6 +649,7 @@ private struct HEVCBitWriter {
     }
 }
 
+/// Removes emulation-prevention bytes from EBSP payload data.
 private func hevcRBSP(from ebsp: Data) -> Data {
     var output = Data()
     output.reserveCapacity(ebsp.count)
@@ -635,6 +670,7 @@ private func hevcRBSP(from ebsp: Data) -> Data {
 }
 
 @discardableResult
+/// Copies one bit from a reader to a writer and returns its value.
 private func hevcCopyBit(
     from reader: inout HEVCBitReader,
     to writer: inout HEVCBitWriter
@@ -645,6 +681,7 @@ private func hevcCopyBit(
 }
 
 @discardableResult
+/// Copies one fixed-width field and returns its value.
 private func hevcCopyBits(
     _ count: Int,
     from reader: inout HEVCBitReader,
@@ -656,6 +693,7 @@ private func hevcCopyBits(
 }
 
 @discardableResult
+/// Copies one unsigned exponential-Golomb field and returns its value.
 private func hevcCopyUE(
     from reader: inout HEVCBitReader,
     to writer: inout HEVCBitWriter
@@ -665,6 +703,7 @@ private func hevcCopyUE(
     return value
 }
 
+/// Copies one signed exponential-Golomb field and returns its value.
 private func hevcCopySE(
     from reader: inout HEVCBitReader,
     to writer: inout HEVCBitWriter
@@ -673,6 +712,7 @@ private func hevcCopySE(
     writer.writeSE(value)
 }
 
+/// Copies profile-tier-level syntax while preserving sub-layer signaling.
 private func hevcCopyProfileTierLevel(
     maxSubLayersMinus1: Int,
     from reader: inout HEVCBitReader,
@@ -717,6 +757,7 @@ private func hevcCopyProfileTierLevel(
     }
 }
 
+/// Copies scaling-list prediction and coefficient syntax.
 private func hevcCopyScalingListData(
     from reader: inout HEVCBitReader,
     to writer: inout HEVCBitWriter
@@ -742,6 +783,7 @@ private func hevcCopyScalingListData(
     }
 }
 
+/// Copies one short-term reference-picture-set and updates derived delta counts.
 private func hevcCopyShortTermRefPicSet(
     stRpsIndex: Int,
     numShortTermRefPicSets: Int,
@@ -793,16 +835,19 @@ private func hevcCopyShortTermRefPicSet(
     priorDeltaPOCCounts.append(negativePicCount + positivePicCount)
 }
 
+/// Converts frame-rate rational values to HEVC timing-info units.
 private func hevcTimingUnits(from fpsInfo: FramerateInfo) -> (numUnitsInTick: UInt32, timeScale: UInt32) {
     let numUnitsInTick = UInt32(max(fpsInfo.denominator, 1))
     let timeScale = UInt32(max(fpsInfo.numerator, 1))
     return (numUnitsInTick, timeScale)
 }
 
+/// Quantizes bitrate to the value stored by the selected HRD scale.
 private func hevcHRDBitRateValueMinus1(_ bitrateBitsPerSecond: Int) -> UInt64 {
     UInt64(max(1, Int((Double(max(bitrateBitsPerSecond, 1)) / 256.0).rounded())) - 1)
 }
 
+/// Writes fixed single-layer HRD timing and buffering parameters.
 private func hevcWriteHRDParameters(
     maxSubLayersMinus1: Int,
     bitrateBitsPerSecond: Int,
@@ -828,6 +873,7 @@ private func hevcWriteHRDParameters(
     }
 }
 
+/// Writes color, timing, and HRD VUI fields for the Profile 7 base layer.
 private func hevcWriteVUIParameters(
     fpsInfo: FramerateInfo,
     maxSubLayersMinus1: Int,
@@ -865,6 +911,7 @@ private func hevcWriteVUIParameters(
     writer.writeBit(false) // bitstream_restriction_flag
 }
 
+/// Rewrites VPS layer signaling and timing fields required by dual-layer output.
 private func hevcNALByPatchingProfile7VPS(_ nalu: Data, fpsInfo: FramerateInfo) throws -> Data {
     guard nalu.count > 2 else {
         throw HEVCBitstreamError.invalidData("Invalid HEVC VPS NAL unit.")
@@ -917,6 +964,7 @@ private func hevcNALByPatchingProfile7VPS(_ nalu: Data, fpsInfo: FramerateInfo) 
     return output
 }
 
+/// Rewrites SPS VUI and HRD fields while copying all other source syntax.
 private func hevcNALByPatchingProfile7SPS(
     _ nalu: Data,
     fpsInfo: FramerateInfo,
@@ -1022,6 +1070,7 @@ private func hevcNALByPatchingProfile7SPS(
     return output
 }
 
+/// Builds an access-unit delimiter with picture type derived from sync status.
 private func hevcProfile7AUDNALUnit(isSync: Bool) -> Data {
     var writer = HEVCBitWriter()
     writer.writeBits(isSync ? 0 : 1, count: 3)
@@ -1031,6 +1080,7 @@ private func hevcProfile7AUDNALUnit(isSync: Bool) -> Data {
     return nalu
 }
 
+/// Wraps one SEI message in a prefix SEI NAL unit.
 private func hevcSEINALUnit(payloadType: Int, payload: Data) -> Data {
     var rbsp = Data()
     appendSEIMessage(payloadType: payloadType, payload: payload, to: &rbsp)
@@ -1040,6 +1090,7 @@ private func hevcSEINALUnit(payloadType: Int, payload: Data) -> Data {
     return nalu
 }
 
+/// Builds buffering-period timing for a new elementary-stream sequence.
 private func hevcProfile7BufferingPeriodSEINALUnit(concatenationFlag: Bool) -> Data {
     var writer = HEVCBitWriter()
     writer.writeUE(0)
@@ -1052,6 +1103,7 @@ private func hevcProfile7BufferingPeriodSEINALUnit(concatenationFlag: Bool) -> D
     return hevcSEINALUnit(payloadType: 0, payload: writer.data())
 }
 
+/// Builds per-frame removal and output timing relative to the buffering period.
 private func hevcProfile7PictureTimingSEINALUnit(framesSinceBufferingPeriod: UInt64) -> Data {
     let removalDelayMinus1 = framesSinceBufferingPeriod == 0
         ? UInt64(0)
@@ -1063,6 +1115,7 @@ private func hevcProfile7PictureTimingSEINALUnit(framesSinceBufferingPeriod: UIn
     return hevcSEINALUnit(payloadType: 1, payload: writer.data())
 }
 
+/// Splits one compressed sample into validated NAL unit payloads.
 private func hevcLengthPrefixedNALUnits(from sampleBuffer: CMSampleBuffer) throws -> [Data] {
     guard let data = compressedData(from: sampleBuffer) else {
         throw HEVCBitstreamError.invalidData("Could not read HEVC sample data.")
@@ -1085,11 +1138,13 @@ private func hevcLengthPrefixedNALUnits(from sampleBuffer: CMSampleBuffer) throw
     return nalUnits
 }
 
+/// Appends a four-byte start code followed by one NAL unit.
 private func appendAnnexBNALUnit(_ nalu: Data, to output: inout Data) {
     output.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
     output.append(nalu)
 }
 
+/// Writes synchronized base-layer and enhancement-layer Annex B elementary streams.
 final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
     let baseLayerURL: URL
     let enhancementLayerURL: URL
@@ -1103,6 +1158,7 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
     private var framesSinceBufferingPeriod: UInt64 = 0
     private var isClosed = false
 
+    /// Derives deterministic BL and EL filenames from the requested movie output.
     static func outputURLs(for outputURL: URL) -> (baseLayerURL: URL, enhancementLayerURL: URL) {
         let directory = outputURL.deletingLastPathComponent()
         let basename = outputURL.deletingPathExtension().lastPathComponent
@@ -1112,6 +1168,7 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         )
     }
 
+    /// Creates both output files and derives timing/bitrate state.
     init(outputURL: URL, fpsInfo: FramerateInfo, totalBitrateMbps: Double) throws {
         let urls = Self.outputURLs(for: outputURL)
         baseLayerURL = urls.baseLayerURL
@@ -1133,10 +1190,12 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         enhancementLayerHandle = try FileHandle(forWritingTo: enhancementLayerURL)
     }
 
+    /// Closes file handles if `finish()` was not reached.
     deinit {
         try? finish()
     }
 
+    /// Writes one synchronized access unit to each elementary stream.
     func write(frame: DolbyVisionProfile7EncodedFrame, hdr10Metadata: HEVCHDR10Metadata?) throws {
         let isSync = sampleBufferIsSync(frame.baseLayerSample)
         let framesSinceBPForPicture = isSync ? 0 : framesSinceBufferingPeriod + 1
@@ -1172,6 +1231,7 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         frameIndex += 1
     }
 
+    /// Synchronizes and closes both files, surfacing deferred I/O errors.
     func finish() throws {
         guard !isClosed else { return }
         isClosed = true
@@ -1181,6 +1241,7 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         enhancementLayerHandle.closeFile()
     }
 
+    /// Builds one Annex B access unit with patched headers and timing SEI messages.
     private func makeAccessUnit(
         sample: CMSampleBuffer,
         isSync: Bool,
@@ -1253,7 +1314,9 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
     }
 }
 
+/// Helpers for propagating the first Core Media status failure.
 private extension OSStatus {
+    /// Executes the next operation only when the receiver is `noErr`.
     func flatMapNoErr(_ body: () -> OSStatus) -> OSStatus {
         self == noErr ? body() : self
     }

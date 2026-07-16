@@ -1,5 +1,5 @@
-// mxf_op1a_enc.cpp — MXF OP-1a encoder (extracted from mxf_enc.cpp, unchanged logic)
-// References: SMPTE 377-1:2011, SMPTE RDD-36
+// Writes frame-wrapped MXF OP-1a video and audio essence.
+// Implements SMPTE 377-1:2011 and SMPTE RDD-36.
 
 #include "../include/mxf_common.h"
 
@@ -10,18 +10,28 @@ namespace mxf {
 // ============================================================
 class Op1aEncoder final : public EncoderImpl {
 public:
+    // Creates an idle frame-wrapped writer.
     Op1aEncoder() = default;
+    // Finalizes an active stream before destruction.
     ~Op1aEncoder() override { if(phase_ == Phase::Streaming) close(); }
 
+    // Writes header metadata and starts the interleaved body partition.
     bool open(const std::string& path, const Config& cfg) override;
+    // Writes one system item followed by video and audio essence KLVs.
     bool writeFrame(const uint8_t* video, size_t videoSize,
                     const std::vector<const uint8_t*>& audio,
                     const std::vector<size_t>& audioSizes) override;
+    // Writes index/footer/RIP data and patches all preceding partitions.
     bool close() override;
+    // Returns the number of accepted edit units.
     int64_t frameCount() const override { return nb_frames_; }
+    // Reports whether edit units can still be written.
     bool isOpen() const override { return phase_ == Phase::Streaming; }
+    // Returns the most recent writer error.
     const std::string& lastError() const override { return error_; }
+    // Returns the active output path.
     const std::string& filePath() const override { return path_; }
+    // Returns the source-package UMID written in header metadata.
     const UMID32& sourcePackageUMID() const override { return srcUMID_; }
 
 private:
@@ -48,6 +58,7 @@ private:
     bool has_audio_ = false;
 };
 
+// Validates configuration, builds metadata, and starts the body partition.
 bool Op1aEncoder::open(const std::string& path, const Config& cfg) {
     if(phase_ != Phase::Init) { error_ = "open: already in use"; return false; }
     if(cfg.fpsNum <= 0 || cfg.fpsDen <= 0) { error_ = "open: invalid frame rate"; return false; }
@@ -119,7 +130,7 @@ bool Op1aEncoder::open(const std::string& path, const Config& cfg) {
           if(sl!=std::string::npos) basename=path.substr(sl+1,(dot>sl?dot-sl-1:std::string::npos));
           else basename=(dot!=std::string::npos)?path.substr(0,dot):path; }
 
-        // OP-1a metadata in a broad interoperability order
+        // Write OP-1a metadata sets in reference order.
         append(mk_preface(prefUID,identUID,csUID,opPat,ess_containers_));
         append(mk_content_storage(csUID,{matPkgU,srcPkgU},{ecUID}));
 
@@ -200,6 +211,7 @@ bool Op1aEncoder::open(const std::string& path, const Config& cfg) {
     }
 }
 
+// Writes one interleaved edit unit and records offsets used by the VBR index.
 bool Op1aEncoder::writeFrame(const uint8_t* video, size_t vsz,
     const std::vector<const uint8_t*>& audio, const std::vector<size_t>& asz)
 {
@@ -233,6 +245,7 @@ bool Op1aEncoder::writeFrame(const uint8_t* video, size_t vsz,
     } catch(const std::exception& ex) { error_ = ex.what(); return false; }
 }
 
+// Writes index segments, footer and RIP, then patches preceding partitions.
 bool Op1aEncoder::close() {
     if(phase_ != Phase::Streaming) { error_ = "close: not streaming"; return false; }
     try {
@@ -301,7 +314,7 @@ bool Op1aEncoder::close() {
     }
 }
 
-// Factory function (called from mxf_enc.cpp dispatcher)
+// Factory used by the MXF dispatcher.
 std::unique_ptr<EncoderImpl> createOp1aEncoder() {
     return std::make_unique<Op1aEncoder>();
 }

@@ -1,8 +1,6 @@
-// mxf_enc.h — MXF OP-1a / OP-Atom encoder (standards-oriented architecture)
-// Consolidated from NativeMXF_impl.h + MXFStreamWriter.h/.cpp
-// References: SMPTE 377-1:2011, SMPTE RDD-36
-//
-// Architecture: single context-based encoder with three-phase write.
+// Declares the MXF OP-1a and OP-Atom encoder interface.
+// Implements structures defined by SMPTE 377-1:2011 and SMPTE RDD-36.
+// The encoder uses a three-phase write sequence.
 //   Phase 1: open()       — write header partition + primer + metadata + body partition
 //   Phase 2: writeFrame() — per-frame system item + essence KLVs
 //   Phase 3: close()      — index table + footer + patch header as ClosedComplete + RIP
@@ -68,8 +66,11 @@ struct Config {
 // ---- MXF Encoder (context-based writer) ----
 class Encoder {
 public:
+    /// Creates an encoder without opening an output file.
     Encoder();
+    /// Finalizes an active writer before releasing its context.
     ~Encoder();
+    /// Prevents two encoder objects from owning the same writer context.
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
 
@@ -90,9 +91,13 @@ public:
     /// Phase 3: Write index table + footer + patch header + RIP.
     bool close();
 
+    /// Number of edit units accepted by the current writer.
     int64_t frameCount() const;
+    /// Whether the current writer is accepting edit units.
     bool isOpen() const;
+    /// Most recent error reported by the current writer.
     const std::string& lastError() const;
+    /// Path of the current output file.
     const std::string& filePath() const;
 
     /// 32-byte UMID of the Source Package written into the MXF.
@@ -105,10 +110,12 @@ private:
 };
 
 // ---- SMPTE audio cadence helpers ----
+/// Audio samples assigned to one video edit unit.
 int samplesForFrame(int64_t frameIdx, int fpsNum, int fpsDen, int sampleRate);
+/// Total audio samples assigned to a video frame range.
 int64_t totalSamplesForFrames(int64_t nFrames, int fpsNum, int fpsDen, int sampleRate);
 
-// ---- Color UL constants (used by DirectProResEncoder) ----
+// ---- Color UL constants shared with the Swift encoding pipeline ----
 extern const UL16 COLOR_PRIMARIES_BT709;
 extern const UL16 COLOR_PRIMARIES_BT2020;
 extern const UL16 COLOR_PRIMARIES_P3D65;

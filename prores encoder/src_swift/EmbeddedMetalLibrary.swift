@@ -1,9 +1,11 @@
-// EmbeddedMetalLibrary.swift - standalone Metal kernel fallback
+// Compiles embedded GPU kernels when a packaged Metal library is unavailable.
 
 import Foundation
 import Metal
 
+/// Resolves required GPU functions and compiles the embedded source when needed.
 enum EmbeddedMetalLibrary {
+    /// Returns the first library containing every required function.
     static func load(
         device: MTLDevice,
         bundle: Bundle,
@@ -39,6 +41,7 @@ enum EmbeddedMetalLibrary {
         return nil
     }
 
+    /// Compiles the concatenated color and analysis kernels at runtime.
     private static func makeEmbeddedLibrary(device: MTLDevice) -> MTLLibrary? {
         let options = MTLCompileOptions()
         options.fastMathEnabled = true
@@ -52,6 +55,7 @@ enum EmbeddedMetalLibrary {
 #include <metal_stdlib>
 using namespace metal;
 
+// CPU-mirrored parameters for color conversion and LUT sampling.
 struct ColorUniforms {
     float4 matrix0;
     float4 matrix1;
@@ -66,6 +70,14 @@ struct ColorUniforms {
     uint gamutLimitMode;
     float4 inputLuma;
     float4 outputLuma;
+    float4 lut1DMin;
+    float4 lut1DScale;
+    float4 lut3DMin;
+    float4 lut3DScale;
+    uint hasLUT1D;
+    uint hasLUT3D;
+    uint reserved0;
+    uint reserved1;
 };
 
 constant float PQ_M1 = 0.25f * 2610.0f / 4096.0f;
@@ -80,12 +92,14 @@ constant float HLG_B = 0.07116723f;
 constant float HLG_C = 0.80782559f;
 constant float HLG_E_BREAK = 0.25f;
 
+// Returns luma coefficients for the supported YCbCr matrix identifier.
 inline float3 luma_coefficients(uint matrixID) {
     return matrixID == 0
         ? float3(0.2126f, 0.7152f, 0.0722f)
         : float3(0.2627f, 0.6780f, 0.0593f);
 }
 
+// Reconstructs encoded RGB from normalized YCbCr components.
 inline float3 ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     const float3 k = luma_coefficients(matrixID);
     const float kr = k.r;
@@ -97,6 +111,7 @@ inline float3 ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     return float3(r, g, b);
 }
 
+// Converts encoded RGB to normalized luma and chroma components.
 inline float3 rgb_to_ycbcr(float3 rgb, uint matrixID) {
     const float3 k = luma_coefficients(matrixID);
     const float y = dot(k, rgb);
@@ -105,6 +120,7 @@ inline float3 rgb_to_ycbcr(float3 rgb, uint matrixID) {
     return float3(y, cb, cr);
 }
 
+// Converts normalized PQ values to absolute luminance in nits.
 inline float3 pq_to_nits(float3 signal) {
     const float3 x = pow(max(signal, 0.0f), float3(1.0f / PQ_M2));
     const float3 numerator = max(x - PQ_C1, 0.0f);
@@ -112,6 +128,7 @@ inline float3 pq_to_nits(float3 signal) {
     return 10000.0f * pow(numerator / denominator, float3(1.0f / PQ_M1));
 }
 
+// Converts absolute luminance to normalized PQ values.
 inline float3 nits_to_pq(float3 nits) {
     const float3 l = max(nits, 0.0f) / 10000.0f;
     const float3 y = pow(l, float3(PQ_M1));
@@ -119,6 +136,7 @@ inline float3 nits_to_pq(float3 nits) {
     return pow(max(ratio, 0.0f), float3(PQ_M2));
 }
 
+// Applies the inverse HLG opto-electronic transfer to one channel.
 inline float hlg_inverse_scalar(float value) {
     const float ePrime = max(value, 0.0f);
     return ePrime < 0.5f
@@ -126,6 +144,7 @@ inline float hlg_inverse_scalar(float value) {
         : HLG_B + exp((ePrime - HLG_C) / HLG_A);
 }
 
+// Applies the HLG opto-electronic transfer to one channel.
 inline float hlg_oetf_scalar(float value) {
     const float e = max(value, 0.0f);
     return e < HLG_E_BREAK
@@ -133,6 +152,7 @@ inline float hlg_oetf_scalar(float value) {
         : HLG_A * log(max(e - HLG_B, 1.0e-7f)) + HLG_C;
 }
 
+// Converts HLG signal values to display-referred luminance.
 inline float3 hlg_to_nits(float3 signal, float peakNits, float3 lumaCoefficients) {
     float3 scene = float3(
         hlg_inverse_scalar(signal.r),
@@ -145,6 +165,7 @@ inline float3 hlg_to_nits(float3 signal, float peakNits, float3 lumaCoefficients
     return displayScaled * (peakNits / pow(HLG_E_MAX, gamma));
 }
 
+// Converts display-referred luminance to HLG signal values.
 inline float3 nits_to_hlg(float3 nits, float peakNits, float3 lumaCoefficients) {
     const float gamma = 1.2f + 0.42f * log10(max(peakNits, 1.0f) / 1000.0f);
     float3 displayScaled = max(nits, 0.0f) * (pow(HLG_E_MAX, gamma) / max(peakNits, 1.0f));
@@ -157,6 +178,7 @@ inline float3 nits_to_hlg(float3 nits, float peakNits, float3 lumaCoefficients) 
     );
 }
 
+// Decodes the selected input transfer function to absolute luminance.
 inline float3 decode_transfer(float3 signal, constant ColorUniforms &u) {
     switch (u.inputTransfer) {
         case 0:
@@ -172,6 +194,7 @@ inline float3 decode_transfer(float3 signal, constant ColorUniforms &u) {
     }
 }
 
+// Encodes absolute luminance with the selected output transfer function.
 inline float3 encode_transfer(float3 nits, constant ColorUniforms &u) {
     switch (u.outputTransfer) {
         case 0:
@@ -187,12 +210,14 @@ inline float3 encode_transfer(float3 nits, constant ColorUniforms &u) {
     }
 }
 
+// Applies the source-to-target linear RGB matrix.
 inline float3 apply_matrix(float3 rgb, constant ColorUniforms &u) {
     return u.matrix0.xyz * rgb.r
         + u.matrix1.xyz * rgb.g
         + u.matrix2.xyz * rgb.b;
 }
 
+// Compresses one luminance value from a higher source peak to a lower target peak.
 inline float bt2446a_forward(float nits, float sourcePeak, float targetPeak) {
     const float phdr = 1.0f + 32.0f * pow(sourcePeak / 10000.0f, 1.0f / 2.4f);
     const float psdr = 1.0f + 32.0f * pow(targetPeak / 10000.0f, 1.0f / 2.4f);
@@ -211,6 +236,7 @@ inline float bt2446a_forward(float nits, float sourcePeak, float targetPeak) {
     return targetPeak * pow(max(x, 0.0f), 2.4f);
 }
 
+// Evaluates the unnormalized inverse expansion curve.
 inline float bt2446a_inverse_raw(float nits, float sourcePeak, float targetPeak) {
     float x = pow(clamp(nits / sourcePeak, 0.0f, 1.0f), 1.0f / 2.4f);
     x *= 255.0f;
@@ -221,12 +247,14 @@ inline float bt2446a_inverse_raw(float nits, float sourcePeak, float targetPeak)
     return targetPeak * pow(x / 1000.0f, 2.4f);
 }
 
+// Expands one luminance value and normalizes the endpoint to the target peak.
 inline float bt2446a_inverse(float nits, float sourcePeak, float targetPeak) {
     const float endpoint = bt2446a_inverse_raw(sourcePeak, sourcePeak, targetPeak);
     return bt2446a_inverse_raw(nits, sourcePeak, targetPeak)
         * (targetPeak / max(endpoint, 1.0e-6f));
 }
 
+// Maps luminance between unequal mastering peaks while preserving RGB ratios.
 inline float3 tone_map(float3 rgb, constant ColorUniforms &u) {
     const float sourcePeak = max(u.sourcePeakNits, 1.0f);
     const float targetPeak = max(u.targetPeakNits, 1.0f);
@@ -251,6 +279,7 @@ inline float3 tone_map(float3 rgb, constant ColorUniforms &u) {
     return rgb * scale;
 }
 
+// Reduces out-of-range chroma around target-gamut luminance.
 inline float3 gamut_compress(float3 rgb, constant ColorUniforms &u) {
     const float peak = max(u.targetPeakNits, 1.0f);
     const float luma = clamp(dot(u.outputLuma.xyz, rgb), 0.0f, peak);
@@ -272,6 +301,7 @@ inline float3 gamut_compress(float3 rgb, constant ColorUniforms &u) {
     return clamp(float3(luma) + chroma * scale, 0.0f, peak);
 }
 
+// Applies the same chroma compression with explicit luma coefficients.
 inline float3 gamut_compress_with_luma(float3 rgb, float3 lumaCoefficients, float peak) {
     const float luma = clamp(dot(lumaCoefficients, rgb), 0.0f, peak);
     const float3 chroma = rgb - luma;
@@ -292,6 +322,7 @@ inline float3 gamut_compress_with_luma(float3 rgb, float3 lumaCoefficients, floa
     return clamp(float3(luma) + chroma * scale, 0.0f, peak);
 }
 
+// Compresses Rec.2020 values through P3-D65 and converts them back for tagging.
 inline float3 limit_rec2020_to_p3d65(float3 rec2020, float peak) {
     // D65-adapted linear-light matrices derived from the same Rec.2020 and
     // P3-D65 RGB-to-XYZ matrices used by ColorTransform.swift.
@@ -312,6 +343,60 @@ inline float3 limit_rec2020_to_p3d65(float3 rec2020, float peak) {
     return clamp(limited, 0.0f, peak);
 }
 
+// Normalized linear sampler used by both LUT dimensions.
+constexpr sampler lut_sampler(
+    coord::normalized,
+    address::clamp_to_edge,
+    filter::linear
+);
+
+// Applies per-channel 1D sampling with domain and texel-center correction.
+inline float3 apply_1d_lut(
+    float3 rgb,
+    texture2d<float, access::sample> lut,
+    constant ColorUniforms &u
+) {
+    if (u.hasLUT1D == 0) {
+        return rgb;
+    }
+    const float3 normalized = clamp(
+        (rgb - u.lut1DMin.xyz) * u.lut1DScale.xyz,
+        float3(0.0f),
+        float3(1.0f)
+    );
+    const float width = float(lut.get_width());
+    const float3 coordinate = (normalized * (width - 1.0f) + 0.5f) / width;
+    return float3(
+        lut.sample(lut_sampler, float2(coordinate.r, 0.5f)).r,
+        lut.sample(lut_sampler, float2(coordinate.g, 0.5f)).g,
+        lut.sample(lut_sampler, float2(coordinate.b, 0.5f)).b
+    );
+}
+
+// Applies trilinear 3D sampling with domain and texel-center correction.
+inline float3 apply_3d_lut(
+    float3 rgb,
+    texture3d<float, access::sample> lut,
+    constant ColorUniforms &u
+) {
+    if (u.hasLUT3D == 0) {
+        return rgb;
+    }
+    const float3 normalized = clamp(
+        (rgb - u.lut3DMin.xyz) * u.lut3DScale.xyz,
+        float3(0.0f),
+        float3(1.0f)
+    );
+    const float3 dimensions = float3(
+        float(lut.get_width()),
+        float(lut.get_height()),
+        float(lut.get_depth())
+    );
+    const float3 coordinate = (normalized * (dimensions - 1.0f) + 0.5f) / dimensions;
+    return lut.sample(lut_sampler, coordinate).rgb;
+}
+
+// Reconstructs encoded RGB and decodes transfer only for direct mapping mode.
 kernel void color_decode_yuv(
     texture2d<float, access::read> sourceY [[texture(0)]],
     texture2d<float, access::read> sourceUV [[texture(1)]],
@@ -329,10 +414,12 @@ kernel void color_decode_yuv(
     const float cb = (rawUV.r * 1023.0f - 512.0f) / 896.0f;
     const float cr = (rawUV.g * 1023.0f - 512.0f) / 896.0f;
     const float3 signal = ycbcr_to_rgb(y, cb, cr, u.inputYCbCrMatrix);
-    const float3 nits = decode_transfer(signal, u);
-    linearOutput.write(half4(half3(nits), half(1.0f)), gid);
+    const bool lutMode = u.hasLUT1D != 0 || u.hasLUT3D != 0;
+    const float3 workingRGB = lutMode ? signal : decode_transfer(signal, u);
+    linearOutput.write(half4(half3(workingRGB), half(1.0f)), gid);
 }
 
+// Reads BGRA source pixels and decodes transfer only for direct mapping mode.
 kernel void color_decode_bgra(
     texture2d<float, access::read> source [[texture(0)]],
     texture2d<half, access::write> linearOutput [[texture(1)]],
@@ -343,12 +430,17 @@ kernel void color_decode_bgra(
         return;
     }
     const float4 pixel = source.read(gid);
-    linearOutput.write(half4(half3(decode_transfer(pixel.rgb, u)), half(pixel.a)), gid);
+    const bool lutMode = u.hasLUT1D != 0 || u.hasLUT3D != 0;
+    const float3 workingRGB = lutMode ? pixel.rgb : decode_transfer(pixel.rgb, u);
+    linearOutput.write(half4(half3(workingRGB), half(pixel.a)), gid);
 }
 
+// Runs LUT burn-in on encoded RGB or the complete direct linear-light transform.
 kernel void color_transform_linear(
     texture2d<half, access::read> linearInput [[texture(0)]],
     texture2d<half, access::write> encodedOutput [[texture(1)]],
+    texture2d<float, access::sample> lut1D [[texture(2)]],
+    texture3d<float, access::sample> lut3D [[texture(3)]],
     constant ColorUniforms &u [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
@@ -356,15 +448,25 @@ kernel void color_transform_linear(
         return;
     }
     const float4 source = float4(linearInput.read(gid));
-    float3 rgb = apply_matrix(source.rgb, u);
-    rgb = tone_map(rgb, u);
-    rgb = u.gamutLimitMode == 1
-        ? limit_rec2020_to_p3d65(rgb, max(u.targetPeakNits, 1.0f))
-        : gamut_compress(rgb, u);
-    rgb = encode_transfer(rgb, u);
+    const bool lutMode = u.hasLUT1D != 0 || u.hasLUT3D != 0;
+    float3 rgb;
+    if (lutMode) {
+        // LUT target options describe the table output; the table consumes
+        // encoded RGB reconstructed from the source sample.
+        rgb = apply_1d_lut(source.rgb, lut1D, u);
+        rgb = apply_3d_lut(rgb, lut3D, u);
+    } else {
+        rgb = apply_matrix(source.rgb, u);
+        rgb = tone_map(rgb, u);
+        rgb = u.gamutLimitMode == 1
+            ? limit_rec2020_to_p3d65(rgb, max(u.targetPeakNits, 1.0f))
+            : gamut_compress(rgb, u);
+        rgb = encode_transfer(rgb, u);
+    }
     encodedOutput.write(half4(half3(clamp(rgb, 0.0f, 1.0f)), half(source.a)), gid);
 }
 
+// Writes video-range 10-bit luma from output encoded RGB.
 kernel void color_pack_y(
     texture2d<half, access::read> encodedInput [[texture(0)]],
     texture2d<float, access::write> outputY [[texture(1)]],
@@ -380,6 +482,7 @@ kernel void color_pack_y(
     outputY.write(float4(code, 0.0f, 0.0f, 1.0f), gid);
 }
 
+// Averages encoded RGB over the output chroma footprint and writes CbCr.
 kernel void color_pack_uv(
     texture2d<half, access::read> encodedInput [[texture(0)]],
     texture2d<float, access::write> outputUV [[texture(1)]],
@@ -409,6 +512,7 @@ kernel void color_pack_uv(
     outputUV.write(float4(cbCode, crCode, 0.0f, 1.0f), gid);
 }
 
+// Writes output encoded RGB to a BGRA-compatible texture.
 kernel void color_pack_bgra(
     texture2d<half, access::read> encodedInput [[texture(0)]],
     texture2d<float, access::write> output [[texture(1)]],
@@ -431,6 +535,7 @@ constant uint CMU_HISTOGRAM_BINS = 4096;
 constant float CMU_LOG_MAX = 13.2878566f; // log2(10001)
 constant float CMU_EXTREMA_SCALE = 1000.0f;
 
+// Image geometry and color interpretation for one analysis dispatch.
 struct CMUUniforms {
     uint width;
     uint height;
@@ -439,17 +544,20 @@ struct CMUUniforms {
     float4 lumaCoefficients;
 };
 
+// Per-workgroup sums reduced after GPU completion.
 struct CMUPartialStats {
     float4 sums0; // luma, red, green, blue
     float4 sums1; // saturation, count, reserved, reserved
 };
 
+// Returns luma coefficients for the supported YCbCr matrix identifier.
 inline float3 cmu_luma_coefficients(uint matrixID) {
     return matrixID == 0
         ? float3(0.2126f, 0.7152f, 0.0722f)
         : float3(0.2627f, 0.6780f, 0.0593f);
 }
 
+// Reconstructs encoded RGB from normalized YCbCr components.
 inline float3 cmu_ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     const float3 k = cmu_luma_coefficients(matrixID);
     const float r = y + 2.0f * (1.0f - k.r) * cr;
@@ -458,6 +566,7 @@ inline float3 cmu_ycbcr_to_rgb(float y, float cb, float cr, uint matrixID) {
     return float3(r, g, b);
 }
 
+// Converts normalized PQ code values to absolute luminance in nits.
 inline float3 cmu_pq_to_nits(float3 signal) {
     constexpr float m1 = 2610.0f / 16384.0f;
     constexpr float m2 = 2523.0f / 32.0f;
@@ -470,6 +579,7 @@ inline float3 cmu_pq_to_nits(float3 signal) {
     return 10000.0f * pow(numerator / denominator, float3(1.0f / m1));
 }
 
+// Accumulates extrema, a log-luminance histogram, and workgroup channel sums.
 kernel void cmu_analyze_yuv(
     texture2d<float, access::read> sourceY [[texture(0)]],
     texture2d<float, access::read> sourceUV [[texture(1)]],
@@ -572,6 +682,7 @@ kernel void cmu_analyze_yuv(
     }
 }
 
+// Averages each 2x2 luma residual into the half-resolution enhancement layer.
 kernel void p7_make_luma_residual(
     texture2d<float, access::read> sourceY [[texture(0)]],
     texture2d<float, access::read> reconstructedY [[texture(1)]],
@@ -598,6 +709,7 @@ kernel void p7_make_luma_residual(
     enhancementY.write(float4(enhancementCode / 1023.0f), position);
 }
 
+// Averages each 2x2 chroma residual into the enhancement-layer UV plane.
 kernel void p7_make_chroma_residual(
     texture2d<float, access::read> sourceUV [[texture(0)]],
     texture2d<float, access::read> reconstructedUV [[texture(1)]],
@@ -631,7 +743,9 @@ kernel void p7_make_chroma_residual(
 """#
 }
 
+/// Function-availability checks used when selecting a kernel library.
 private extension MTLLibrary {
+    /// Returns true only when every requested function can be resolved.
     func hasMetalFunctions(_ names: [String]) -> Bool {
         names.allSatisfy { makeFunction(name: $0) != nil }
     }

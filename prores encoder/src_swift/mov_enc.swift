@@ -1,13 +1,6 @@
-// mov_enc.swift — MOV container writer using AVAssetWriter
-// Handles:
-//  - Video pump driven by VideoFrameSource (VT encoded or passthrough)
-//  - Audio passthrough pump
-//  - Extra external audio pump
-//  - Timecode & metadata passthrough pumps
-//  - Concurrent pump coordination via TaskGroup
-//
-// Memory model: dispatch-queue-per-track, one sample at a time,
-// autoreleasepool per iteration — safe for 4 h+ files.
+// Writes MOV video, audio, timecode, and timed metadata tracks.
+// Track pumps process one sample at a time and coordinate completion through
+// structured concurrency.
 
 import Foundation
 @preconcurrency import AVFoundation
@@ -21,9 +14,10 @@ private let sparselyInterleavedWithMainMediaDataLocation = AVAssetWriterInput.Me
 
 // MARK: - Sendable Utility Wrappers
 
-/// Wraps a non-Sendable value for safe transfer across isolation boundaries.
+/// Wraps a non-Sendable value for transfer across isolation boundaries.
 final class SendableRef<T>: @unchecked Sendable {
     let value: T
+    /// Retains a value whose thread-transfer contract is enforced by its owner.
     init(_ v: T) { value = v }
 }
 
@@ -31,20 +25,25 @@ final class SendableRef<T>: @unchecked Sendable {
 final class MediaPumpPair: @unchecked Sendable {
     let input:  AVAssetWriterInput
     let output: AVAssetReaderOutput
+    /// Pairs one reader output with its destination writer input.
     init(input: AVAssetWriterInput, output: AVAssetReaderOutput) {
         self.input  = input; self.output = output
     }
 }
 
+/// Pull-based source supplying audio format and timestamped sample buffers.
 private protocol AudioSampleBufferSource: AnyObject {
     var formatDescription: CMAudioFormatDescription { get }
+    /// Returns the next sample or nil after the source is exhausted.
     func copyNextSampleBuffer() throws -> CMSampleBuffer?
 }
 
+/// Pairs a pull-based audio source with its writer input.
 private final class AudioSampleSourcePumpPair: @unchecked Sendable {
     let input: AVAssetWriterInput
     let source: any AudioSampleBufferSource
 
+    /// Stores the source and destination used by an audio pump.
     init(input: AVAssetWriterInput, source: any AudioSampleBufferSource) {
         self.input = input
         self.source = source
@@ -57,6 +56,7 @@ final class TimedMetadataPumpPair: @unchecked Sendable {
     let writerAdaptor: AVAssetWriterInputMetadataAdaptor
     let readerAdaptor: AVAssetReaderOutputMetadataAdaptor
 
+    /// Pairs metadata reader/writer adaptors with the underlying writer input.
     init(
         input: AVAssetWriterInput,
         writerAdaptor: AVAssetWriterInputMetadataAdaptor,
@@ -68,6 +68,7 @@ final class TimedMetadataPumpPair: @unchecked Sendable {
     }
 }
 
+/// Reads compressed or PCM audio packets directly from an audio file.
 private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked Sendable {
     let formatDescription: CMAudioFormatDescription
 
@@ -77,6 +78,7 @@ private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked S
     private let sampleRateTimescale: CMTimeScale
     private var packetIndex: Int64 = 0
 
+    /// Opens the file, derives packet timing, and creates the sample format description.
     init(url: URL) throws {
         var openedFile: AudioFileID?
         let openStatus = AudioFileOpenURL(
@@ -189,12 +191,14 @@ private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked S
         }
     }
 
+    /// Closes the audio file handle.
     deinit {
         if let audioFile {
             AudioFileClose(audioFile)
         }
     }
 
+    /// Reads one packet batch and wraps it with monotonically increasing timing.
     func copyNextSampleBuffer() throws -> CMSampleBuffer? {
         guard let audioFile else { return nil }
 
@@ -317,6 +321,7 @@ private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked S
         return sampleBuffer
     }
 
+    /// Reads an arbitrary audio-file property into owned data.
     private static func propertyData(
         audioFile: AudioFileID,
         propertyID: AudioFilePropertyID
@@ -365,6 +370,7 @@ private final class AudioFilePacketSource: AudioSampleBufferSource, @unchecked S
     }
 }
 
+/// Decodes an audio file to interleaved 32-bit float PCM sample buffers.
 private final class AVAudioFilePCMSource: AudioSampleBufferSource, @unchecked Sendable {
     let formatDescription: CMAudioFormatDescription
 
@@ -374,6 +380,7 @@ private final class AVAudioFilePCMSource: AudioSampleBufferSource, @unchecked Se
     private let sampleRateTimescale: CMTimeScale
     private var frameIndex: AVAudioFramePosition = 0
 
+    /// Opens the file and configures its float PCM processing format.
     init(url: URL) throws {
         audioFile = try AVAudioFile(
             forReading: url,
@@ -426,6 +433,7 @@ private final class AVAudioFilePCMSource: AudioSampleBufferSource, @unchecked Se
         sampleRateTimescale = CMTimeScale(format.sampleRate.rounded())
     }
 
+    /// Reads one PCM block and assigns continuous sample-rate timing.
     func copyNextSampleBuffer() throws -> CMSampleBuffer? {
         guard let pcmBuffer = AVAudioPCMBuffer(
             pcmFormat: format,
@@ -537,6 +545,7 @@ final class SyntheticTimecodePumpPair: @unchecked Sendable {
     let input: AVAssetWriterInput
     let sampleBuffer: CMSampleBuffer
 
+    /// Stores the prebuilt timecode sample and destination input.
     init(input: AVAssetWriterInput, sampleBuffer: CMSampleBuffer) {
         self.input = input
         self.sampleBuffer = sampleBuffer
@@ -550,6 +559,7 @@ private final class DolbyVisionMetadataPumpPair: @unchecked Sendable {
     let metadata: DolbyVisionMetadataSource
     let fpsInfo: FramerateInfo
 
+    /// Stores source metadata, writer adaptor, timing, and expected frame rate.
     init(
         input: AVAssetWriterInput,
         writerAdaptor: AVAssetWriterInputMetadataAdaptor,
@@ -567,6 +577,7 @@ private final class DolbyVisionMetadataPumpPair: @unchecked Sendable {
 final class OnceGuard: @unchecked Sendable {
     private let lock = NSLock()
     private var fired = false
+    /// Returns true to the first caller and false to every later caller.
     func claim() -> Bool {
         lock.lock(); defer { lock.unlock() }
         if fired { return false }
@@ -574,10 +585,12 @@ final class OnceGuard: @unchecked Sendable {
     }
 }
 
+/// Allocates monotonically increasing metadata frame indices under a lock.
 private final class DolbyVisionFrameCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
 
+    /// Returns the next index below `limit`, or nil after exhaustion.
     func next(limit: Int) -> Int? {
         lock.lock()
         defer { lock.unlock() }
@@ -588,10 +601,12 @@ private final class DolbyVisionFrameCounter: @unchecked Sendable {
     }
 }
 
+/// Stores the first error reported by concurrent pipeline tasks.
 final class PipelineFailureBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Error?
 
+    /// Records an error only when no earlier failure has been stored.
     func store(_ error: Error) {
         lock.lock()
         if stored == nil { stored = error }
@@ -605,15 +620,17 @@ final class PipelineFailureBox: @unchecked Sendable {
     }
 }
 
-/// Thread-safe terminal progress bar.
+/// Serializes terminal progress updates from concurrent callers.
 final class ProgressBar: @unchecked Sendable {
     private let lock = NSLock()
     private var current = 0
     private let total: Int
     private var lastPercent = -1
 
+    /// Creates a progress counter with a nonzero denominator.
     init(total: Int) { self.total = max(total, 1) }
 
+    /// Advances the counter and redraws when the integer percentage changes.
     func increment() {
         lock.lock()
         current += 1
@@ -628,6 +645,7 @@ final class ProgressBar: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Draws the final state and terminates the terminal line.
     func finish() {
         lock.lock()
         let bar = String(repeating: "█", count: 40)
@@ -637,6 +655,7 @@ final class ProgressBar: @unchecked Sendable {
     }
 }
 
+/// Converts a writer status value to a stable diagnostic label.
 private func writerStatusName(_ status: AVAssetWriter.Status) -> String {
     switch status {
     case .unknown: return "unknown"
@@ -648,6 +667,7 @@ private func writerStatusName(_ status: AVAssetWriter.Status) -> String {
     }
 }
 
+/// Converts a reader status value to a stable diagnostic label.
 private func readerStatusName(_ status: AVAssetReader.Status) -> String {
     switch status {
     case .unknown: return "unknown"
@@ -659,6 +679,7 @@ private func readerStatusName(_ status: AVAssetReader.Status) -> String {
     }
 }
 
+/// Builds a contextual error from writer, reader, and underlying failures.
 private func makeWriterFailure(
     stage: String,
     writer: AVAssetWriter,
@@ -682,6 +703,7 @@ private func makeWriterFailure(
     )
 }
 
+/// Builds a metadata-probe error with reader state when available.
 private func makeMetadataProbeFailure(stage: String, reader: AVAssetReader? = nil) -> NSError {
     var parts = ["\(stage)"]
     if let reader {
@@ -697,6 +719,7 @@ private func makeMetadataProbeFailure(stage: String, reader: AVAssetReader? = ni
     )
 }
 
+/// Reads the first metadata sample to obtain a writer-compatible format hint.
 private func probeTimedMetadataFormatHint(
     asset: AVAsset,
     track: AVAssetTrack
@@ -733,6 +756,7 @@ private func probeTimedMetadataFormatHint(
     return formatHint
 }
 
+/// Copies an extended language tag from source track to writer input.
 private func copyTrackLanguageIfPresent(
     from sourceTrack: AVAssetTrack,
     to writerInput: AVAssetWriterInput
@@ -748,6 +772,7 @@ private func copyTrackLanguageIfPresent(
     }
 }
 
+/// Associates metadata writer inputs with their referenced media input.
 private func addMetadataReferentAssociations(
     from sourceTrack: AVAssetTrack,
     to metadataInput: AVAssetWriterInput,
@@ -772,6 +797,7 @@ private func addMetadataReferentAssociations(
     }
 }
 
+/// Returns whether the source audio subtype can be written without transcoding.
 private func movSupportsAudioPassthrough(
     formatDescription: CMAudioFormatDescription
 ) -> Bool {
@@ -788,6 +814,7 @@ private func movSupportsAudioPassthrough(
     }
 }
 
+/// Extracts or synthesizes channel-layout bytes for audio output settings.
 private func audioChannelLayoutData(
     formatDescription: CMAudioFormatDescription,
     channelCount: Int
@@ -824,6 +851,7 @@ private func audioChannelLayoutData(
     return data
 }
 
+/// Builds linear PCM writer settings from an input audio format description.
 private func movPCMTranscodeSettings(
     formatDescription: CMAudioFormatDescription
 ) -> [String: Any]? {
@@ -854,6 +882,7 @@ private func movPCMTranscodeSettings(
     return settings
 }
 
+/// Byte range and header layout for one parsed MOV atom.
 private struct MOVAtomDescriptor {
     let offset: UInt64
     let size: UInt64
@@ -861,11 +890,13 @@ private struct MOVAtomDescriptor {
     let type: String
 }
 
+/// Metadata track ID and sample-description atom discovered in a movie.
 private struct MetadataTrackSampleDescription {
     let stsdOffset: UInt64
     let stsdSize: UInt64
 }
 
+/// Compressed codecs that can carry the supported dynamic HDR configuration box.
 private enum DolbyVisionCompressedCodec {
     case hevc
     case av1
@@ -879,6 +910,7 @@ private enum DolbyVisionCompressedCodec {
         }
     }
 
+    /// Returns the sample-entry type required by codec and selected profile.
     func dolbyVisionSampleEntryType(profile: DolbyVisionHEVCProfile?) -> String {
         switch self {
         case .hevc:
@@ -895,16 +927,19 @@ private enum DolbyVisionCompressedCodec {
     }
 }
 
+/// Authoring XML layouts supported by the metadata parser.
 private enum DolbyVisionMDFStyle {
     case legacy205
     case integrated
 }
 
+/// Source primary families accepted by dynamic metadata validation.
 private enum DolbyVisionColorPrimaries {
     case rec2020
     case p3
 }
 
+/// Source transfer and matrix combinations represented by authoring metadata.
 private enum DolbyVisionSignalEncoding {
     case ycbcrBT2020Video
     case rgbComputer
@@ -938,11 +973,13 @@ private enum DolbyVisionSignalEncoding {
     }
 }
 
+/// Parsed source primaries and signal encoding used for track validation.
 private struct DolbyVisionVideoColorProfile {
     let primaries: DolbyVisionColorPrimaries
     let label: String
     let signalEncoding: DolbyVisionSignalEncoding
 
+    /// Returns a profile preserving primaries and replacing signal encoding.
     func withSignalEncoding(_ signalEncoding: DolbyVisionSignalEncoding) -> DolbyVisionVideoColorProfile {
         DolbyVisionVideoColorProfile(
             primaries: primaries,
@@ -1033,6 +1070,7 @@ private struct DolbyVisionVideoColorProfile {
     }
 }
 
+/// Exact authoring edit rate used to validate encoded frame timing.
 private struct DolbyVisionEditRate {
     let numerator: Int
     let denominator: Int
@@ -1040,11 +1078,13 @@ private struct DolbyVisionEditRate {
     var fps: Double { Double(numerator) / Double(denominator) }
     var label: String { "\(numerator) \(denominator)" }
 
+    /// Compares the authoring rate to an encoded frame-rate rational.
     func matches(_ fpsInfo: FramerateInfo) -> Bool {
         abs(fps - fpsInfo.fps) < 0.0005
     }
 }
 
+/// Parsed timecode start, frame quanta, and drop-frame state.
 private struct QuickTimeTimecodeInfo {
     let startFrame: Int64
     let fps: Int
@@ -1052,6 +1092,7 @@ private struct QuickTimeTimecodeInfo {
     let stringValue: String
 }
 
+/// Prebuilt timecode sample plus its format and display range.
 private struct SyntheticQuickTimeTimecodeTrack {
     let formatDescription: CMFormatDescription
     let sampleBuffer: CMSampleBuffer
@@ -1059,12 +1100,14 @@ private struct SyntheticQuickTimeTimecodeTrack {
     let endString: String
 }
 
+/// Chooses source passthrough, synthesized timecode, or no timecode track.
 private enum MOVTimecodePlan {
     case none
     case passthrough(track: AVAssetTrack, info: QuickTimeTimecodeInfo)
     case synthetic(SyntheticQuickTimeTimecodeTrack)
 }
 
+/// Frame interval and serialized metadata used for per-frame payload selection.
 struct DolbyVisionShot {
     let recordIn: Int
     let duration: Int
@@ -1072,15 +1115,18 @@ struct DolbyVisionShot {
     let baseXML: String
     let frameOverrideXMLByOffset: [Int: String]
 
+    /// Returns whether an absolute frame number lies inside the shot interval.
     func contains(frameNumber: Int) -> Bool {
         frameNumber >= recordIn && frameNumber < recordIn + duration
     }
 
+    /// Returns a frame override when present, otherwise the shot-level XML.
     func xml(for frameNumber: Int) -> String {
         frameOverrideXMLByOffset[frameNumber - recordIn] ?? baseXML
     }
 }
 
+/// Parses, validates, and serves authoring metadata for encoded frames.
 final class DolbyVisionMetadataSource: @unchecked Sendable {
     let rawXMLData: Data
     fileprivate let version: String
@@ -1100,6 +1146,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
     private let globalXML: String
     private let shots: [DolbyVisionShot]
 
+    /// Loads XML and derives global metadata, shot coverage, and static HDR fields.
     fileprivate init(xmlURL: URL, videoColorProfile: DolbyVisionVideoColorProfile) throws {
         let data = try Data(contentsOf: xmlURL)
         rawXMLData = data
@@ -1201,6 +1248,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         frameCount = parsedShots.map { $0.recordIn + $0.duration }.max() ?? 0
     }
 
+    /// Verifies raster, frame rate, frame count, and source timecode against media.
     fileprivate func validateAgainstSource(
         fpsInfo: FramerateInfo,
         estimatedFrames: Int64,
@@ -1255,6 +1303,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    /// Creates the timed-metadata format description for PHDR samples.
     fileprivate func makeFormatDescription() throws -> CMMetadataFormatDescription {
         var desc: CMMetadataFormatDescription?
         let keyData = metadataKeyValue.data(using: .utf8)! as CFData
@@ -1280,6 +1329,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return desc
     }
 
+    /// Wraps one frame's metadata bytes in an exactly timed metadata group.
     fileprivate func timedMetadataGroup(frameNumber: Int, fpsInfo: FramerateInfo) -> AVTimedMetadataGroup {
         let item = AVMutableMetadataItem()
         item.identifier = metadataIdentifier
@@ -1297,6 +1347,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
             timeRange: CMTimeRange(start: start, duration: duration))
     }
 
+    /// Builds the null-terminated payload bytes for one frame.
     private func rawPayload(frameNumber: Int) -> Data {
         let xml = sampleXML(frameNumber: frameNumber)
         var payload = Data([0, 0, 0, 0])
@@ -1304,6 +1355,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return payload
     }
 
+    /// Chooses the metadata XML active at one frame number.
     private func sampleXML(frameNumber: Int) -> String {
         let shot = shots.first(where: { $0.contains(frameNumber: frameNumber) }) ?? shots[0]
         let shotXML = shot.xml(for: frameNumber)
@@ -1336,6 +1388,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    /// Rejects unsupported color-encoding declarations in the authoring track.
     private static func validateXMLColorEncoding(track: XMLElement) throws {
         guard let encoding = textForXPath("./*[local-name()='ColorEncoding']/*[local-name()='Encoding']", in: track)?.lowercased(),
               encoding == "pq" else {
@@ -1363,6 +1416,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    /// Reads an edit rate from structured or text fields.
     private static func parseEditRate(track: XMLElement) -> DolbyVisionEditRate? {
         if let editRate = textForXPath("./*[local-name()='EditRate']", in: track),
            let parsed = parseEditRateText(editRate) {
@@ -1379,6 +1433,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return nil
     }
 
+    /// Parses space, slash, or decimal edit-rate notation.
     private static func parseEditRateText(_ text: String) -> DolbyVisionEditRate? {
         let parts = text
             .replacingOccurrences(of: "/", with: " ")
@@ -1411,6 +1466,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return nil
     }
 
+    /// Encodes Level 6 content-light values in big-endian static HDR form.
     private static func parseContentLightLevelInfo(from track: XMLElement) -> Data? {
         guard let maxCLLText = textForXPath("./*[local-name()='Level6']/*[local-name()='MaxCLL']", in: track)
                 ?? textForXPath(".//*[local-name()='Level6']/*[local-name()='MaxCLL']", in: track),
@@ -1426,6 +1482,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return data
     }
 
+    /// Encodes mastering chromaticities and luminance into static HDR bytes.
     private static func parseMasteringDisplayColorVolume(from track: XMLElement) -> Data? {
         guard let display = firstElementForXPath(
             "./*[local-name()='PluginNode']//*[local-name()='DVGlobalData']/*[local-name()='MasteringDisplay']",
@@ -1455,14 +1512,17 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return data
     }
 
+    /// Scales, rounds, and clamps a value to unsigned 16-bit storage.
     private static func scaledUInt16(_ value: Double, multiplier: Double) -> UInt16 {
         UInt16(max(0, min(Double(UInt16.max), (value * multiplier).rounded())))
     }
 
+    /// Scales, rounds, and clamps a value to unsigned 32-bit storage.
     private static func scaledUInt32(_ value: Double, multiplier: Double) -> UInt32 {
         UInt32(max(0, min(Double(UInt32.max), (value * multiplier).rounded())))
     }
 
+    /// Ensures ordered shots cover the encoded frame span without gaps or overlap.
     private static func validateShotCoverage(shots: [DolbyVisionShot], expectedFrameCount: Int64) throws {
         let sortedShots = shots.sorted {
             if $0.recordIn == $1.recordIn { return $0.duration < $1.duration }
@@ -1511,6 +1571,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    /// Builds the global metadata fragment for the sequence-oriented XML layout.
     private static func makeLegacyGlobalXML(
         root: XMLElement,
         output: XMLElement,
@@ -1542,6 +1603,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return parts.joined(separator: "\n")
     }
 
+    /// Builds the global metadata fragment for the integrated XML layout.
     private static func makeIntegratedGlobalXML(
         root: XMLElement,
         output: XMLElement,
@@ -1582,6 +1644,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return parts.joined(separator: "\n")
     }
 
+    /// Converts shot elements and frame edits to absolute frame intervals.
     private static func makeShots(
         from track: XMLElement,
         style: DolbyVisionMDFStyle,
@@ -1646,10 +1709,12 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         }
     }
 
+    /// Reads a frame edit's relative offset within its containing shot.
     private static func frameEditOffset(_ frame: XMLElement) -> Int? {
         textForXPath("./*[local-name()='EditOffset']", in: frame).flatMap(Int.init)
     }
 
+    /// Applies one frame-level child override to a shot-level metadata element.
     private static func childXMLApplyingFrameOverride(
         of element: XMLElement,
         skippingElementNames: Set<String>,
@@ -1676,6 +1741,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
         return parts.joined(separator: "\n")
     }
 
+    /// Merges plugin-node children by metadata key while preserving stable order.
     private static func mergedPluginNodeXML(
         shotPluginNode: XMLElement,
         frame: XMLElement
@@ -1713,6 +1779,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
 """
     }
 
+    /// Merges dynamic-data children by level and target identifier.
     private static func mergedDVDynamicDataXML(
         defaultDynamicData: XMLElement,
         frameDynamicData: XMLElement
@@ -1751,6 +1818,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
 """
     }
 
+    /// Creates a replacement key from element name and optional target ID.
     private static func dynamicMetadataKey(_ element: XMLElement) -> String {
         let localName = xmlLocalName(element)
         let level = element.attribute(forName: "level")?.stringValue ?? ""
@@ -1759,6 +1827,7 @@ final class DolbyVisionMetadataSource: @unchecked Sendable {
     }
 }
 
+/// Reads an unsigned 32-bit big-endian integer from data.
 private func readUInt32BE(from data: Data, at offset: Int = 0) -> UInt32 {
     var value: UInt32 = 0
     for byte in data[offset..<(offset + 4)] {
@@ -1767,19 +1836,23 @@ private func readUInt32BE(from data: Data, at offset: Int = 0) -> UInt32 {
     return value
 }
 
+/// Removes an optional namespace prefix from an XML node name.
 private func xmlLocalName(_ node: XMLNode) -> String {
     let name = node.name ?? ""
     return name.split(separator: ":").last.map(String.init) ?? name
 }
 
+/// Returns the first element selected by a non-throwing XPath query.
 private func firstElementForXPath(_ xPath: String, in node: XMLNode) -> XMLElement? {
     (try? node.nodes(forXPath: xPath))?.first as? XMLElement
 }
 
+/// Returns trimmed text from the first node selected by XPath.
 private func textForXPath(_ xPath: String, in node: XMLNode) -> String? {
     (try? node.nodes(forXPath: xPath))?.first?.stringValue?.trimmedNonEmpty
 }
 
+/// Finds the first four-field timecode string in known authoring fields.
 private func firstExplicitTimecodeString(in element: XMLElement) -> String? {
     let localName = xmlLocalName(element).lowercased()
     if (localName.contains("timecode") || localName == "starttc" || localName == "tcstart"),
@@ -1796,6 +1869,7 @@ private func firstExplicitTimecodeString(in element: XMLElement) -> String? {
     return nil
 }
 
+/// Parses and validates the four numeric fields of a timecode string.
 private func parseTimecodeParts(_ value: String) -> (hours: Int64, minutes: Int64, seconds: Int64, frames: Int64)? {
     let separators = CharacterSet(charactersIn: ":;.")
     let parts = value
@@ -1814,10 +1888,12 @@ private func parseTimecodeParts(_ value: String) -> (hours: Int64, minutes: Int6
     return (hours, minutes, seconds, frames)
 }
 
+/// Returns whether a nominal frame rate has defined drop-frame numbering.
 private func supportsDropFrameTimecode(fps: Int) -> Bool {
     fps % 30 == 0 && fps >= 30
 }
 
+/// Converts timecode fields to an absolute frame number with drop correction.
 private func parseTimecodeFrameNumber(_ value: String, fps: Int, dropFrame: Bool) -> Int64? {
     guard fps > 0, let parts = parseTimecodeParts(value) else { return nil }
     guard parts.frames < Int64(fps) else { return nil }
@@ -1829,6 +1905,7 @@ private func parseTimecodeFrameNumber(_ value: String, fps: Int, dropFrame: Bool
     return nominalFrames - dropFrames * (totalMinutes - totalMinutes / 10)
 }
 
+/// Formats an absolute frame number using drop or non-drop numbering.
 private func timecodeString(from frameNumber: Int64, fps: Int, dropFrame: Bool) -> String {
     guard fps > 0 else { return "00:00:00:00" }
     let safeFrameNumber = max(frameNumber, 0)
@@ -1865,6 +1942,7 @@ private func timecodeString(from frameNumber: Int64, fps: Int, dropFrame: Bool) 
     return String(format: "%02lld:%02lld:%02lld%@%02lld", hours, minutes, seconds, separator, frames)
 }
 
+/// Maps an exact frame rate to its nominal timecode frame count.
 private func timecodeFrameQuanta(for fpsInfo: FramerateInfo) -> Int {
     let fps = fpsInfo.fps
     let known: [(Double, Int)] = [
@@ -1883,6 +1961,7 @@ private func timecodeFrameQuanta(for fpsInfo: FramerateInfo) -> Int {
     return max(Int(fps.rounded()), 1)
 }
 
+/// Combines a start string and frame-rate rational into validated timecode state.
 private func makeQuickTimeTimecodeInfo(
     startFrame: Int64,
     fps: Int,
@@ -1896,6 +1975,7 @@ private func makeQuickTimeTimecodeInfo(
     )
 }
 
+/// Builds a single-sample timecode track covering the encoded frame count.
 private func makeSyntheticQuickTimeTimecodeTrack(
     startTimecode: String,
     fpsInfo: FramerateInfo,
@@ -2053,6 +2133,7 @@ private func makeSyntheticQuickTimeTimecodeTrack(
     )
 }
 
+/// Chooses passthrough or synthetic timecode based on source readability and options.
 private func resolveMOVTimecodePlan(
     asset: AVAsset,
     fpsInfo: FramerateInfo,
@@ -2080,6 +2161,7 @@ private func resolveMOVTimecodePlan(
     return .synthetic(syntheticTrack)
 }
 
+/// Parses comma- or whitespace-separated decimal values.
 private func parseNumberList(_ text: String?) -> [Double] {
     guard let text else { return [] }
     return text
@@ -2088,6 +2170,7 @@ private func parseNumberList(_ text: String?) -> [Double] {
         .compactMap { Double($0) }
 }
 
+/// Compares parsed chromaticities with a reference set within tolerance.
 private func matchesPrimaries(
     red: [Double],
     green: [Double],
@@ -2104,11 +2187,13 @@ private func matchesPrimaries(
     return numbersClose(red, expected.0) && numbersClose(green, expected.1) && numbersClose(blue, expected.2)
 }
 
+/// Returns whether equal-length numeric arrays agree within absolute tolerance.
 private func numbersClose(_ lhs: [Double], _ rhs: [Double], tolerance: Double = 0.01) -> Bool {
     guard lhs.count == rhs.count else { return false }
     return zip(lhs, rhs).allSatisfy { abs($0 - $1) <= tolerance }
 }
 
+/// Serializes selected direct children with requested indentation.
 private func childXML(
     of element: XMLElement,
     skippingElementNames: Set<String>,
@@ -2129,6 +2214,7 @@ private func childXML(
     return parts.joined(separator: "\n")
 }
 
+/// Serializes one XML element and indents every produced line.
 private func indentedXML(
     _ element: XMLElement,
     spaces: Int,
@@ -2143,6 +2229,7 @@ private func indentedXML(
     return indentMultiline(xml, spaces: spaces)
 }
 
+/// Wraps child XML in a named element while preserving caller indentation.
 private func wrapElementWithPrefix(
     source: XMLElement,
     prefixedName: String,
@@ -2173,6 +2260,7 @@ private func wrapElementWithPrefix(
 """, spaces: indentSpaces)
 }
 
+/// Prefixes each line in a multiline string with a fixed number of spaces.
 private func indentMultiline(_ text: String, spaces: Int) -> String {
     let prefix = String(repeating: " ", count: spaces)
     return text
@@ -2181,6 +2269,7 @@ private func indentMultiline(_ text: String, spaces: Int) -> String {
         .joined(separator: "\n")
 }
 
+/// Trimming helpers used by XML and timecode parsing.
 private extension String {
     var trimmedNonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2188,6 +2277,7 @@ private extension String {
     }
 }
 
+/// Reads an unsigned 64-bit big-endian integer from data.
 private func readUInt64BE(from data: Data, at offset: Int = 0) -> UInt64 {
     var value: UInt64 = 0
     for byte in data[offset..<(offset + 8)] {
@@ -2196,6 +2286,7 @@ private func readUInt64BE(from data: Data, at offset: Int = 0) -> UInt64 {
     return value
 }
 
+/// Writes an unsigned 32-bit big-endian integer into mutable data.
 private func writeUInt32BE(
     _ value: UInt32,
     to handle: FileHandle,
@@ -2211,11 +2302,13 @@ private func writeUInt32BE(
     handle.write(bytes)
 }
 
+/// Reads a four-character atom type at a validated offset.
 private func atomType(in data: Data, at offset: Int) -> String? {
     guard offset + 8 <= data.count else { return nil }
     return String(data: data[(offset + 4)..<(offset + 8)], encoding: .isoLatin1)
 }
 
+/// Reads an exact file byte range or throws on short input.
 private func readExactData(
     from handle: FileHandle,
     at offset: UInt64,
@@ -2232,6 +2325,7 @@ private func readExactData(
     return data
 }
 
+/// Parses standard and extended atom headers at the current file offset.
 private func readAtomDescriptor(
     from handle: FileHandle,
     at offset: UInt64,
@@ -2263,6 +2357,7 @@ private func readAtomDescriptor(
     return MOVAtomDescriptor(offset: offset, size: size, headerSize: headerSize, type: type)
 }
 
+/// Scans direct children for the first atom with a requested type.
 private func findChildAtom(
     named type: String,
     in parent: MOVAtomDescriptor,
@@ -2281,6 +2376,7 @@ private func findChildAtom(
     return nil
 }
 
+/// Locates metadata tracks and returns their sample-description atoms.
 private func metadataTrackSampleDescriptions(in movieURL: URL) throws -> [MetadataTrackSampleDescription] {
     let handle = try FileHandle(forReadingFrom: movieURL)
     defer {
@@ -2340,6 +2436,7 @@ private func metadataTrackSampleDescriptions(in movieURL: URL) throws -> [Metada
     return results
 }
 
+/// Restores source metadata sample descriptions after writer passthrough changes them.
 private func patchPassthroughMetadataSampleDescriptions(
     sourceURL: URL,
     outputURL: URL
@@ -2385,6 +2482,7 @@ private func patchPassthroughMetadataSampleDescriptions(
     }
 }
 
+/// Validates source primaries and transfer tags for dynamic metadata inclusion.
 private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) async throws -> DolbyVisionVideoColorProfile {
     guard let fd = try? await track.load(.formatDescriptions).first else {
         throw NSError(
@@ -2436,6 +2534,7 @@ private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) asyn
     )
 }
 
+/// Reads the first timecode sample and its drop-frame format flags.
 private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) async throws -> QuickTimeTimecodeInfo {
     guard let fd = try? await track.load(.formatDescriptions).first else {
         throw NSError(
@@ -2502,6 +2601,7 @@ private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) asyn
         stringValue: timecodeString(from: startFrame, fps: fps, dropFrame: isDropFrame))
 }
 
+/// Requires Rec.2020 PQ matrix tags for HDR10 HEVC output.
 private func validateHDR10HEVCVideoColorProfile(from track: AVAssetTrack) async throws {
     guard let fd = try? await track.load(.formatDescriptions).first else {
         throw NSError(
@@ -2557,6 +2657,7 @@ private func validateHDR10HEVCVideoColorProfile(from track: AVAssetTrack) async 
     }
 }
 
+/// Identifies a timed metadata track from its format description.
 private func isDolbyVisionMetadataTrack(_ track: AVAssetTrack) async -> Bool {
     guard let formatDescriptions = try? await track.load(.formatDescriptions) else { return false }
     for fd in formatDescriptions {
@@ -2582,6 +2683,7 @@ private func isDolbyVisionMetadataTrack(_ track: AVAssetTrack) async -> Bool {
     return false
 }
 
+/// Rewrites one metadata sample entry to the required key declaration.
 private func patchDolbyVisionMetadataSampleDescription(
     in handle: FileHandle,
     stsd: MOVAtomDescriptor,
@@ -2651,6 +2753,7 @@ private func patchDolbyVisionMetadataSampleDescription(
         at: stsd.offset + UInt64(keyEntryOffset))
 }
 
+/// Applies metadata sample-description patches to all matching tracks in a movie.
 private func patchDolbyVisionMetadataTrackAtoms(
     in movieURL: URL,
     metadataKeyValue: String
@@ -2724,22 +2827,26 @@ private func patchDolbyVisionMetadataTrackAtoms(
     }
 }
 
+/// Replacement value for an atom's 32- or 64-bit size field.
 private struct MOVSizeFieldPatch {
     let offset: UInt64
     let byteCount: Int
     let newValue: UInt64
 }
 
+/// Half-open file range used by removal and replacement operations.
 private struct MOVByteRange {
     let offset: UInt64
     let length: UInt64
 }
 
+/// Byte replacement at an absolute file offset.
 private struct MOVDataPatch {
     let offset: UInt64
     let data: Data
 }
 
+/// Returns the atom size update required after inserting bytes.
 private func sizeFieldPatch(for atom: MOVAtomDescriptor, growingBy delta: UInt64) -> MOVSizeFieldPatch {
     if atom.headerSize == 16 {
         return MOVSizeFieldPatch(offset: atom.offset + 8, byteCount: 8, newValue: atom.size + delta)
@@ -2747,6 +2854,7 @@ private func sizeFieldPatch(for atom: MOVAtomDescriptor, growingBy delta: UInt64
     return MOVSizeFieldPatch(offset: atom.offset, byteCount: 4, newValue: atom.size + delta)
 }
 
+/// Returns the atom size update required after removing bytes.
 private func sizeFieldPatch(for atom: MOVAtomDescriptor, shrinkingBy delta: UInt64) -> MOVSizeFieldPatch {
     let newSize = atom.size > delta ? atom.size - delta : atom.headerSize
     if atom.headerSize == 16 {
@@ -2755,6 +2863,7 @@ private func sizeFieldPatch(for atom: MOVAtomDescriptor, shrinkingBy delta: UInt
     return MOVSizeFieldPatch(offset: atom.offset, byteCount: 4, newValue: newSize)
 }
 
+/// Encodes an unsigned 16-bit big-endian integer.
 private func uint16BEData(_ value: UInt16) -> Data {
     Data([
         UInt8((value >> 8) & 0xff),
@@ -2762,6 +2871,7 @@ private func uint16BEData(_ value: UInt16) -> Data {
     ])
 }
 
+/// Encodes an unsigned 32-bit big-endian integer.
 private func uint32BEData(_ value: UInt32) -> Data {
     Data([
         UInt8((value >> 24) & 0xff),
@@ -2771,6 +2881,7 @@ private func uint32BEData(_ value: UInt32) -> Data {
     ])
 }
 
+/// Encodes an unsigned 64-bit big-endian integer.
 private func uint64BEData(_ value: UInt64) -> Data {
     Data([
         UInt8((value >> 56) & 0xff),
@@ -2784,6 +2895,7 @@ private func uint64BEData(_ value: UInt64) -> Data {
     ])
 }
 
+/// Encodes a size-field patch using its original field width.
 private func data(for patch: MOVSizeFieldPatch) throws -> Data {
     switch patch.byteCount {
     case 4:
@@ -2806,6 +2918,7 @@ private func data(for patch: MOVSizeFieldPatch) throws -> Data {
     }
 }
 
+/// Selects the dynamic HDR HEVC level from raster size and frame rate.
 private func dolbyVisionHEVCLevel(width: Int, height: Int, fps: Double) -> UInt8 {
     let pixels = width * height
     if pixels >= 3840 * 2160 {
@@ -2817,6 +2930,7 @@ private func dolbyVisionHEVCLevel(width: Int, height: Int, fps: Double) -> UInt8
     return 3
 }
 
+/// Builds a codec configuration box for the selected profile and compatibility ID.
 private func makeDolbyVisionHEVCConfigurationBox(
     profile: DolbyVisionHEVCProfile,
     width: Int,
@@ -2841,6 +2955,7 @@ private func makeDolbyVisionHEVCConfigurationBox(
     return box
 }
 
+/// Selects the dynamic HDR AV1 level from raster size and frame rate.
 private func dolbyVisionAV1Level(width: Int, height: Int, fps: Double) -> UInt8 {
     let pixels = width * height
     if pixels >= 3840 * 2160 {
@@ -2855,6 +2970,7 @@ private func dolbyVisionAV1Level(width: Int, height: Int, fps: Double) -> UInt8 
     return 3
 }
 
+/// Builds the AV1 dynamic HDR configuration box for the selected profile.
 private func makeDolbyVisionAV1ConfigurationBox(
     profile: DolbyVisionHEVCProfile,
     width: Int,
@@ -2876,6 +2992,7 @@ private func makeDolbyVisionAV1ConfigurationBox(
     return box
 }
 
+/// Wraps payload data in a standard 32-bit-size MOV box.
 private func makeMOVBox(type: String, payload: Data) -> Data {
     var box = Data()
     box.append(uint32BEData(UInt32(payload.count + 8)))
@@ -2884,6 +3001,7 @@ private func makeMOVBox(type: String, payload: Data) -> Data {
     return box
 }
 
+/// Builds mastering-display and content-light sample-entry boxes when available.
 private func makeStaticHDRSampleEntryBoxes(
     masteringDisplayColorVolume: Data?,
     contentLightLevelInfo: Data?,
@@ -2904,6 +3022,7 @@ private func makeStaticHDRSampleEntryBoxes(
     return boxes
 }
 
+/// Returns the video sample entry and its parent atom path for a track ID.
 private func videoSampleEntry(
     in movieURL: URL,
     acceptedTypes: Set<String>
@@ -2968,6 +3087,7 @@ private func videoSampleEntry(
 }
 
 @discardableResult
+/// Changes a compressed sample-entry type and inserts the required configuration box.
 private func normalizeCompressedVideoSampleEntry(
     in movieURL: URL,
     codec: DolbyVisionCompressedCodec,
@@ -3013,6 +3133,7 @@ private func normalizeCompressedVideoSampleEntry(
     return verifiedEntry.type
 }
 
+/// Scans compressed HEVC samples for enhancement-layer NAL units.
 private func movieContainsDolbyVisionEnhancementLayer(
     at movieURL: URL
 ) async throws -> Bool {
@@ -3071,6 +3192,7 @@ private func movieContainsDolbyVisionEnhancementLayer(
     return false
 }
 
+/// Identifies the compressed video codec from sample-entry atoms.
 private func compressedDolbyVisionCodec(in movieURL: URL) throws -> DolbyVisionCompressedCodec? {
     if try videoSampleEntry(
         in: movieURL,
@@ -3087,6 +3209,7 @@ private func compressedDolbyVisionCodec(in movieURL: URL) throws -> DolbyVisionC
     return nil
 }
 
+/// Scans compressed samples for in-band dynamic HDR metadata.
 private func movieContainsDolbyVisionRPU(
     at movieURL: URL,
     codec: DolbyVisionCompressedCodec
@@ -3154,6 +3277,7 @@ private func movieContainsDolbyVisionRPU(
     return false
 }
 
+/// Collects HEVC sample-entry type, configuration, and ancestor-size patches.
 private func findHEVCSampleEntryPatchTargets(
     in movieURL: URL
 ) throws -> (insertOffset: UInt64, sizePatches: [MOVSizeFieldPatch], dataPatches: [MOVDataPatch])? {
@@ -3257,6 +3381,7 @@ private func findHEVCSampleEntryPatchTargets(
     return nil
 }
 
+/// Collects AV1 sample-entry type, configuration, and ancestor-size patches.
 private func findAV1SampleEntryPatchTargets(
     in movieURL: URL
 ) throws -> (insertOffset: UInt64, sizePatches: [MOVSizeFieldPatch], dataPatches: [MOVDataPatch])? {
@@ -3360,6 +3485,7 @@ private func findAV1SampleEntryPatchTargets(
     return nil
 }
 
+/// Locates HEVC static HDR boxes and size fields affected by their removal.
 private func findHEVCStaticHDRSampleEntryRemovalTargets(
     in movieURL: URL
 ) throws -> (ranges: [MOVByteRange], sizePatches: [MOVSizeFieldPatch])? {
@@ -3459,6 +3585,7 @@ private func findHEVCStaticHDRSampleEntryRemovalTargets(
     return nil
 }
 
+/// Locates AV1 static HDR boxes and size fields affected by their removal.
 private func findAV1StaticHDRSampleEntryRemovalTargets(
     in movieURL: URL
 ) throws -> (ranges: [MOVByteRange], sizePatches: [MOVSizeFieldPatch])? {
@@ -3558,6 +3685,7 @@ private func findAV1StaticHDRSampleEntryRemovalTargets(
     return nil
 }
 
+/// Locates ProRes sample entries that require static HDR box insertion.
 private func findProResStaticHDRSampleEntryPatchTargets(
     in movieURL: URL,
     masteringDisplayColorVolume: Data?,
@@ -3673,6 +3801,7 @@ private func findProResStaticHDRSampleEntryPatchTargets(
     return nil
 }
 
+/// Copies an exact byte count between file handles using a bounded buffer.
 private func copyBytes(
     from input: FileHandle,
     to output: FileHandle,
@@ -3694,6 +3823,7 @@ private func copyBytes(
     }
 }
 
+/// Rewrites a movie while applying sorted insertions and fixed-size byte patches.
 private func rewriteMovieFile(
     movieURL: URL,
     insertionOffset: UInt64,
@@ -3749,6 +3879,7 @@ private func rewriteMovieFile(
     try fm.moveItem(at: tempURL, to: movieURL)
 }
 
+/// Rewrites a movie while omitting disjoint ranges and updating size fields.
 private func rewriteMovieFileRemovingRanges(
     movieURL: URL,
     removalRanges: [MOVByteRange],
@@ -3828,6 +3959,7 @@ private func rewriteMovieFileRemovingRanges(
     try fm.moveItem(at: tempURL, to: movieURL)
 }
 
+/// Normalizes the HEVC sample entry and dynamic HDR configuration after writing.
 private func patchDolbyVisionHEVCConfigurationAtom(
     in movieURL: URL,
     profile: DolbyVisionHEVCProfile,
@@ -3853,6 +3985,7 @@ private func patchDolbyVisionHEVCConfigurationAtom(
     )
 }
 
+/// Normalizes the AV1 sample entry and dynamic HDR configuration after writing.
 private func patchDolbyVisionAV1ConfigurationAtom(
     in movieURL: URL,
     profile: DolbyVisionHEVCProfile,
@@ -3878,6 +4011,7 @@ private func patchDolbyVisionAV1ConfigurationAtom(
     )
 }
 
+/// Removes HEVC static HDR boxes when signaling is carried in-band.
 private func removeHEVCStaticHDRSampleEntryBoxes(in movieURL: URL) throws {
     guard let targets = try findHEVCStaticHDRSampleEntryRemovalTargets(in: movieURL) else {
         return
@@ -3889,6 +4023,7 @@ private func removeHEVCStaticHDRSampleEntryBoxes(in movieURL: URL) throws {
     )
 }
 
+/// Removes AV1 static HDR boxes when signaling is carried in-band.
 private func removeAV1StaticHDRSampleEntryBoxes(in movieURL: URL) throws {
     guard let targets = try findAV1StaticHDRSampleEntryRemovalTargets(in: movieURL) else {
         return
@@ -3900,6 +4035,7 @@ private func removeAV1StaticHDRSampleEntryBoxes(in movieURL: URL) throws {
     )
 }
 
+/// Inserts static HDR boxes into ProRes sample entries when metadata is available.
 private func patchProResStaticHDRSampleEntryBoxes(
     in movieURL: URL,
     masteringDisplayColorVolume: Data?,
@@ -3931,6 +4067,7 @@ private func startPassthroughPump(
     progress: ProgressBar? = nil,
     cont: CheckedContinuation<Void, Error>
 ) {
+    /// Result of one autorelease-scoped pump iteration.
     enum PumpStep {
         case appended
         case finished
@@ -3972,6 +4109,7 @@ private func startPassthroughPump(
     }
 }
 
+/// Pulls decoded or packetized audio samples into a writer input.
 private func startAudioSampleSourcePump(
     _ pair: AudioSampleSourcePumpPair,
     queueLabel: String,
@@ -3979,6 +4117,7 @@ private func startAudioSampleSourcePump(
     writer: AVAssetWriter,
     cont: CheckedContinuation<Void, Error>
 ) {
+    /// Result of one autorelease-scoped pump iteration.
     enum PumpStep {
         case appended
         case finished
@@ -4056,7 +4195,7 @@ private func startSyntheticTimecodePump(
     }
 }
 
-/// Drives a timed metadata pump, preserving a real metadata track in the output MOV.
+/// Drives a timed metadata pump and preserves its track in the output MOV.
 private func startTimedMetadataPump(
     _ pair: TimedMetadataPumpPair,
     queueLabel: String,
@@ -4065,6 +4204,7 @@ private func startTimedMetadataPump(
     reader: AVAssetReader,
     cont: CheckedContinuation<Void, Error>
 ) {
+    /// Result of one autorelease-scoped pump iteration.
     enum PumpStep {
         case appended
         case finished
@@ -4105,12 +4245,14 @@ private func startTimedMetadataPump(
     }
 }
 
+/// Generates and appends one timed metadata group for each encoded frame.
 private func startDolbyVisionMetadataPump(
     _ pair: DolbyVisionMetadataPumpPair,
     queueLabel: String,
     writer: AVAssetWriter,
     cont: CheckedContinuation<Void, Error>
 ) {
+    /// Result of one autorelease-scoped pump iteration.
     enum PumpStep {
         case appended
         case finished
@@ -4161,6 +4303,7 @@ private func startVideoSourcePump(
     progress: ProgressBar? = nil,
     cont: CheckedContinuation<Void, Error>
 ) {
+    /// Result of one autorelease-scoped pump iteration.
     enum PumpStep {
         case appended
         case finished
@@ -4438,7 +4581,11 @@ func encodeMOV(
             )
         }
         if let colorTransform {
-            print("[Color] Metal conversion: \(resolvedColorTransform!.input.gamut.label) / \(resolvedColorTransform!.input.oetf.label) / \(String(format: "%.1f", resolvedColorTransform!.input.peakNits)) nits -> \(colorTransform.label)")
+            if let lut = colorTransform.lut {
+                print("[Color] Metal LUT: \(lut.sourceURL.lastPathComponent) -> \(colorTransform.label)")
+            } else {
+                print("[Color] Metal conversion: \(resolvedColorTransform!.input.gamut.label) / \(resolvedColorTransform!.input.oetf.label) / \(String(format: "%.1f", resolvedColorTransform!.input.peakNits)) nits -> \(colorTransform.label)")
+            }
         }
     } catch {
         print("[Error] \(error.localizedDescription)")
@@ -4964,7 +5111,7 @@ func encodeMOV(
             )
         }
 
-        // Wrap non-Sendable AVAssetWriterInput for safe transfer into task group
+        // Wrap the non-Sendable writer input before capture by the task group.
         let videoInRef = SendableRef(videoIn)
         let writerRef = SendableRef(writer)
         let readerRef = SendableRef(reader)
@@ -4973,7 +5120,7 @@ func encodeMOV(
         let failureBox = PipelineFailureBox()
 
         if isPassthrough {
-            // ── Passthrough: DispatchQueue pump coordination (unchanged) ──
+            // Coordinate passthrough track pumps on dispatch queues.
             await withTaskGroup(of: Void.self) { group in
                 group.addTask(priority: .userInitiated) {
                     do {
@@ -5572,7 +5719,7 @@ func encodeMOV(
                     vIn.markAsFinished()
                 }
 
-                // Audio / timecode / metadata pumps (unchanged)
+                // Start audio, timecode, and metadata pumps.
                 if let pair = audioPair {
                     group.addTask(priority: .userInitiated) {
                         do {
@@ -5845,6 +5992,7 @@ func encodeMOV(
     }
 }
 
+/// Returns the furthest timeline clip end in output frame units.
 private func timelineFrameCount(from descriptor: TimelineDescriptor) -> Int {
     let fps = descriptor.frameRate.value != 0
         ? Double(descriptor.frameRate.timescale) / Double(descriptor.frameRate.value)
@@ -5856,6 +6004,7 @@ private func timelineFrameCount(from descriptor: TimelineDescriptor) -> Int {
     }
 }
 
+/// Builds 48 kHz, 24-bit interleaved PCM settings for timeline audio tracks.
 private func timelineAudioPCMSettings(channelCount: Int) -> [String: Any] {
     [
         AVFormatIDKey: kAudioFormatLinearPCM,
@@ -5868,6 +6017,7 @@ private func timelineAudioPCMSettings(channelCount: Int) -> [String: Any] {
     ]
 }
 
+/// Renders and encodes a layered timeline composition to a ProRes MOV.
 func encodeTimelineMOV(
     composition: AVMutableComposition,
     descriptor: TimelineDescriptor,
@@ -5949,7 +6099,11 @@ func encodeTimelineMOV(
         }
         let metalColorPipelineRef = metalColorPipeline.map(SendableRef.init)
         if let colorTransform, let resolvedColorTransform {
-            print("[Color] Timeline Metal conversion: \(resolvedColorTransform.input.gamut.label) / \(resolvedColorTransform.input.oetf.label) / \(String(format: "%.1f", resolvedColorTransform.input.peakNits)) nits -> \(colorTransform.label)")
+            if let lut = colorTransform.lut {
+                print("[Color] Timeline Metal LUT: \(lut.sourceURL.lastPathComponent) -> \(colorTransform.label)")
+            } else {
+                print("[Color] Timeline Metal conversion: \(resolvedColorTransform.input.gamut.label) / \(resolvedColorTransform.input.oetf.label) / \(String(format: "%.1f", resolvedColorTransform.input.peakNits)) nits -> \(colorTransform.label)")
+            }
         }
 
         let reader = try AVAssetReader(asset: composition)
