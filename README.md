@@ -257,16 +257,26 @@ source. Do not also pass an external metadata XML:
 proresencoder -i hdr.mov -o prores_metadata.mov -q 422hq \
   --cmu 1000 --cmu-include
 
-# HEVC: generate and inject one metadata unit per frame
+# HEVC Profile 8.1: generate and inject one metadata unit per frame
 proresencoder -i hdr.mov -o hevc_metadata.mov -q hevc -b 50 -dp 81 \
+  --cmu 1000 --cmu-include
+
+# HEVC Profile 5: convert Rec.2020/PQ to Native IPT-PQ-C2 with Metal
+proresencoder -i hdr.mov -o hevc_native_p5.mov -q hevc -b 50 -dp 5 \
+  --gamut rec2020 --oetf pq --nit 1000 \
   --cmu 1000 --cmu-include
 
 # HEVC enhanced-layer workflow
 proresencoder -i hdr.mov -o hevc_enhanced.mov -q hevc -b 80 -dp 76 \
   --cmu 1000 --cmu-include
 
-# AV1: generate and inject one metadata unit per frame
-proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 10 \
+# AV1 Native Profile 10: full-range IPT-PQ-C2 plus T.35/EMDF RPU
+proresencoder -i hdr.mov -o av1_native_p10.mov -q av1 -b 50 -dp 10 \
+  --gamut rec2020 --oetf pq --nit 1000 \
+  --cmu 1000 --cmu-include
+
+# AV1 Profile 10.1: HDR10-compatible base layer
+proresencoder -i hdr.mov -o av1_p101.mov -q av1 -b 50 -dp 101 \
   --cmu 1000 --cmu-include
 ```
 
@@ -276,9 +286,21 @@ required by the target workflow:
 ```bash
 proresencoder -i hdr.mov -o hevc_metadata.mov -q hevc -b 50 -dp 81 \
   -dovi metadata.xml --dv-flag
-proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 10 \
+proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 101 \
   -dovi metadata.xml -df
 ```
+
+Profile arguments are strict integers: `-dp 5` is HEVC Profile 5, `-dp 10`
+is Native AV1 Profile 10, `-dp 101` is Profile 10.1, and `-dp 104` is Profile
+10.4. Decimal aliases such as `10.1` and the former `100` alias are rejected.
+Profile 5 and Native Profile 10 accept only direct `rec2020`, `rec2020lm`, or
+`p3d65` output together with `pq` and `--nit`. The declared PQ reference pixels
+are then converted to full-range IPT-PQ-C2; they are not tagged or encoded as an
+HDR10 base layer. Without `-df`, P5/P10 keep the ordinary `hvc1`/`av01` sample
+entry for verifier compatibility. `-df` changes only the reserved player-facing
+sample entry to `dvh1`/`dav1`; it does not alter pixels, RPU, or bitstream
+processing. These additions target stream, color, RPU/EMDF, and container
+conformance only and do not claim Dolby certification.
 
 `--cmu` and `-dovi` are mutually exclusive.
 `--cmu-include` requires `--cmu`, supports MOV output only, and requires the

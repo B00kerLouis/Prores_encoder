@@ -608,6 +608,7 @@ final class MetalColorPipeline: @unchecked Sendable {
     private static func isSupported(_ format: OSType) -> Bool {
         format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             || format == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+            || format == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange
             || format == kCVPixelFormatType_32BGRA
     }
 }

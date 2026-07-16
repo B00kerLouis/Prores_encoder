@@ -1174,8 +1174,11 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         baseLayerURL = urls.baseLayerURL
         enhancementLayerURL = urls.enhancementLayerURL
         self.fpsInfo = fpsInfo
-        baseLayerBitrateBitsPerSecond = Int((totalBitrateMbps * 0.74 * 1_000_000.0).rounded())
-        enhancementLayerBitrateBitsPerSecond = Int((totalBitrateMbps * 0.26 * 1_000_000.0).rounded())
+        // Keep the elementary-stream HRD model in lockstep with the actual P7.6
+        // VideoToolbox sessions. Dolby's UHD Blu-ray FEL guidance and the known-good
+        // reference both use the 85/15 default allocation.
+        baseLayerBitrateBitsPerSecond = Int((totalBitrateMbps * 0.85 * 1_000_000.0).rounded())
+        enhancementLayerBitrateBitsPerSecond = Int((totalBitrateMbps * 0.15 * 1_000_000.0).rounded())
 
         let fileManager = FileManager.default
         try? fileManager.removeItem(at: baseLayerURL)

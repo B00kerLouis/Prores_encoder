@@ -238,6 +238,14 @@ struct ColorTransformRequest: Sendable {
                 || outputGamut == .p3D65)
     }
 
+    var isDolbyVisionNativeCompatible: Bool {
+        !hasLUT
+            && outputOETF == .pq
+            && (outputGamut == .rec2020
+                || outputGamut == .rec2020LimitedToP3D65
+                || outputGamut == .p3D65)
+    }
+
     var hasLUT: Bool { lut != nil }
 }
 

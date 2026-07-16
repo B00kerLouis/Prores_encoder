@@ -374,8 +374,27 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
     private func downsampleX422ToP010(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
         let destination = try makeDestinationP010PixelBuffer()
 
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(destination, [])
+        let sourceLockStatus = CVPixelBufferLockBaseAddress(source, .readOnly)
+        guard sourceLockStatus == kCVReturnSuccess else {
+            throw NSError(
+                domain: "AV1Encode",
+                code: Int(sourceLockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not lock the native x422 ProRes source buffer: \(sourceLockStatus)."
+                ]
+            )
+        }
+        let destinationLockStatus = CVPixelBufferLockBaseAddress(destination, [])
+        guard destinationLockStatus == kCVReturnSuccess else {
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+            throw NSError(
+                domain: "AV1Encode",
+                code: Int(destinationLockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not lock the native ProRes P010 destination buffer: \(destinationLockStatus)."
+                ]
+            )
+        }
         defer {
             CVPixelBufferUnlockBaseAddress(destination, [])
             CVPixelBufferUnlockBaseAddress(source, .readOnly)
@@ -398,6 +417,19 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         let sourceChromaStride = CVPixelBufferGetBytesPerRowOfPlane(source, 1)
         let destinationLumaStride = CVPixelBufferGetBytesPerRowOfPlane(destination, 0)
         let destinationChromaStride = CVPixelBufferGetBytesPerRowOfPlane(destination, 1)
+        let minimum10BitRowBytes = width * MemoryLayout<UInt16>.stride
+        guard sourceLumaStride >= minimum10BitRowBytes,
+              sourceChromaStride >= minimum10BitRowBytes,
+              destinationLumaStride >= minimum10BitRowBytes,
+              destinationChromaStride >= minimum10BitRowBytes else {
+            throw NSError(
+                domain: "AV1Encode",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Native x422/P010 pixel buffer row strides are smaller than the active image width."
+                ]
+            )
+        }
 
         for row in 0..<height {
             memcpy(
@@ -434,8 +466,27 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
     private func convertY416ToP010(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
         let destination = try makeDestinationP010PixelBuffer()
 
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(destination, [])
+        let sourceLockStatus = CVPixelBufferLockBaseAddress(source, .readOnly)
+        guard sourceLockStatus == kCVReturnSuccess else {
+            throw NSError(
+                domain: "AV1Encode",
+                code: Int(sourceLockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not lock the native y416 ProRes source buffer: \(sourceLockStatus)."
+                ]
+            )
+        }
+        let destinationLockStatus = CVPixelBufferLockBaseAddress(destination, [])
+        guard destinationLockStatus == kCVReturnSuccess else {
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+            throw NSError(
+                domain: "AV1Encode",
+                code: Int(destinationLockStatus),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not lock the native ProRes P010 destination buffer: \(destinationLockStatus)."
+                ]
+            )
+        }
         defer {
             CVPixelBufferUnlockBaseAddress(destination, [])
             CVPixelBufferUnlockBaseAddress(source, .readOnly)
@@ -455,6 +506,17 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         let sourceStrideWords = sourceStrideBytes / MemoryLayout<UInt16>.stride
         let destinationLumaStride = CVPixelBufferGetBytesPerRowOfPlane(destination, 0) / MemoryLayout<UInt16>.stride
         let destinationChromaStride = CVPixelBufferGetBytesPerRowOfPlane(destination, 1) / MemoryLayout<UInt16>.stride
+        guard sourceStrideWords >= width * 4,
+              destinationLumaStride >= width,
+              destinationChromaStride >= width else {
+            throw NSError(
+                domain: "AV1Encode",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Native y416/P010 pixel buffer row strides are smaller than the active image width."
+                ]
+            )
+        }
 
         let sourceWords = sourceBase.assumingMemoryBound(to: UInt16.self)
         let destinationLumaWords = destinationLuma.assumingMemoryBound(to: UInt16.self)

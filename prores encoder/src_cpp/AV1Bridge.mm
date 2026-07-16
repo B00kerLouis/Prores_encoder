@@ -17,6 +17,7 @@
 namespace {
 
 static constexpr OSType kPixelFormatP010 = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+static constexpr OSType kPixelFormatP010FullRange = kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
 static constexpr OSType kPixelFormatNV12 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
 // Reads an unsigned 16-bit big-endian value.
@@ -373,7 +374,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
         static_cast<EbTransferCharacteristics>(config.transferCharacteristics);
     _config.matrix_coefficients =
         static_cast<EbMatrixCoefficients>(config.matrixCoefficients);
-    _config.color_range = EB_CR_STUDIO_RANGE;
+    _config.color_range = config.fullRange ? EB_CR_FULL_RANGE : EB_CR_STUDIO_RANGE;
     _config.chroma_sample_position = EB_CSP_VERTICAL;
     _config.rate_control_mode = SVT_AV1_RC_MODE_VBR;
     _config.target_bit_rate = clampedBitrate(config.bitrateBitsPerSecond);
@@ -486,13 +487,25 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
 - (BOOL)fillAndSendPixelBuffer:(CVPixelBufferRef)pixelBuffer
              presentationIndex:(int64_t)presentationIndex {
     const OSType pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer);
-    if (pixelFormat != kPixelFormatP010 && pixelFormat != kPixelFormatNV12) {
+    if (pixelFormat != kPixelFormatP010
+        && pixelFormat != kPixelFormatP010FullRange
+        && pixelFormat != kPixelFormatNV12) {
         self.lastError = [NSString stringWithFormat:@"unsupported AV1 source pixel format: %u", pixelFormat];
         return NO;
     }
 
     const size_t width = CVPixelBufferGetWidth(pixelBuffer);
     const size_t height = CVPixelBufferGetHeight(pixelBuffer);
+    if (width != _config.source_width || height != _config.source_height) {
+        self.lastError = [NSString stringWithFormat:
+            @"AV1 source dimensions %zux%zu do not match encoder dimensions %ux%u",
+            width, height, _config.source_width, _config.source_height];
+        return NO;
+    }
+    if (!CVPixelBufferIsPlanar(pixelBuffer) || CVPixelBufferGetPlaneCount(pixelBuffer) < 2) {
+        self.lastError = @"AV1 source pixel buffer must contain two addressable Y and UV planes";
+        return NO;
+    }
     const size_t chromaWidth = (width + 1) / 2;
     const size_t chromaHeight = (height + 1) / 2;
 
@@ -500,12 +513,33 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     std::vector<uint16_t> u(chromaWidth * chromaHeight);
     std::vector<uint16_t> v(chromaWidth * chromaHeight);
 
-    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    if (pixelFormat == kPixelFormatP010) {
-        const auto *srcY = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0));
-        const auto *srcUV = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1));
-        const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
-        const size_t uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+    const CVReturn lockStatus = CVPixelBufferLockBaseAddress(
+        pixelBuffer,
+        kCVPixelBufferLock_ReadOnly
+    );
+    if (lockStatus != kCVReturnSuccess) {
+        self.lastError = [NSString stringWithFormat:
+            @"CVPixelBufferLockBaseAddress failed: %d", lockStatus];
+        return NO;
+    }
+    const auto *srcY = static_cast<const uint8_t *>(
+        CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)
+    );
+    const auto *srcUV = static_cast<const uint8_t *>(
+        CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)
+    );
+    const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+    const size_t uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+    const size_t requiredYStride = pixelFormat == kPixelFormatNV12 ? width : width * sizeof(uint16_t);
+    const size_t requiredUVStride = pixelFormat == kPixelFormatNV12
+        ? chromaWidth * 2
+        : chromaWidth * 2 * sizeof(uint16_t);
+    if (!srcY || !srcUV || yStride < requiredYStride || uvStride < requiredUVStride) {
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+        self.lastError = @"AV1 source pixel buffer has missing planes or invalid row strides";
+        return NO;
+    }
+    if (pixelFormat == kPixelFormatP010 || pixelFormat == kPixelFormatP010FullRange) {
         for (size_t row = 0; row < height; ++row) {
             const auto *line = reinterpret_cast<const uint16_t *>(srcY + row * yStride);
             for (size_t col = 0; col < width; ++col) {
@@ -520,10 +554,6 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
             }
         }
     } else {
-        const auto *srcY = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0));
-        const auto *srcUV = static_cast<const uint8_t *>(CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1));
-        const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
-        const size_t uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
         for (size_t row = 0; row < height; ++row) {
             const auto *line = srcY + row * yStride;
             for (size_t col = 0; col < width; ++col) {

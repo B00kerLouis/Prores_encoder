@@ -2534,6 +2534,28 @@ private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) asyn
     )
 }
 
+/// Describes the PQ reference pixels produced immediately before Native IPT packing.
+private func nativeDolbyVisionMetadataColorProfile(
+    for gamut: VideoGamut
+) -> DolbyVisionVideoColorProfile {
+    switch gamut {
+    case .p3D65:
+        return DolbyVisionVideoColorProfile(
+            primaries: .p3,
+            label: "P3-D65 PQ",
+            signalEncoding: .ycbcrBT2020Video
+        )
+    case .rec2020, .rec2020LimitedToP3D65:
+        return DolbyVisionVideoColorProfile(
+            primaries: .rec2020,
+            label: gamut == .rec2020 ? "Rec.2020 PQ" : "Rec.2020 PQ (P3-D65 limited)",
+            signalEncoding: .ycbcrBT2020Video
+        )
+    case .rec709:
+        preconditionFailure("Native Dolby Vision does not accept Rec.709 output")
+    }
+}
+
 /// Reads the first timecode sample and its drop-frame format flags.
 private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) async throws -> QuickTimeTimecodeInfo {
     guard let fd = try? await track.load(.formatDescriptions).first else {
@@ -2930,6 +2952,20 @@ private func dolbyVisionHEVCLevel(width: Int, height: Int, fps: Double) -> UInt8
     return 3
 }
 
+/// Selects levels for full-range Native IPT profiles without changing legacy tables.
+private func dolbyVisionNativeLevel(width: Int, height: Int, fps: Double) -> UInt8 {
+    if width >= 3840 || height >= 2160 {
+        if fps > 60.0 { return 9 }
+        if fps > 30.0 { return 8 }
+        if fps > 24.0 { return 7 }
+        return 6
+    }
+    if width >= 1920 || height >= 1080 {
+        return fps > 30.0 ? 6 : 4
+    }
+    return 3
+}
+
 /// Builds a codec configuration box for the selected profile and compatibility ID.
 private func makeDolbyVisionHEVCConfigurationBox(
     profile: DolbyVisionHEVCProfile,
@@ -2939,9 +2975,14 @@ private func makeDolbyVisionHEVCConfigurationBox(
 ) -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel = profile.isProfile76
-        ? 6
-        : dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
+    let dvLevel: UInt8
+    if profile.usesNativeIPT {
+        dvLevel = dolbyVisionNativeLevel(width: width, height: height, fps: fps)
+    } else if profile.isProfile76 {
+        dvLevel = 6
+    } else {
+        dvLevel = dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
+    }
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let layerFlags: UInt8 = profile.isProfile76 ? 0x07 : 0x05
     let byte3 = ((dvLevel & 0x1f) << 3) | layerFlags
@@ -2949,7 +2990,7 @@ private func makeDolbyVisionHEVCConfigurationBox(
 
     var box = Data()
     box.append(uint32BEData(32))
-    box.append(Data((profile.isProfile76 ? "dvcC" : "dvvC").utf8))
+    box.append(Data((profile.usesDVCConfigurationBox ? "dvcC" : "dvvC").utf8))
     box.append(contentsOf: [0x01, 0x00, byte2, byte3, byte4])
     box.append(Data(repeating: 0, count: 19))
     return box
@@ -2979,7 +3020,9 @@ private func makeDolbyVisionAV1ConfigurationBox(
 ) -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel = dolbyVisionAV1Level(width: width, height: height, fps: fps)
+    let dvLevel = profile.usesNativeIPT
+        ? dolbyVisionNativeLevel(width: width, height: height, fps: fps)
+        : dolbyVisionAV1Level(width: width, height: height, fps: fps)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
     let byte4 = compatibilityID << 4
@@ -4356,6 +4399,7 @@ func encodeMOV(
     deleteSourceAudio: Bool,
     forcedOutputStartTimecode: String?,
     dolbyVisionXMLURL: URL?,
+    dolbyVisionLevel4Measurements: [DolbyVisionLevel4Measurement]? = nil,
     hevcOptions: HEVCEncodeOptions?,
     av1Options: AV1EncodeOptions?,
     colorSpace: SourceColorSpace?,
@@ -4374,6 +4418,8 @@ func encodeMOV(
     let isHEVC = isHEVCQuality(quality)
     let isAV1 = isAV1Quality(quality)
     let isCompressedHDR = isHEVC || isAV1
+    let requestedDVProfile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
+    let usesNativeDolbyVision = requestedDVProfile?.usesNativeIPT == true
     if dolbyVisionDualOutput
         && !(isHEVC && hevcOptions?.dvProfile?.isProfile76 == true) {
         print("[Error] --dual requires HEVC Dolby Vision Profile 7.6 output.")
@@ -4396,8 +4442,10 @@ func encodeMOV(
         print("[Error] \(error.localizedDescription)")
         return false
     }
-    var effectiveColorSpace = resolvedColorTransform?.outputColorSpace
-        ?? (isCompressedHDR ? SourceColorSpace.hevcHDR10(basedOn: colorSpace) : colorSpace)
+    var effectiveColorSpace: SourceColorSpace? = usesNativeDolbyVision
+        ? nil
+        : (resolvedColorTransform?.outputColorSpace
+            ?? (isCompressedHDR ? SourceColorSpace.hevcHDR10(basedOn: colorSpace) : colorSpace))
     guard !audioReplace || extraAudioURL != nil else {
         print("[Error] --audio-replace requires -aa <audio_file>.")
         return false
@@ -4405,6 +4453,16 @@ func encodeMOV(
 
     guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first else {
         print("[Error] No video track found."); return false
+    }
+    let (width, height) = await videoSize(from: asset)
+    let profile7RasterPlan: DolbyVisionProfile7RasterPlan?
+    do {
+        profile7RasterPlan = requestedDVProfile?.isProfile76 == true
+            ? try DolbyVisionProfile7RasterPlan(sourceWidth: width, sourceHeight: height)
+            : nil
+    } catch {
+        print("[Error] \(error.localizedDescription)")
+        return false
     }
     let sourceVideoFormatDescription = try? await videoTrack.load(.formatDescriptions).first
     let sourceVideoSubtype = sourceVideoFormatDescription.map {
@@ -4466,14 +4524,21 @@ func encodeMOV(
             }
         }
         if let dolbyVisionXMLURL {
-            let videoColorProfile = try await validateDolbyVisionVideoColorProfile(from: videoTrack)
-            let metadataColorProfile = videoColorProfile.withSignalEncoding(
-                is4444FamilyQuality(quality) ? .rgbComputer : .ycbcrBT2020Video)
+            let metadataColorProfile: DolbyVisionVideoColorProfile
+            if usesNativeDolbyVision, let outputGamut = resolvedColorTransform?.outputGamut {
+                metadataColorProfile = nativeDolbyVisionMetadataColorProfile(for: outputGamut)
+            } else {
+                let videoColorProfile = try await validateDolbyVisionVideoColorProfile(from: videoTrack)
+                metadataColorProfile = videoColorProfile.withSignalEncoding(
+                    is4444FamilyQuality(quality) ? .rgbComputer : .ycbcrBT2020Video
+                )
+            }
             let metadata = try DolbyVisionMetadataSource(
                 xmlURL: dolbyVisionXMLURL,
                 videoColorProfile: metadataColorProfile)
-            let requestedDVProfile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
-            if isCompressedHDR, requestedDVProfile?.usesHLGBaseLayer != true {
+            if isCompressedHDR, requestedDVProfile?.usesNativeIPT == true {
+                effectiveColorSpace = nil
+            } else if isCompressedHDR, requestedDVProfile?.usesHLGBaseLayer != true {
                 effectiveColorSpace = SourceColorSpace.hevcHDR10(
                     basedOn: effectiveColorSpace,
                     masteringDisplayColorVolume: metadata.masteringDisplayColorVolume,
@@ -4497,13 +4562,29 @@ func encodeMOV(
                 }
             }
             print("[DoVi] XML edit rate \(metadata.editRate.label) matches source \(fpsInfo.numerator) \(fpsInfo.denominator); shot coverage is continuous for \(metadata.frameCount) frames.")
+            let effectiveLevel4Measurements: [DolbyVisionLevel4Measurement]?
+            if let requestedDVProfile {
+                if let dolbyVisionLevel4Measurements {
+                    effectiveLevel4Measurements = dolbyVisionLevel4Measurements
+                    print("[DoVi] Reusing \(dolbyVisionLevel4Measurements.count) Metal-analyzed Level 4 frame measurements.")
+                } else {
+                    effectiveLevel4Measurements = try await runDolbyVisionLevel4Analysis(
+                        inputAsset: asset,
+                        colorTransform: resolvedColorTransform,
+                        profile: requestedDVProfile
+                    )
+                    print("[DoVi] Generated \(effectiveLevel4Measurements?.count ?? 0) Level 4 frame measurements.")
+                }
+            } else {
+                effectiveLevel4Measurements = nil
+            }
             if isHEVC {
                 guard let profile = hevcOptions?.dvProfile, profile.isHEVCProfile else {
                     throw NSError(
                         domain: "DolbyVisionRPU",
                         code: 1,
                         userInfo: [NSLocalizedDescriptionKey:
-                            "HEVC Dolby Vision encode requires --dv-profile 76, 81, or 84."
+                            "HEVC Dolby Vision encode requires --dv-profile 5, 76, 81, or 84."
                         ]
                     )
                 }
@@ -4516,14 +4597,17 @@ func encodeMOV(
                 dolbyVisionRPUProvider = DolbyVisionRPUProvider(
                     metadataSource: metadata,
                     profile: profile,
-                    expectedFrameCount: estimatedFrames)
+                    expectedFrameCount: estimatedFrames,
+                    level4Measurements: effectiveLevel4Measurements ?? [],
+                    frameRate: fpsInfo.fps,
+                    profile7RasterPlan: profile7RasterPlan)
             } else if isAV1 {
                 guard let profile = av1Options?.dvProfile, profile.isAV1Profile else {
                     throw NSError(
                         domain: "DolbyVisionRPU",
                         code: 1,
                         userInfo: [NSLocalizedDescriptionKey:
-                            "AV1 Dolby Vision encode requires --dv-profile 10 or 104."
+                            "AV1 Dolby Vision encode requires --dv-profile 10, 101, or 104."
                         ]
                     )
                 }
@@ -4532,7 +4616,10 @@ func encodeMOV(
                 dolbyVisionRPUProvider = DolbyVisionRPUProvider(
                     metadataSource: metadata,
                     profile: profile,
-                    expectedFrameCount: estimatedFrames)
+                    expectedFrameCount: estimatedFrames,
+                    level4Measurements: effectiveLevel4Measurements ?? [],
+                    frameRate: fpsInfo.fps,
+                    profile7RasterPlan: nil)
             } else {
                 print("[DoVi] Embedding metadata \(metadata.version) as \(metadata.metadataKeyValue) (\(metadata.frameCount) frames, \(metadataColorProfile.displayLabel))")
                 dolbyVisionMetadata = metadata
@@ -4569,15 +4656,17 @@ func encodeMOV(
     }
 
     // Dimensions
-    let (width, height) = await videoSize(from: asset)
     let metalColorPipeline: MetalColorPipeline?
+    let nativeDolbyVisionColorPipeline: NativeDolbyVisionColorPipeline?
     do {
         metalColorPipeline = try resolvedColorTransform.map {
             try MetalColorPipeline(
                 transform: $0,
                 width: width,
                 height: height,
-                pixelFormat: colorPipelinePixelFormat(for: quality)
+                pixelFormat: profile7RasterPlan == nil
+                    ? colorPipelinePixelFormat(for: quality)
+                    : kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange
             )
         }
         if let colorTransform {
@@ -4587,11 +4676,33 @@ func encodeMOV(
                 print("[Color] Metal conversion: \(resolvedColorTransform!.input.gamut.label) / \(resolvedColorTransform!.input.oetf.label) / \(String(format: "%.1f", resolvedColorTransform!.input.peakNits)) nits -> \(colorTransform.label)")
             }
         }
+        if usesNativeDolbyVision {
+            guard let nativeInputGamut = resolvedColorTransform?.outputGamut else {
+                throw NSError(
+                    domain: "NativeDolbyVisionColor",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Native Dolby Vision requires an explicit Rec.2020, rec2020lm, or P3-D65 PQ color conversion."
+                    ]
+                )
+            }
+            nativeDolbyVisionColorPipeline = try NativeDolbyVisionColorPipeline(
+                width: width,
+                height: height,
+                inputGamut: nativeInputGamut
+            )
+        } else {
+            nativeDolbyVisionColorPipeline = nil
+        }
+        if usesNativeDolbyVision {
+            print("[DoVi] Metal Native IPT-PQ-C2 conversion enabled with full-range P010 output.")
+        }
     } catch {
         print("[Error] \(error.localizedDescription)")
         return false
     }
     let metalColorPipelineRef = metalColorPipeline.map(SendableRef.init)
+    let nativeDolbyVisionColorPipelineRef = nativeDolbyVisionColorPipeline.map(SendableRef.init)
     let av1NativeDecodeReason = (isAV1 && sourceIsProRes)
         ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
         : nil
@@ -4660,7 +4771,11 @@ func encodeMOV(
 
         let vidSettings: [String: Any]? = isPassthrough
             ? nil
-            : (useAV1NativeDecode ? nil : proResReaderOutputSettings(quality))
+            : (useAV1NativeDecode
+                ? nil
+                : (profile7RasterPlan == nil
+                    ? proResReaderOutputSettings(quality)
+                    : dolbyVisionProfile7ReaderOutputSettings()))
         let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: vidSettings)
         videoOut.alwaysCopiesSampleData = false
         if reader.canAdd(videoOut) { reader.add(videoOut) }
@@ -4779,7 +4894,8 @@ func encodeMOV(
                     width: width,
                     height: height,
                     codecConfigurationRecord: av1C,
-                    colorSpace: effectiveColorSpace
+                    colorSpace: effectiveColorSpace,
+                    profile: av1Options.dvProfile
                 )
                 if let av1NativeDecodeReason {
                     guard let sourceFormatDescription = try await videoTrack.load(.formatDescriptions).first else {
@@ -4810,9 +4926,17 @@ func encodeMOV(
                         ]
                     )
                 }
+                guard let profile7RasterPlan else {
+                    throw NSError(
+                        domain: "DolbyVisionProfile7",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Profile 7.6 raster planning was not initialized."
+                        ]
+                    )
+                }
                 profile7Encoder = try DolbyVisionProfile7Encoder(
-                    width: width,
-                    height: height,
+                    rasterPlan: profile7RasterPlan,
                     fpsHint: Int(fpsInfo.fps.rounded()),
                     colorSpace: effectiveColorSpace,
                     bitrateMbps: hevcOptions!.bitrateMbps
@@ -4833,7 +4957,10 @@ func encodeMOV(
                     codecType: proResCodecType(quality),
                     fpsHint: Int(fpsInfo.fps.rounded()),
                     colorSpace: effectiveColorSpace,
-                    hevcOptions: hevcOptions)
+                    hevcOptions: hevcOptions,
+                    sourcePixelFormat: usesNativeDolbyVision
+                        ? NativeDolbyVisionColorPipeline.outputPixelFormat
+                        : nil)
             }
         }
 
@@ -5313,10 +5440,14 @@ func encodeMOV(
                             )
                             let pixelBuffer: CVPixelBuffer
                             do {
-                                pixelBuffer = try metalColorPipelineRef?.value.process(
+                                let preparedPixelBuffer = try metalColorPipelineRef?.value.process(
                                     spb.buf,
                                     pts: pts
                                 ) ?? spb.buf
+                                pixelBuffer = try nativeDolbyVisionColorPipelineRef?.value.process(
+                                    preparedPixelBuffer,
+                                    pts: pts
+                                ) ?? preparedPixelBuffer
                             } catch {
                                 failureBox.store(error)
                                 compressedChannel.finish()
@@ -5642,10 +5773,14 @@ func encodeMOV(
                                              timescale: CMTimeScale(fi.numerator))
                             let pixelBuffer: CVPixelBuffer
                             do {
-                                pixelBuffer = try metalColorPipelineRef?.value.process(
+                                let preparedPixelBuffer = try metalColorPipelineRef?.value.process(
                                     spb.buf,
                                     pts: pts
                                 ) ?? spb.buf
+                                pixelBuffer = try nativeDolbyVisionColorPipelineRef?.value.process(
+                                    preparedPixelBuffer,
+                                    pts: pts
+                                ) ?? preparedPixelBuffer
                             } catch {
                                 failureBox.store(error)
                                 pixelChannel.finish()
@@ -5900,14 +6035,16 @@ func encodeMOV(
                         )
                     }
                     print("[DoVi] Verified \(rpuCount) Profile 7.6 RPU frames and interleaved EL NAL units; adding dvcC.")
+                } else if profile == .profile5 {
+                    print("[DoVi] Verified \(rpuCount) Profile 5 RPU frames; adding dvcC.")
                 } else {
                     print("[DoVi] Verified \(rpuCount) injected RPU frames; adding dvvC.")
                 }
                 try patchDolbyVisionHEVCConfigurationAtom(
                     in: outputURL,
                     profile: profile,
-                    width: width,
-                    height: height,
+                    width: profile7RasterPlan?.encodedWidth ?? width,
+                    height: profile7RasterPlan?.encodedHeight ?? height,
                     fps: fpsInfo.fps
                 )
                 try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)

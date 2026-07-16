@@ -97,8 +97,8 @@
 		C96311C52F73E1A4005C254E = {
 			isa = PBXGroup;
 			children = (
-				C9169E572FC6F7A1008FA3E8 /* ThirdParty */,
 				C96311D02F73E1A4005C254E /* prores encoder */,
+				C9169E572FC6F7A1008FA3E8 /* ThirdParty */,
 				C9AAF0022F8A000100000001 /* Frameworks */,
 				C96311CF2F73E1A4005C254E /* Products */,
 			);

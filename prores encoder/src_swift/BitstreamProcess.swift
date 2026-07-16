@@ -71,23 +71,29 @@ struct SourceColorSpace: Sendable {
 
 /// Supported dynamic HDR profile families and their bitstream signaling values.
 enum DolbyVisionHEVCProfile: String, Sendable {
+    case profile5 = "5"
     case profile76 = "76"
     case profile81 = "81"
     case profile84 = "84"
+    case profile10 = "10"
     case profile101 = "101"
     case profile104 = "104"
 
     init?(argument: String) {
-        switch argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "76", "7.6":
+        switch argument.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "5":
+            self = .profile5
+        case "76":
             self = .profile76
-        case "81", "8.1":
+        case "81":
             self = .profile81
-        case "84", "8.4":
+        case "84":
             self = .profile84
-        case "10", "101", "10.1":
+        case "10":
+            self = .profile10
+        case "101":
             self = .profile101
-        case "104", "10.4":
+        case "104":
             self = .profile104
         default:
             return nil
@@ -96,6 +102,7 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 
     var doviToolProfileArgument: String {
         switch self {
+        case .profile5, .profile10: return "5"
         case .profile76: return "7.6"
         case .profile81: return "8.1"
         case .profile84: return "8.4"
@@ -106,9 +113,11 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 
     var displayName: String {
         switch self {
+        case .profile5: return "5"
         case .profile76: return "7.6"
         case .profile81: return "8.1"
         case .profile84: return "8.4"
+        case .profile10: return "10"
         case .profile101: return "10.1"
         case .profile104: return "10.4"
         }
@@ -122,19 +131,30 @@ enum DolbyVisionHEVCProfile: String, Sendable {
         self == .profile76
     }
 
+    var usesNativeIPT: Bool {
+        self == .profile5 || self == .profile10
+    }
+
+    var usesDVCConfigurationBox: Bool {
+        self == .profile5 || self == .profile76
+    }
+
     var usesHLGBaseLayer: Bool {
         usesProfile84Mapping
     }
 
     var isHEVCProfile: Bool {
-        self == .profile76 || self == .profile81 || self == .profile84
+        self == .profile5 || self == .profile76 || self == .profile81 || self == .profile84
     }
 
     var isAV1Profile: Bool {
-        self == .profile101 || self == .profile104
+        self == .profile10 || self == .profile101 || self == .profile104
     }
 
     var containerProfile: UInt8 {
+        if self == .profile5 {
+            return 5
+        }
         if isProfile76 {
             return 7
         }
@@ -142,6 +162,9 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 
     var compatibilityID: UInt8 {
+        if usesNativeIPT {
+            return 0
+        }
         if isProfile76 {
             return 6
         }
@@ -153,6 +176,9 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 
     var extendedMappingIDC: UInt8 {
+        if usesNativeIPT {
+            return 0
+        }
         if isProfile76 {
             // Profile 7.6: Application ID / CCID 6, inverse mapping indicator 0.
             return UInt8(6 << 5) // 192
@@ -368,6 +394,17 @@ func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
     return [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
 }
 
+/// Requests a 16-bit 4:2:2 decode surface for Profile 7 only, preserving
+/// 10/12/16-bit mezzanine precision until the BL and FEL are derived.
+func dolbyVisionProfile7ReaderOutputSettings() -> [String: Any] {
+    [
+        kCVPixelBufferPixelFormatTypeKey as String:
+            kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
+        kCVPixelBufferMetalCompatibilityKey as String: true,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+    ]
+}
+
 /// Maps a normalized quality argument to its platform codec identifier.
 func proResCodecType(_ quality: String) -> CMVideoCodecType {
     switch normalizedProResQuality(quality) {
@@ -427,9 +464,16 @@ private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
 }
 
 /// Builds preferred image-buffer attributes for encoder discovery.
-private func proResEncoderImageBufferAttributes(width: Int, height: Int, codecType: CMVideoCodecType) -> CFDictionary {
+private func proResEncoderImageBufferAttributes(
+    width: Int,
+    height: Int,
+    codecType: CMVideoCodecType,
+    pixelFormat: OSType? = nil
+) -> CFDictionary {
     [
-        kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: proResSourcePixelFormat(codecType: codecType)),
+        kCVPixelBufferPixelFormatTypeKey as String: NSNumber(
+            value: pixelFormat ?? proResSourcePixelFormat(codecType: codecType)
+        ),
         kCVPixelBufferWidthKey as String: NSNumber(value: width),
         kCVPixelBufferHeightKey as String: NSNumber(value: height),
     ] as CFDictionary
@@ -442,11 +486,12 @@ private func proResHardwareEncoderSpecification() -> CFDictionary {
     ] as CFDictionary
 }
 
-/// Requests hardware acceleration for HEVC session creation.
-private func hevcHardwareEncoderSpecification() -> CFDictionary {
-    [
-        kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: kCFBooleanTrue as Any
-    ] as CFDictionary
+/// Requests HEVC hardware, making it mandatory only for the new Native path.
+private func hevcHardwareEncoderSpecification(requireHardware: Bool) -> CFDictionary {
+    let key = requireHardware
+        ? kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder
+        : kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder
+    return [key as String: kCFBooleanTrue as Any] as CFDictionary
 }
 
 /// Reads a Boolean codec-session property while preserving ownership semantics.
@@ -779,19 +824,26 @@ final class ProResSession: @unchecked Sendable {
     /// Creates and configures a compression session for ProRes or HEVC output.
     init(width: Int, height: Int, codecType: CMVideoCodecType,
          fpsHint: Int, colorSpace: SourceColorSpace?,
-         hevcOptions: HEVCEncodeOptions? = nil) throws {
+         hevcOptions: HEVCEncodeOptions? = nil,
+         sourcePixelFormat: OSType? = nil) throws {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
+        let requiresNativeHEVCHardware = isHEVC && hevcOptions?.dvProfile?.usesNativeIPT == true
         isHEVCSession = isHEVC
         hevcColorSpace = colorSpace
         hevcMasteringDisplayColorVolume = colorSpace?.masteringDisplayColorVolume
         hevcContentLightLevelInfo = colorSpace?.contentLightLevelInfo
         let encoderSpecification = isHEVC
-            ? hevcHardwareEncoderSpecification()
+            ? hevcHardwareEncoderSpecification(requireHardware: requiresNativeHEVCHardware)
             : proResHardwareEncoderSpecification()
         let imageBufferAttributeCandidates: [CFDictionary?] = [
-            proResEncoderImageBufferAttributes(width: width, height: height, codecType: codecType),
+            proResEncoderImageBufferAttributes(
+                width: width,
+                height: height,
+                codecType: codecType,
+                pixelFormat: sourcePixelFormat
+            ),
             nil
         ]
         var st: OSStatus = noErr
@@ -824,11 +876,35 @@ final class ProResSession: @unchecked Sendable {
                             "VTCompressionSession create failed: \(st) (codec=\(fourCCString(codecType)), size=\(width)x\(height))"])
         }
         session = sess
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        func setProperty(_ key: CFString, value: CFTypeRef, required: Bool = false) throws {
+            let status = VTSessionSetProperty(session, key: key, value: value)
+            if required && status != noErr {
+                throw NSError(
+                    domain: "ProResSession",
+                    code: Int(status),
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "VideoToolbox rejected required Native Dolby Vision encoder property \(key): \(status)"
+                    ]
+                )
+            }
+        }
+        try setProperty(
+            kVTCompressionPropertyKey_RealTime,
+            value: kCFBooleanFalse,
+            required: requiresNativeHEVCHardware
+        )
+        try setProperty(
+            kVTCompressionPropertyKey_AllowFrameReordering,
+            value: kCFBooleanFalse,
+            required: requiresNativeHEVCHardware
+        )
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
         let n = NSNumber(value: fpsHint)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: n)
+        try setProperty(
+            kVTCompressionPropertyKey_ExpectedFrameRate,
+            value: n,
+            required: requiresNativeHEVCHardware
+        )
         if let p = colorSpace?.primaries {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries, value: p as CFString)
         }
@@ -866,29 +942,55 @@ final class ProResSession: @unchecked Sendable {
                 VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ContentLightLevelInfo,
                                      value: contentLight as CFData)
             }
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                                 value: kVTProfileLevel_HEVC_Main10_AutoLevel)
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
-                                 value: NSNumber(value: hevcOptions.bitrateBitsPerSecond))
+            try setProperty(
+                kVTCompressionPropertyKey_ProfileLevel,
+                value: kVTProfileLevel_HEVC_Main10_AutoLevel,
+                required: requiresNativeHEVCHardware
+            )
+            try setProperty(
+                kVTCompressionPropertyKey_AverageBitRate,
+                value: NSNumber(value: hevcOptions.bitrateBitsPerSecond),
+                required: requiresNativeHEVCHardware
+            )
             let bytesPerSecond = max(1, hevcOptions.bitrateBitsPerSecond / 8)
             let dataRateLimits = [
                 NSNumber(value: bytesPerSecond),
                 NSNumber(value: 1)
             ] as CFArray
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
-                                 value: dataRateLimits)
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                                 value: NSNumber(value: max(fpsHint * 2, 1)))
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
-                                 value: NSNumber(value: 2))
+            try setProperty(
+                kVTCompressionPropertyKey_DataRateLimits,
+                value: dataRateLimits,
+                required: requiresNativeHEVCHardware
+            )
+            try setProperty(
+                kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                value: NSNumber(value: max(fpsHint * 2, 1)),
+                required: requiresNativeHEVCHardware
+            )
+            try setProperty(
+                kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                value: NSNumber(value: 2),
+                required: requiresNativeHEVCHardware
+            )
         }
-        VTCompressionSessionPrepareToEncodeFrames(session)
-        if isHEVC,
-           let usingHardware = vtSessionBooleanProperty(
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
+        if requiresNativeHEVCHardware && prepareStatus != noErr {
+            throw NSError(domain: "ProResSession", code: Int(prepareStatus),
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "VideoToolbox could not prepare the required Native Dolby Vision hardware HEVC encoder: \(prepareStatus)"])
+        }
+        let usingHardware = isHEVC
+            ? vtSessionBooleanProperty(
                 session,
                 key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
-           ),
-           !usingHardware {
+            )
+            : nil
+        if requiresNativeHEVCHardware && usingHardware != true {
+            throw NSError(domain: "ProResSession", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "VideoToolbox did not confirm hardware HEVC for Native Dolby Vision Profile 5."])
+        }
+        if isHEVC, usingHardware == false {
             throw NSError(domain: "ProResSession", code: 1,
                           userInfo: [NSLocalizedDescriptionKey:
                             "VideoToolbox created a software HEVC encoder; hardware HEVC is required."])

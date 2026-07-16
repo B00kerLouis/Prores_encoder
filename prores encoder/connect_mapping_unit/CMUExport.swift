@@ -83,7 +83,12 @@ enum CMUExporter {
         try validateXML(xmlData, document: document)
         try xmlData.write(to: xmlURL, options: .atomic)
 
-        return CMUOutputArtifacts(xmlURL: xmlURL)
+        return CMUOutputArtifacts(
+            xmlURL: xmlURL,
+            level4Measurements: cmuBuildDolbyVisionLevel4Measurements(
+                frames: document.frames
+            )
+        )
     }
 
     /// Maps the analysis document to its complete XML hierarchy.

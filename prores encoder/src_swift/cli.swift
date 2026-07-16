@@ -155,7 +155,7 @@ enum ProResEncoderCLI {
             case "-dp", "--dv-profile":
                 let raw = requireValue(for: args[idx])
                 guard let parsed = DolbyVisionHEVCProfile(argument: raw) else {
-                    print("[Error] --dv-profile / -dp supports HEVC 76/81/84 and AV1 10/104.")
+                    print("[Error] --dv-profile / -dp accepts only 5/76/81/84/10/101/104.")
                     exit(1)
                 }
                 dolbyVisionProfile = parsed
@@ -368,8 +368,15 @@ enum ProResEncoderCLI {
         }
         if colorTransform != nil
             && !dolbyVisionXMLPath.isEmpty
-            && dolbyVisionProfile?.usesHLGBaseLayer != true {
+            && dolbyVisionProfile?.usesHLGBaseLayer != true
+            && dolbyVisionProfile?.usesNativeIPT != true {
             print("[Error] \(ColorTransformError.dolbyVisionNotSupported.localizedDescription)")
+            exit(1)
+        }
+        if let profile = dolbyVisionProfile,
+           profile.usesNativeIPT,
+           colorTransform?.isDolbyVisionNativeCompatible != true {
+            print("[Error] -dp \(profile.rawValue) requires --gamut / --color-space rec2020, rec2020lm, or p3d65 together with --oetf pq; LUT processing is not allowed.")
             exit(1)
         }
         if colorTransform?.hasLUT == true,
@@ -411,15 +418,15 @@ enum ProResEncoderCLI {
                 exit(1)
             }
             if wantsHEVC, let profile = dolbyVisionProfile, !profile.isHEVCProfile {
-                print("[Error] -q hevc with Dolby Vision metadata supports --dv-profile 76, 81, or 84.")
+                print("[Error] -q hevc with Dolby Vision metadata supports --dv-profile 5, 76, 81, or 84.")
                 exit(1)
             }
             if wantsAV1, let profile = dolbyVisionProfile, !profile.isAV1Profile {
-                print("[Error] -q av1 with Dolby Vision metadata supports --dv-profile 10 or 104.")
+                print("[Error] -q av1 with Dolby Vision metadata supports --dv-profile 10, 101, or 104.")
                 exit(1)
             }
             if hasDolbyVisionMetadataSource && dolbyVisionProfile == nil {
-                let required = wantsAV1 ? "10 or 104" : "76, 81, or 84"
+                let required = wantsAV1 ? "10, 101, or 104" : "5, 76, 81, or 84"
                 print("[Error] -q \(quality) with Dolby Vision metadata requires --dv-profile \(required).")
                 exit(1)
             }
@@ -690,6 +697,7 @@ private func processSingleVideo(
                 inputAsset: inputAsset,
                 quality: config.quality,
                 colorTransform: config.colorTransform,
+                dolbyVisionProfile: config.hevcOptions?.dvProfile ?? config.av1Options?.dvProfile,
                 masteringPeakNits: masteringPeakNits
             )
         } catch {
@@ -850,6 +858,7 @@ private func processSingleVideo(
                 sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: config.quality,
                 colorTransform: config.colorTransform,
+                dolbyVisionProfile: config.hevcOptions?.dvProfile ?? config.av1Options?.dvProfile,
                 masteringPeakNits: masteringPeakNits,
                 forcedStartTimecode: config.forcedOutputStartTimecode
             )
@@ -869,6 +878,7 @@ private func processSingleVideo(
         deleteSourceAudio: config.deleteSourceAudio,
         forcedOutputStartTimecode: config.forcedOutputStartTimecode,
         dolbyVisionXMLURL: dolbyVisionXMLURL,
+        dolbyVisionLevel4Measurements: generatedCMUArtifacts?.level4Measurements,
         hevcOptions: config.hevcOptions,
         av1Options: config.av1Options,
         colorSpace: cs, fpsInfo: fpsI,
@@ -1204,8 +1214,8 @@ private func printUsage() {
       -v, --version                    Print version and exit
       -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc|av1>  Output codec/quality (default: 422hq)
       -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
-      -dp, --dv-profile <76|81|84|10|104> Dolby Vision profile: HEVC 7.6/8.1/8.4 or AV1 10.1/10.4
-      -df, --dv-flag                  Label HEVC as dvhe (7.6) / dvh1 (8.x), or AV1 as dav1; default is hvc1/av01
+      -dp, --dv-profile <5|76|81|84|10|101|104> Dolby Vision profile: HEVC 5/7.6/8.1/8.4 or AV1 10/10.1/10.4
+      -df, --dv-flag                  Use the reserved player-compatibility dvh1/dav1 sample entry; default output keeps hvc1/av01 for verifier compatibility
       --dual                          With -q hevc -dp 76, also write Profile 7.6 BL/EL .hevc streams beside the MOV
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
@@ -1215,6 +1225,7 @@ private func printUsage() {
       --gamut, --color-space <rec709|rec2020|rec2020lm|p3d65>  Direct target gamut; rec2020lm is Rec.2020 tagged with P3-D65 gamut limiting
       --oetf <gamma2.4|gamma2.6|pq|hlg> Target opto-electronic transfer function
       --nit <nits>                     Target peak luminance, 1 <= nits <= 10000
+                                        P5/P10 require rec2020|rec2020lm|p3d65 + pq + nit, followed by IPT-PQ-C2 conversion
       --lut <file.cube>                Burn a native Metal 1D/3D .cube LUT into the encoded pixels
       --gamut-lut, --color-space-lut <rec709|rec2020|rec2020lm|p3d65>  LUT output gamut
       --oetf-lut <gamma2.4|gamma2.6|pq|hlg>  LUT output transfer function

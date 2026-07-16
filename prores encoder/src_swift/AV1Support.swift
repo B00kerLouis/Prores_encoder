@@ -49,9 +49,11 @@ func makeAV1BridgeConfig(
     config.fpsNum = Int32(fpsInfo.numerator)
     config.fpsDen = Int32(fpsInfo.denominator)
     config.bitrateBitsPerSecond = Int64(options.bitrateBitsPerSecond)
-    config.colorPrimaries = av1ColorPrimaries(from: colorSpace)
-    config.transferCharacteristics = av1TransferCharacteristics(from: colorSpace)
-    config.matrixCoefficients = av1MatrixCoefficients(from: colorSpace)
+    let nativeDolbyVision = options.dvProfile?.usesNativeIPT == true
+    config.colorPrimaries = nativeDolbyVision ? 2 : av1ColorPrimaries(from: colorSpace)
+    config.transferCharacteristics = nativeDolbyVision ? 2 : av1TransferCharacteristics(from: colorSpace)
+    config.matrixCoefficients = nativeDolbyVision ? 2 : av1MatrixCoefficients(from: colorSpace)
+    config.fullRange = nativeDolbyVision
     // Keep AV1 static HDR signaling at the container/sample-entry layer.
     // In-band hdr_mdcv/clli metadata OBU on key frames trips DV container checks.
     config.masteringDisplayColorVolume = nil
@@ -64,21 +66,25 @@ func makeAV1FormatDescription(
     width: Int,
     height: Int,
     codecConfigurationRecord: Data,
-    colorSpace: SourceColorSpace?
+    colorSpace: SourceColorSpace?,
+    profile: DolbyVisionHEVCProfile? = nil
 ) throws -> CMFormatDescription {
+    let nativeDolbyVision = profile?.usesNativeIPT == true
     var extensions: [String: Any] = [
         kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String: [
             "av1C": codecConfigurationRecord
         ],
-        kCMFormatDescriptionExtension_ColorPrimaries as String:
-            (colorSpace?.primaries ?? (kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String)),
-        kCMFormatDescriptionExtension_TransferFunction as String:
-            (colorSpace?.transfer ?? (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)),
-        kCMFormatDescriptionExtension_YCbCrMatrix as String:
-            (colorSpace?.matrix ?? (kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String)),
         kCMFormatDescriptionExtension_FullRangeVideo as String:
-            kCFBooleanFalse as Any
+            (nativeDolbyVision ? kCFBooleanTrue : kCFBooleanFalse) as Any
     ]
+    if !nativeDolbyVision {
+        extensions[kCMFormatDescriptionExtension_ColorPrimaries as String] =
+            colorSpace?.primaries ?? (kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String)
+        extensions[kCMFormatDescriptionExtension_TransferFunction as String] =
+            colorSpace?.transfer ?? (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+        extensions[kCMFormatDescriptionExtension_YCbCrMatrix as String] =
+            colorSpace?.matrix ?? (kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String)
+    }
     if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
         extensions[kCMFormatDescriptionExtension_MasteringDisplayColorVolume as String] = masteringDisplay
     }

@@ -19,7 +19,7 @@ struct CMUUniforms {
 // Per-workgroup sums reduced by the CPU after command completion.
 struct CMUPartialStats {
     float4 sums0; // luma, red, green, blue
-    float4 sums1; // saturation, count, reserved, reserved
+    float4 sums1; // saturation, count, PQ(maxRGB), PQ(maxRGB)^2
 };
 
 // Returns luma coefficients for the supported YCbCr matrix identifier.
@@ -70,11 +70,14 @@ kernel void cmu_analyze_yuv(
     threadgroup float blueSums[256];
     threadgroup float saturationSums[256];
     threadgroup float counts[256];
+    threadgroup float maxRGBPQSums[256];
+    threadgroup float maxRGBPQSquareSums[256];
 
     float luma = 0.0f;
     float3 rgbNits = float3(0.0f);
     float saturation = 0.0f;
     float count = 0.0f;
+    float maxRGBPQ = 0.0f;
 
     if (position.x < uniforms.width && position.y < uniforms.height) {
         const float yCode = sourceY.read(position).r * 1023.0f;
@@ -96,6 +99,7 @@ kernel void cmu_analyze_yuv(
             0.0f,
             1.0f
         );
+        maxRGBPQ = max(max(rgbSignal.r, rgbSignal.g), rgbSignal.b);
         rgbNits = cmu_pq_to_nits(rgbSignal);
         luma = clamp(dot(uniforms.lumaCoefficients.xyz, rgbNits), 0.0f, 10000.0f);
         const float maximum = max(max(rgbNits.r, rgbNits.g), rgbNits.b);
@@ -123,6 +127,8 @@ kernel void cmu_analyze_yuv(
     blueSums[localIndex] = rgbNits.b;
     saturationSums[localIndex] = saturation;
     counts[localIndex] = count;
+    maxRGBPQSums[localIndex] = maxRGBPQ;
+    maxRGBPQSquareSums[localIndex] = maxRGBPQ * maxRGBPQ;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (uint stride = 128; stride > 0; stride >>= 1) {
@@ -133,6 +139,8 @@ kernel void cmu_analyze_yuv(
             blueSums[localIndex] += blueSums[localIndex + stride];
             saturationSums[localIndex] += saturationSums[localIndex + stride];
             counts[localIndex] += counts[localIndex + stride];
+            maxRGBPQSums[localIndex] += maxRGBPQSums[localIndex + stride];
+            maxRGBPQSquareSums[localIndex] += maxRGBPQSquareSums[localIndex + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -148,66 +156,536 @@ kernel void cmu_analyze_yuv(
         partials[groupIndex].sums1 = float4(
             saturationSums[0],
             counts[0],
-            0.0f,
-            0.0f
+            maxRGBPQSums[0],
+            maxRGBPQSquareSums[0]
         );
     }
 }
 
-// Averages each 2x2 luma residual into the half-resolution enhancement layer.
-kernel void p7_make_luma_residual(
-    texture2d<float, access::read> sourceY [[texture(0)]],
-    texture2d<float, access::read> reconstructedY [[texture(1)]],
-    texture2d<float, access::write> enhancementY [[texture(2)]],
-    uint2 position [[thread_position_in_grid]]
-) {
-    if (position.x >= enhancementY.get_width() ||
-        position.y >= enhancementY.get_height()) {
-        return;
-    }
+// Source geometry and padding shared by BL preparation and FEL analysis.
+struct P7RasterUniforms {
+    uint sourceWidth;
+    uint sourceHeight;
+    uint canvasWidth;
+    uint canvasHeight;
+    uint leftOffset;
+    uint topOffset;
+    uint reserved0;
+    uint reserved1;
+};
 
-    const uint2 sourceOrigin = position * 2;
-    float residual = 0.0f;
-    for (uint y = 0; y < 2; ++y) {
-        for (uint x = 0; x < 2; ++x) {
-            const uint2 sourcePosition = sourceOrigin + uint2(x, y);
-            const float sourceCode = sourceY.read(sourcePosition).r * 1023.0f;
-            const float reconstructedCode =
-                reconstructedY.read(sourcePosition).r * 1023.0f;
-            residual += sourceCode - reconstructedCode;
-        }
-    }
-    const float enhancementCode = clamp(512.0f + residual * 0.25f, 0.0f, 1023.0f);
-    enhancementY.write(float4(enhancementCode / 1023.0f), position);
+constant float P7_WORD_MAX = 65535.0f;
+constant float P7_P010_SHIFT = 64.0f;
+constant float P7_SOURCE12_SHIFT = 16.0f;
+constant float P7_HORIZONTAL_WEIGHTS[8] = {
+    22.0f / 4096.0f,
+    94.0f / 4096.0f,
+    -524.0f / 4096.0f,
+    2456.0f / 4096.0f,
+    2456.0f / 4096.0f,
+    -524.0f / 4096.0f,
+    94.0f / 4096.0f,
+    22.0f / 4096.0f
+};
+constant int P7_HORIZONTAL_OFFSETS[8] = {-3, -2, -1, 0, 1, 2, 3, 4};
+constant float P7_LUMA_VERTICAL_EVEN_WEIGHTS[4] = {
+    -3.0f / 128.0f, 29.0f / 128.0f, 111.0f / 128.0f, -9.0f / 128.0f
+};
+constant int P7_LUMA_VERTICAL_EVEN_OFFSETS[4] = {-2, -1, 0, 1};
+constant float P7_LUMA_VERTICAL_ODD_WEIGHTS[4] = {
+    -9.0f / 128.0f, 111.0f / 128.0f, 29.0f / 128.0f, -3.0f / 128.0f
+};
+constant int P7_LUMA_VERTICAL_ODD_OFFSETS[4] = {-1, 0, 1, 2};
+constant float P7_CHROMA_VERTICAL_EVEN_WEIGHTS[2] = {64.0f / 256.0f, 192.0f / 256.0f};
+constant int P7_CHROMA_VERTICAL_EVEN_OFFSETS[2] = {-1, 0};
+constant float P7_CHROMA_VERTICAL_ODD_WEIGHTS[2] = {192.0f / 256.0f, 64.0f / 256.0f};
+constant int P7_CHROMA_VERTICAL_ODD_OFFSETS[2] = {0, 1};
+
+inline int p7_clamped_index(int value, int upperBound) {
+    return clamp(value, 0, upperBound - 1);
 }
 
-// Averages each 2x2 chroma residual into the enhancement-layer UV plane.
-kernel void p7_make_chroma_residual(
-    texture2d<float, access::read> sourceUV [[texture(0)]],
-    texture2d<float, access::read> reconstructedUV [[texture(1)]],
-    texture2d<float, access::write> enhancementUV [[texture(2)]],
+inline float p7_source12(float normalizedWord) {
+    return round(normalizedWord * P7_WORD_MAX / P7_SOURCE12_SHIFT);
+}
+
+inline float p7_p010_code(float normalizedWord) {
+    return round(normalizedWord * P7_WORD_MAX / P7_P010_SHIFT);
+}
+
+inline float2 p7_p010_code(float2 normalizedWord) {
+    return round(normalizedWord * P7_WORD_MAX / P7_P010_SHIFT);
+}
+
+inline float p7_p010_normalized(float code) {
+    return clamp(code, 0.0f, 1023.0f) * P7_P010_SHIFT / P7_WORD_MAX;
+}
+
+inline float p7_forward_nlq(float desiredContribution12) {
+    const float integerContribution = round(desiredContribution12);
+    const float offset = integerContribution > 0.0f
+        ? integerContribution
+        : (integerContribution < 0.0f ? integerContribution - 1.0f : 0.0f);
+    return clamp(offset, -512.0f, 511.0f);
+}
+
+inline bool p7_inside_luma(uint2 position, constant P7RasterUniforms &u) {
+    return position.x >= u.leftOffset && position.y >= u.topOffset
+        && position.x < u.leftOffset + u.sourceWidth
+        && position.y < u.topOffset + u.sourceHeight;
+}
+
+inline bool p7_inside_chroma(uint2 position, constant P7RasterUniforms &u) {
+    const uint left = u.leftOffset / 2;
+    const uint top = u.topOffset / 2;
+    return position.x >= left && position.y >= top
+        && position.x < left + u.sourceWidth / 2
+        && position.y < top + u.sourceHeight / 2;
+}
+
+inline float2 p7_source_chroma12(
+    texture2d<float, access::read> sourceUV,
+    uint2 canvasPosition,
+    constant P7RasterUniforms &u
+) {
+    if (!p7_inside_chroma(canvasPosition, u)) {
+        return float2(2048.0f);
+    }
+    const uint2 sourcePosition = uint2(
+        canvasPosition.x - u.leftOffset / 2,
+        (canvasPosition.y - u.topOffset / 2) * 2
+    );
+    const uint nextRow = min(sourcePosition.y + 1, u.sourceHeight - 1);
+    const float2 averageWord = 0.5f * (
+        sourceUV.read(sourcePosition).rg +
+        sourceUV.read(uint2(sourcePosition.x, nextRow)).rg
+    );
+    return round(averageWord * P7_WORD_MAX / P7_SOURCE12_SHIFT);
+}
+
+// Pads high-precision 4:2:2 luma and quantizes only the HDR10 base layer.
+kernel void p7_prepare_bl_luma(
+    texture2d<float, access::read> sourceY [[texture(0)]],
+    texture2d<float, access::write> outputY [[texture(1)]],
+    constant P7RasterUniforms &u [[buffer(0)]],
     uint2 position [[thread_position_in_grid]]
 ) {
-    if (position.x >= enhancementUV.get_width() ||
-        position.y >= enhancementUV.get_height()) {
+    if (position.x >= outputY.get_width() || position.y >= outputY.get_height()) {
         return;
     }
+    float sourceCode12 = 256.0f;
+    if (p7_inside_luma(position, u)) {
+        sourceCode12 = p7_source12(
+            sourceY.read(position - uint2(u.leftOffset, u.topOffset)).r
+        );
+    }
+    outputY.write(float4(p7_p010_normalized(round(sourceCode12 / 4.0f))), position);
+}
 
-    const uint2 sourceOrigin = position * 2;
-    float2 residual = float2(0.0f);
-    for (uint y = 0; y < 2; ++y) {
-        for (uint x = 0; x < 2; ++x) {
-            const uint2 sourcePosition = sourceOrigin + uint2(x, y);
-            const float2 sourceCode = sourceUV.read(sourcePosition).rg * 1023.0f;
-            const float2 reconstructedCode =
-                reconstructedUV.read(sourcePosition).rg * 1023.0f;
-            residual += sourceCode - reconstructedCode;
+// Converts high-precision 4:2:2 chroma to 4:2:0 while padding the BL canvas.
+kernel void p7_prepare_bl_chroma(
+    texture2d<float, access::read> sourceUV [[texture(0)]],
+    texture2d<float, access::write> outputUV [[texture(1)]],
+    constant P7RasterUniforms &u [[buffer(0)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= outputUV.get_width() || position.y >= outputUV.get_height()) {
+        return;
+    }
+    const float2 sourceCode12 = p7_source_chroma12(sourceUV, position, u);
+    const float2 code10 = round(sourceCode12 / 4.0f);
+    outputUV.write(float4(
+        p7_p010_normalized(code10.x),
+        p7_p010_normalized(code10.y),
+        0.0f,
+        1.0f
+    ), position);
+}
+
+// Builds the exact full-resolution EL offset requested by the fixed FEL NLQ.
+kernel void p7_make_target_luma(
+    texture2d<float, access::read> sourceY [[texture(0)]],
+    texture2d<float, access::read> reconstructedY [[texture(1)]],
+    texture2d<float, access::write> target [[texture(2)]],
+    constant P7RasterUniforms &u [[buffer(0)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= target.get_width() || position.y >= target.get_height()) {
+        return;
+    }
+    float sourceCode12 = 256.0f;
+    if (p7_inside_luma(position, u)) {
+        sourceCode12 = p7_source12(
+            sourceY.read(position - uint2(u.leftOffset, u.topOffset)).r
+        );
+    }
+    const float reconstructedCode12 = 4.0f * p7_p010_code(reconstructedY.read(position).r);
+    target.write(float4(p7_forward_nlq(sourceCode12 - reconstructedCode12)), position);
+}
+
+kernel void p7_make_target_chroma(
+    texture2d<float, access::read> sourceUV [[texture(0)]],
+    texture2d<float, access::read> reconstructedUV [[texture(1)]],
+    texture2d<float, access::write> target [[texture(2)]],
+    constant P7RasterUniforms &u [[buffer(0)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= target.get_width() || position.y >= target.get_height()) {
+        return;
+    }
+    const float2 sourceCode12 = p7_source_chroma12(sourceUV, position, u);
+    const float2 reconstructedCode12 = 4.0f * p7_p010_code(reconstructedUV.read(position).rg);
+    const float2 desired = sourceCode12 - reconstructedCode12;
+    target.write(float4(
+        p7_forward_nlq(desired.x),
+        p7_forward_nlq(desired.y),
+        0.0f,
+        1.0f
+    ), position);
+}
+
+inline float p7_adjoint_horizontal_luma_value(
+    texture2d<float, access::read> input,
+    uint2 position,
+    uint halfWidth
+) {
+    const int n = int(position.x);
+    float sum = input.read(uint2(position.x * 2, position.y)).r;
+    const int start = max(0, n - 4);
+    const int end = min(int(halfWidth) - 1, n + 3);
+    for (int m = start; m <= end; ++m) {
+        const float oddValue = input.read(uint2(uint(m * 2 + 1), position.y)).r;
+        for (uint k = 0; k < 8; ++k) {
+            if (p7_clamped_index(m + P7_HORIZONTAL_OFFSETS[k], int(halfWidth)) == n) {
+                sum += P7_HORIZONTAL_WEIGHTS[k] * oddValue;
+            }
         }
     }
-    const float2 enhancementCode = clamp(
-        float2(512.0f) + residual * 0.25f,
-        float2(0.0f),
-        float2(1023.0f)
+    return sum;
+}
+
+inline float2 p7_adjoint_horizontal_chroma_value(
+    texture2d<float, access::read> input,
+    uint2 position,
+    uint halfWidth
+) {
+    const int n = int(position.x);
+    float2 sum = input.read(uint2(position.x * 2, position.y)).rg;
+    const int start = max(0, n - 4);
+    const int end = min(int(halfWidth) - 1, n + 3);
+    for (int m = start; m <= end; ++m) {
+        const float2 oddValue = input.read(uint2(uint(m * 2 + 1), position.y)).rg;
+        for (uint k = 0; k < 8; ++k) {
+            if (p7_clamped_index(m + P7_HORIZONTAL_OFFSETS[k], int(halfWidth)) == n) {
+                sum += P7_HORIZONTAL_WEIGHTS[k] * oddValue;
+            }
+        }
+    }
+    return sum;
+}
+
+kernel void p7_adjoint_horizontal_luma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    output.write(float4(0.5f * p7_adjoint_horizontal_luma_value(
+        input, position, output.get_width()
+    )), position);
+}
+
+kernel void p7_adjoint_horizontal_chroma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float2 value = 0.5f * p7_adjoint_horizontal_chroma_value(
+        input, position, output.get_width()
     );
-    enhancementUV.write(float4(enhancementCode / 1023.0f, 0.0f, 1.0f), position);
+    output.write(float4(value, 0.0f, 1.0f), position);
+}
+
+inline float p7_adjoint_vertical_luma_value(
+    texture2d<float, access::read> input,
+    uint2 position,
+    uint halfHeight
+) {
+    const int n = int(position.y);
+    float sum = 0.0f;
+    const int start = max(0, n - 2);
+    const int end = min(int(halfHeight) - 1, n + 2);
+    for (int m = start; m <= end; ++m) {
+        const float evenValue = input.read(uint2(position.x, uint(m * 2))).r;
+        const float oddValue = input.read(uint2(position.x, uint(m * 2 + 1))).r;
+        for (uint k = 0; k < 4; ++k) {
+            if (p7_clamped_index(m + P7_LUMA_VERTICAL_EVEN_OFFSETS[k], int(halfHeight)) == n) {
+                sum += P7_LUMA_VERTICAL_EVEN_WEIGHTS[k] * evenValue;
+            }
+            if (p7_clamped_index(m + P7_LUMA_VERTICAL_ODD_OFFSETS[k], int(halfHeight)) == n) {
+                sum += P7_LUMA_VERTICAL_ODD_WEIGHTS[k] * oddValue;
+            }
+        }
+    }
+    return sum;
+}
+
+inline float2 p7_adjoint_vertical_chroma_value(
+    texture2d<float, access::read> input,
+    uint2 position,
+    uint halfHeight
+) {
+    const int n = int(position.y);
+    float2 sum = float2(0.0f);
+    const int start = max(0, n - 1);
+    const int end = min(int(halfHeight) - 1, n + 1);
+    for (int m = start; m <= end; ++m) {
+        const float2 evenValue = input.read(uint2(position.x, uint(m * 2))).rg;
+        const float2 oddValue = input.read(uint2(position.x, uint(m * 2 + 1))).rg;
+        for (uint k = 0; k < 2; ++k) {
+            if (p7_clamped_index(m + P7_CHROMA_VERTICAL_EVEN_OFFSETS[k], int(halfHeight)) == n) {
+                sum += P7_CHROMA_VERTICAL_EVEN_WEIGHTS[k] * evenValue;
+            }
+            if (p7_clamped_index(m + P7_CHROMA_VERTICAL_ODD_OFFSETS[k], int(halfHeight)) == n) {
+                sum += P7_CHROMA_VERTICAL_ODD_WEIGHTS[k] * oddValue;
+            }
+        }
+    }
+    return sum;
+}
+
+// Annex B performs (+ half divisor) integer rounding and clips each spatial
+// resampling stage in the unsigned EL-code domain. Scratch textures carry the
+// same signal with the 512 NLQ offset removed, so the clip range is translated
+// by -512 here. The divisors are powers of two and therefore exact in float.
+inline float p7_reference_resample_offset(float value) {
+    return clamp(floor(value + 0.5f), -512.0f, 65023.0f);
+}
+
+inline float2 p7_reference_resample_offset(float2 value) {
+    return clamp(
+        floor(value + float2(0.5f)),
+        float2(-512.0f),
+        float2(65023.0f)
+    );
+}
+
+kernel void p7_adjoint_vertical_luma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    output.write(float4(0.5f * p7_adjoint_vertical_luma_value(
+        input, position, output.get_height()
+    )), position);
+}
+
+kernel void p7_adjoint_vertical_chroma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float2 value = 0.5f * p7_adjoint_vertical_chroma_value(
+        input, position, output.get_height()
+    );
+    output.write(float4(value, 0.0f, 1.0f), position);
+}
+
+inline float p7_upsample_vertical_luma_value(
+    texture2d<float, access::read> input,
+    uint2 position
+) {
+    const int n = int(position.y / 2);
+    const bool odd = (position.y & 1u) != 0;
+    float sum = 0.0f;
+    for (uint k = 0; k < 4; ++k) {
+        const int offset = odd
+            ? P7_LUMA_VERTICAL_ODD_OFFSETS[k]
+            : P7_LUMA_VERTICAL_EVEN_OFFSETS[k];
+        const float weight = odd
+            ? P7_LUMA_VERTICAL_ODD_WEIGHTS[k]
+            : P7_LUMA_VERTICAL_EVEN_WEIGHTS[k];
+        const int y = p7_clamped_index(n + offset, int(input.get_height()));
+        sum += weight * input.read(uint2(position.x, uint(y))).r;
+    }
+    return p7_reference_resample_offset(sum);
+}
+
+inline float2 p7_upsample_vertical_chroma_value(
+    texture2d<float, access::read> input,
+    uint2 position
+) {
+    const int n = int(position.y / 2);
+    const bool odd = (position.y & 1u) != 0;
+    float2 sum = float2(0.0f);
+    for (uint k = 0; k < 2; ++k) {
+        const int offset = odd
+            ? P7_CHROMA_VERTICAL_ODD_OFFSETS[k]
+            : P7_CHROMA_VERTICAL_EVEN_OFFSETS[k];
+        const float weight = odd
+            ? P7_CHROMA_VERTICAL_ODD_WEIGHTS[k]
+            : P7_CHROMA_VERTICAL_EVEN_WEIGHTS[k];
+        const int y = p7_clamped_index(n + offset, int(input.get_height()));
+        sum += weight * input.read(uint2(position.x, uint(y))).rg;
+    }
+    return p7_reference_resample_offset(sum);
+}
+
+kernel void p7_upsample_vertical_luma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    output.write(float4(p7_upsample_vertical_luma_value(input, position)), position);
+}
+
+kernel void p7_upsample_vertical_chroma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float2 value = p7_upsample_vertical_chroma_value(input, position);
+    output.write(float4(value, 0.0f, 1.0f), position);
+}
+
+inline float p7_upsample_horizontal_luma_value(
+    texture2d<float, access::read> input,
+    uint2 position
+) {
+    const uint n = position.x / 2;
+    if ((position.x & 1u) == 0) {
+        return input.read(uint2(n, position.y)).r;
+    }
+    float sum = 0.0f;
+    for (uint k = 0; k < 8; ++k) {
+        const int x = p7_clamped_index(
+            int(n) + P7_HORIZONTAL_OFFSETS[k],
+            int(input.get_width())
+        );
+        sum += P7_HORIZONTAL_WEIGHTS[k] * input.read(uint2(uint(x), position.y)).r;
+    }
+    return p7_reference_resample_offset(sum);
+}
+
+inline float2 p7_upsample_horizontal_chroma_value(
+    texture2d<float, access::read> input,
+    uint2 position
+) {
+    const uint n = position.x / 2;
+    if ((position.x & 1u) == 0) {
+        return input.read(uint2(n, position.y)).rg;
+    }
+    float2 sum = float2(0.0f);
+    for (uint k = 0; k < 8; ++k) {
+        const int x = p7_clamped_index(
+            int(n) + P7_HORIZONTAL_OFFSETS[k],
+            int(input.get_width())
+        );
+        sum += P7_HORIZONTAL_WEIGHTS[k] * input.read(uint2(uint(x), position.y)).rg;
+    }
+    return p7_reference_resample_offset(sum);
+}
+
+kernel void p7_upsample_horizontal_luma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    output.write(float4(p7_upsample_horizontal_luma_value(input, position)), position);
+}
+
+kernel void p7_upsample_horizontal_chroma(
+    texture2d<float, access::read> input [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float2 value = p7_upsample_horizontal_chroma_value(input, position);
+    output.write(float4(value, 0.0f, 1.0f), position);
+}
+
+kernel void p7_subtract_projection_luma(
+    texture2d<float, access::read_write> target [[texture(0)]],
+    texture2d<float, access::read> projection [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= target.get_width() || position.y >= target.get_height()) {
+        return;
+    }
+    target.write(float4(target.read(position).r - projection.read(position).r), position);
+}
+
+kernel void p7_subtract_projection_chroma(
+    texture2d<float, access::read_write> target [[texture(0)]],
+    texture2d<float, access::read> projection [[texture(1)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= target.get_width() || position.y >= target.get_height()) {
+        return;
+    }
+    const float2 value = target.read(position).rg - projection.read(position).rg;
+    target.write(float4(value, 0.0f, 1.0f), position);
+}
+
+kernel void p7_finalize_luma(
+    texture2d<float, access::read> horizontalCorrection [[texture(0)]],
+    texture2d<float, access::read> initial [[texture(1)]],
+    texture2d<float, access::write> output [[texture(2)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float correction = 0.5f * p7_adjoint_vertical_luma_value(
+        horizontalCorrection, position, output.get_height()
+    );
+    const float offset = clamp(round(initial.read(position).r + correction), -512.0f, 511.0f);
+    output.write(float4(p7_p010_normalized(offset + 512.0f)), position);
+}
+
+kernel void p7_finalize_chroma(
+    texture2d<float, access::read> horizontalCorrection [[texture(0)]],
+    texture2d<float, access::read> initial [[texture(1)]],
+    texture2d<float, access::write> output [[texture(2)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    if (position.x >= output.get_width() || position.y >= output.get_height()) {
+        return;
+    }
+    const float2 correction = 0.5f * p7_adjoint_vertical_chroma_value(
+        horizontalCorrection, position, output.get_height()
+    );
+    const float2 offset = clamp(
+        round(initial.read(position).rg + correction),
+        float2(-512.0f),
+        float2(511.0f)
+    );
+    output.write(float4(
+        p7_p010_normalized(offset.x + 512.0f),
+        p7_p010_normalized(offset.y + 512.0f),
+        0.0f,
+        1.0f
+    ), position);
 }

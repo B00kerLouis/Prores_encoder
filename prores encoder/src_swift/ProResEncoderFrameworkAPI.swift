@@ -43,9 +43,11 @@ public enum ProResTransferFunction: String, Sendable {
 
 /// Dynamic HDR profiles supported by compressed-output workflows.
 public enum ProResDolbyVisionProfile: String, Sendable {
+    case profile5 = "5"
     case profile76 = "76"
     case profile81 = "81"
     case profile84 = "84"
+    case profile10 = "10"
     case profile101 = "101"
     case profile104 = "104"
 }
@@ -343,9 +345,17 @@ public final class ProResEncoder: Sendable {
         }
         if colorTransform != nil
             && options.dolbyVisionXMLURL != nil
-            && internalProfile?.usesHLGBaseLayer != true {
+            && internalProfile?.usesHLGBaseLayer != true
+            && internalProfile?.usesNativeIPT != true {
             throw ProResEncoderError.invalidOption(
                 ColorTransformError.dolbyVisionNotSupported.localizedDescription
+            )
+        }
+        if let internalProfile,
+           internalProfile.usesNativeIPT,
+           colorTransform?.isDolbyVisionNativeCompatible != true {
+            throw ProResEncoderError.invalidOption(
+                "Dolby Vision Profile \(internalProfile.displayName) requires a direct Rec.2020, rec2020lm, or P3-D65 PQ color conversion; LUT processing is not allowed."
             )
         }
         if colorTransform?.hasLUT == true,
@@ -392,19 +402,21 @@ public final class ProResEncoder: Sendable {
             }
             if wantsHEVC,
                let profile = options.dolbyVisionProfile,
+               profile != .profile5,
                profile != .profile76,
                profile != .profile81,
                profile != .profile84 {
                 throw ProResEncoderError.invalidOption(
-                    "HEVC supports Dolby Vision Profiles 7.6, 8.1, and 8.4."
+                    "HEVC supports Dolby Vision Profiles 5, 7.6, 8.1, and 8.4."
                 )
             }
             if wantsAV1,
                let profile = options.dolbyVisionProfile,
+               profile != .profile10,
                profile != .profile101,
                profile != .profile104 {
                 throw ProResEncoderError.invalidOption(
-                    "AV1 supports Dolby Vision Profiles 10.1 and 10.4."
+                    "AV1 supports Dolby Vision Profiles 10, 10.1, and 10.4."
                 )
             }
             if hasDolbyVisionMetadataSource && options.dolbyVisionProfile == nil {
@@ -738,6 +750,9 @@ public final class ProResEncoder: Sendable {
                 inputAsset: asset,
                 quality: quality,
                 colorTransform: colorTransform,
+                dolbyVisionProfile: options.dolbyVisionProfile.flatMap {
+                    DolbyVisionHEVCProfile(argument: $0.rawValue)
+                },
                 masteringPeakNits: masteringPeakNits
             )
         }
@@ -788,6 +803,7 @@ public final class ProResEncoder: Sendable {
                 sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: quality,
                 colorTransform: colorTransform,
+                dolbyVisionProfile: internalProfile,
                 masteringPeakNits: masteringPeakNits,
                 forcedStartTimecode: options.forcedOutputStartTimecode
             )
@@ -803,6 +819,7 @@ public final class ProResEncoder: Sendable {
             deleteSourceAudio: options.deleteSourceAudio,
             forcedOutputStartTimecode: options.forcedOutputStartTimecode,
             dolbyVisionXMLURL: dolbyVisionXMLURL,
+            dolbyVisionLevel4Measurements: generatedCMUArtifacts?.level4Measurements,
             hevcOptions: hevcOptions,
             av1Options: av1Options,
             colorSpace: sourceColorSpace,

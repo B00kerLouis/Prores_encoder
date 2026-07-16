@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) int32_t colorPrimaries;
 @property (nonatomic) int32_t transferCharacteristics;
 @property (nonatomic) int32_t matrixCoefficients;
+@property (nonatomic) BOOL fullRange;
 @property (nonatomic, nullable, copy) NSData *masteringDisplayColorVolume;
 @property (nonatomic, nullable, copy) NSData *contentLightLevelInfo;
 @end

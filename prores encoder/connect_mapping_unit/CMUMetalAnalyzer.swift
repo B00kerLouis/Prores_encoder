@@ -126,6 +126,8 @@ private final class CMUPendingFrame {
         var blueSum = Double.zero
         var saturationSum = Double.zero
         var sampleCount = Double.zero
+        var maxRGBPQSum = Double.zero
+        var maxRGBPQSquareSum = Double.zero
         for index in 0..<groupCount {
             let partial = partialValues[index]
             lumaSum += Double(partial.sums0.x)
@@ -134,8 +136,15 @@ private final class CMUPendingFrame {
             blueSum += Double(partial.sums0.w)
             saturationSum += Double(partial.sums1.x)
             sampleCount += Double(partial.sums1.y)
+            maxRGBPQSum += Double(partial.sums1.z)
+            maxRGBPQSquareSum += Double(partial.sums1.w)
         }
         let divisor = max(sampleCount, 1)
+        let meanMaxRGBPQ = maxRGBPQSum / divisor
+        let maxRGBPQVariance = max(
+            maxRGBPQSquareSum / divisor - meanMaxRGBPQ * meanMaxRGBPQ,
+            0
+        )
 
         return CMUFrameStats(
             frameIndex: frameIndex,
@@ -153,7 +162,9 @@ private final class CMUPendingFrame {
             avgR: Float(redSum / divisor),
             avgG: Float(greenSum / divisor),
             avgB: Float(blueSum / divisor),
-            avgSaturation: Float(saturationSum / divisor)
+            avgSaturation: Float(saturationSum / divisor),
+            meanMaxRGBPQ: Float(meanMaxRGBPQ),
+            stdevMaxRGBPQ: Float(sqrt(maxRGBPQVariance))
         )
     }
 }
@@ -558,4 +569,70 @@ private func cmuMedian(_ values: [Float]) -> Float {
         return (sorted[middle - 1] + sorted[middle]) / 2
     }
     return sorted[middle]
+}
+
+/// Retains the Metal-measured moments so each output profile can apply its own
+/// authoring-time temporal behavior after XML shot boundaries are known.
+func cmuBuildDolbyVisionLevel4Measurements(
+    frames: [CMUFrameStats]
+) -> [DolbyVisionLevel4Measurement] {
+    frames.enumerated().map { offset, frame in
+        DolbyVisionLevel4Measurement(
+            frameOffset: offset,
+            meanMaxRGBPQ: frame.meanMaxRGBPQ,
+            stdevMaxRGBPQ: frame.stdevMaxRGBPQ
+        )
+    }
+}
+
+/// Builds ETSI TS 103 572 Level 4 anchors from Metal-measured PQ(maxRGB)
+/// moments. Resolve compatibility outputs use the adaptive every-frame form;
+/// Profile 7.6 limits the difference term to XML shot starts.
+func cmuBuildDolbyVisionLevel4(
+    measurements: [DolbyVisionLevel4Measurement],
+    frameRate: Double,
+    sceneRefreshOffsets: Set<Int>,
+    adaptiveEveryFrame: Bool
+) -> [DolbyVisionLevel4Metadata] {
+    guard !measurements.isEmpty else { return [] }
+
+    let effectiveFrameRate = frameRate.isFinite && frameRate > 0
+        ? frameRate
+        : 24
+    var filteredMean = cmuClampedNormalized(measurements[0].meanMaxRGBPQ)
+    var filteredStdev = cmuClampedNormalized(measurements[0].stdevMaxRGBPQ)
+    var previousRawMean = filteredMean
+    var result: [DolbyVisionLevel4Metadata] = []
+    result.reserveCapacity(measurements.count)
+
+    for (offset, measurement) in measurements.enumerated() {
+        let rawMean = cmuClampedNormalized(measurement.meanMaxRGBPQ)
+        let rawStdev = cmuClampedNormalized(measurement.stdevMaxRGBPQ)
+        if offset > 0 {
+            let participatesInSceneChange = adaptiveEveryFrame
+                || sceneRefreshOffsets.contains(offset)
+            let meanDifference = (
+                participatesInSceneChange ? abs(rawMean - previousRawMean) * 8 : 0
+            ) + 0.1
+            let alpha = min(1, meanDifference * 24 / effectiveFrameRate)
+            filteredMean = filteredMean * (1 - alpha) + rawMean * alpha
+            filteredStdev = filteredStdev * (1 - alpha) + rawStdev * alpha
+        }
+        result.append(DolbyVisionLevel4Metadata(
+            frameOffset: offset,
+            anchorPQ: cmuQuantizeLevel4(filteredMean),
+            anchorPower: cmuQuantizeLevel4(filteredStdev)
+        ))
+        previousRawMean = rawMean
+    }
+    return result
+}
+
+private func cmuClampedNormalized(_ value: Float) -> Double {
+    guard value.isFinite else { return 0 }
+    return min(max(Double(value), 0), 1)
+}
+
+private func cmuQuantizeLevel4(_ value: Double) -> UInt16 {
+    UInt16(min(max((value * 4095).rounded(), 0), 4095))
 }

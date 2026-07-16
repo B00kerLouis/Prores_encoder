@@ -82,6 +82,18 @@ private struct NativeLevel5Block {
     let bottomOffset: UInt16
 }
 
+/// Converts the shared Profile 7 raster geometry into the 13-bit L5 payload.
+private func nativeProfile7Level5(
+    from activeArea: DolbyVisionProfile7ActiveArea
+) -> NativeLevel5Block {
+    NativeLevel5Block(
+        leftOffset: UInt16(activeArea.left),
+        rightOffset: UInt16(activeArea.right),
+        topOffset: UInt16(activeArea.top),
+        bottomOffset: UInt16(activeArea.bottom)
+    )
+}
+
 /// Level 6 mastering display and content-light values.
 private struct NativeLevel6Block {
     let maxDisplayMasteringLuminance: UInt16
@@ -411,15 +423,15 @@ private struct NativeDolbyVisionVdrDmData {
     let affectedMetadataID: UInt64 = 0
     let currentMetadataID: UInt64 = 0
     let sceneRefreshFlag: UInt64
-    let yccToRgbCoefficients: [Int16] = [9574, 0, 13802, 9574, -1540, -5348, 9574, 17610, 0]
-    let yccToRgbOffsets: [UInt32] = [16777216, 134217728, 134217728]
-    let rgbToLmsCoefficients: [Int16] = [7222, 8771, 390, 2654, 12430, 1300, 0, 422, 15962]
+    let yccToRgbCoefficients: [Int16]
+    let yccToRgbOffsets: [UInt32]
+    let rgbToLmsCoefficients: [Int16]
     let signalEOTF: UInt16 = 65535
     let signalEOTFParam0: UInt16 = 0
     let signalEOTFParam1: UInt16 = 0
     let signalEOTFParam2: UInt32 = 0
     let signalBitDepth: UInt8 = 12
-    let signalColorSpace: UInt8 = 0
+    let signalColorSpace: UInt8
     let signalChromaFormat: UInt8 = 0
     let signalFullRangeFlag: UInt8 = 1
     let sourceMinPQ: UInt16
@@ -427,6 +439,35 @@ private struct NativeDolbyVisionVdrDmData {
     let sourceDiagonal: UInt16 = 42
     var cmv29: NativeDolbyVisionDMContainer
     var cmv40: NativeDolbyVisionDMContainer?
+
+    init(
+        profile: DolbyVisionHEVCProfile,
+        sceneRefreshFlag: UInt64,
+        sourceMinPQ: UInt16,
+        sourceMaxPQ: UInt16,
+        cmv29: NativeDolbyVisionDMContainer,
+        cmv40: NativeDolbyVisionDMContainer?
+    ) {
+        self.sceneRefreshFlag = sceneRefreshFlag
+        self.sourceMinPQ = sourceMinPQ
+        self.sourceMaxPQ = sourceMaxPQ
+        self.cmv29 = cmv29
+        self.cmv40 = cmv40
+
+        if profile.usesNativeIPT {
+            // Exact Profile 5 values from dovi_tool Profile5::dm_data(). Native
+            // Profile 10 transports the same IPT-PQ-C2 RPU semantics in AV1.
+            yccToRgbCoefficients = [8192, 799, 1681, 8192, -933, 1091, 8192, 267, -5545]
+            yccToRgbOffsets = [0, 134217728, 134217728]
+            rgbToLmsCoefficients = [17081, -349, -349, -349, 17081, -349, -349, -349, 17081]
+            signalColorSpace = 2
+        } else {
+            yccToRgbCoefficients = [9574, 0, 13802, 9574, -1540, -5348, 9574, 17610, 0]
+            yccToRgbOffsets = [16777216, 134217728, 134217728]
+            rgbToLmsCoefficients = [7222, 8771, 390, 2654, 12430, 1300, 0, 422, 15962]
+            signalColorSpace = 0
+        }
+    }
 
     /// Serializes the per-frame dynamic metadata payload.
     func write(to writer: inout NativeDolbyVisionBitWriter) {
@@ -456,29 +497,69 @@ private struct NativeDolbyVisionVdrDmData {
 private struct NativeDolbyVisionRPUBuilder {
     private let config: NativeDolbyVisionConfig
     private let profile: DolbyVisionHEVCProfile
+    private let level4Measurements: [DolbyVisionLevel4Measurement]
+    private let frameRate: Double
 
     /// Stores parsed configuration and selected output profile.
-    init(config: NativeDolbyVisionConfig, profile: DolbyVisionHEVCProfile) {
+    init(
+        config: NativeDolbyVisionConfig,
+        profile: DolbyVisionHEVCProfile,
+        level4Measurements: [DolbyVisionLevel4Measurement],
+        frameRate: Double
+    ) {
         self.config = config
         self.profile = profile
+        self.level4Measurements = level4Measurements
+        self.frameRate = frameRate
     }
 
     /// Generates the configured frame span and fills gaps from active shot state.
     func generate() throws -> [Data] {
         let sortedShots = config.shots.sorted { $0.start < $1.start }
         let totalFrames = sortedShots.reduce(0) { $0 + $1.duration }
+        guard level4Measurements.count == totalFrames,
+              level4Measurements.enumerated().allSatisfy({ $0.offset == $0.element.frameOffset }) else {
+            throw nativeRPUError(
+                "Dolby Vision Level 4 measurements contain \(level4Measurements.count) " +
+                "sequential frames, but the authoring metadata covers \(totalFrames) frames."
+            )
+        }
+        var shotStartOffsets = Set<Int>()
+        var nextShotOffset = 0
+        for shot in sortedShots {
+            shotStartOffsets.insert(nextShotOffset)
+            nextShotOffset += shot.duration
+        }
+        let dynamicLevel4 = cmuBuildDolbyVisionLevel4(
+            measurements: level4Measurements,
+            frameRate: frameRate,
+            sceneRefreshOffsets: shotStartOffsets,
+            adaptiveEveryFrame: !profile.isProfile76
+        )
         var rpus: [Data] = []
         rpus.reserveCapacity(totalFrames)
+        var outputFrameOffset = 0
 
         for shot in sortedShots {
+            var frameBlocksByOffset: [Int: [NativeDolbyVisionMetadataBlock]] = [:]
+            frameBlocksByOffset.reserveCapacity(shot.frameEdits.count)
+            for edit in shot.frameEdits where frameBlocksByOffset[edit.editOffset] == nil {
+                frameBlocksByOffset[edit.editOffset] = edit.blocks
+            }
             for frameOffset in 0..<shot.duration {
-                let frameBlocks = shot.frameEdits.first(where: { $0.editOffset == frameOffset })?.blocks ?? []
+                var frameBlocks = frameBlocksByOffset[frameOffset] ?? []
+                let level4 = dynamicLevel4[outputFrameOffset]
+                frameBlocks.append(.level4(NativeLevel4Block(
+                    anchorPQ: level4.anchorPQ,
+                    anchorPower: level4.anchorPower
+                )))
                 let rpu = try buildFrameRPU(
-                    sceneRefresh: frameOffset == 0,
+                    sceneRefresh: !profile.isProfile76 || frameOffset == 0,
                     shotBlocks: shot.blocks,
                     frameBlocks: frameBlocks
                 )
                 rpus.append(rpu)
+                outputFrameOffset += 1
             }
         }
         return rpus
@@ -574,6 +655,7 @@ private struct NativeDolbyVisionRPUBuilder {
         }
 
         return NativeDolbyVisionVdrDmData(
+            profile: profile,
             sceneRefreshFlag: sceneRefresh ? 1 : 0,
             sourceMinPQ: sourceMinPQ,
             sourceMaxPQ: sourceMaxPQ,
@@ -586,14 +668,14 @@ private struct NativeDolbyVisionRPUBuilder {
     private func writeHeader(to writer: inout NativeDolbyVisionBitWriter) {
         writer.write(2, bits: 6)
         writer.write(18, bits: 11)
-        writer.write(1, bits: 4)
+        writer.write(profile.usesNativeIPT ? 0 : 1, bits: 4)
         writer.write(0, bits: 4)
         writer.writeBit(true)
         writer.writeBit(false)
         writer.write(0, bits: 2)
         writer.writeUE(23)
         writer.write(1, bits: 2)
-        writer.writeBit(false)
+        writer.writeBit(profile.usesNativeIPT)
         writer.writeUE(2)
         // Version 1.1 packs ext_mapping_idc above the low 8 bits of
         // el_bit_depth_minus8. Bits 7:5 carry the application ID; bits 4:0
@@ -794,11 +876,27 @@ final class DolbyVisionRPUProvider: @unchecked Sendable {
     private let expectedFrameCount: Int64
 
     /// Starts detached XML parsing and RPU generation for the selected profile.
-    init(metadataSource: DolbyVisionMetadataSource, profile: DolbyVisionHEVCProfile, expectedFrameCount: Int64) {
+    init(
+        metadataSource: DolbyVisionMetadataSource,
+        profile: DolbyVisionHEVCProfile,
+        expectedFrameCount: Int64,
+        level4Measurements: [DolbyVisionLevel4Measurement],
+        frameRate: Double,
+        profile7RasterPlan: DolbyVisionProfile7RasterPlan? = nil
+    ) {
         self.expectedFrameCount = expectedFrameCount
         task = Task.detached(priority: .userInitiated) {
-            let config = try NativeDolbyVisionXMLParser(xmlData: metadataSource.rawXMLData, profile: profile).parse()
-            return try NativeDolbyVisionRPUBuilder(config: config, profile: profile).generate()
+            let config = try NativeDolbyVisionXMLParser(
+                xmlData: metadataSource.rawXMLData,
+                profile: profile,
+                profile7RasterPlan: profile7RasterPlan
+            ).parse()
+            return try NativeDolbyVisionRPUBuilder(
+                config: config,
+                profile: profile,
+                level4Measurements: level4Measurements,
+                frameRate: frameRate
+            ).generate()
         }
     }
 
@@ -837,11 +935,17 @@ final class DolbyVisionRPUProvider: @unchecked Sendable {
 private struct NativeDolbyVisionXMLParser {
     private let xmlData: Data
     private let profile: DolbyVisionHEVCProfile
+    private let profile7RasterPlan: DolbyVisionProfile7RasterPlan?
 
     /// Stores raw XML and the profile that determines accepted defaults.
-    init(xmlData: Data, profile: DolbyVisionHEVCProfile) {
+    init(
+        xmlData: Data,
+        profile: DolbyVisionHEVCProfile,
+        profile7RasterPlan: DolbyVisionProfile7RasterPlan?
+    ) {
         self.xmlData = xmlData
         self.profile = profile
+        self.profile7RasterPlan = profile7RasterPlan
     }
 
     /// Parses document version, display definitions, global blocks, and shots.
@@ -860,10 +964,18 @@ private struct NativeDolbyVisionXMLParser {
 
         let isCMV4 = version.hasPrefix("4.") || version.hasPrefix("5.")
         let separator: Character = isCMV4 ? " " : ","
-        guard nativeFirstElement(".//*[local-name()='Outputs']/*[local-name()='Output']", in: root) != nil,
-              let video = nativeFirstElement(".//*[local-name()='Outputs']/*[local-name()='Output']/*[local-name()='Video']", in: root)
+        guard let output = nativeFirstElement(
+                  ".//*[local-name()='Outputs']/*[local-name()='Output']",
+                  in: root
+              ),
+              let video = nativeFirstElement("./*[local-name()='Video']", in: output)
         else {
             throw nativeRPUError("Dolby Vision XML must contain Outputs/Output/Video.")
+        }
+        if profile.isProfile76, profile7RasterPlan == nil {
+            throw nativeRPUError(
+                "Profile 7.6 RPU generation requires the encoded raster plan used for Level 5."
+            )
         }
 
         let targets = try parseTargetDisplays(in: video, xmlVersion: version, separator: separator)
@@ -873,6 +985,16 @@ private struct NativeDolbyVisionXMLParser {
         let sourceMaxPQ = mastering.map { nativeNitsToPQ12Bit(Double($0.maxLuminance)) }
 
         var defaultBlocks: [NativeDolbyVisionMetadataBlock] = [.level4(NativeLevel4Block(anchorPQ: 0, anchorPower: 0))]
+        if profile.isProfile76, let profile7RasterPlan {
+            let imageAspectRatio = nativeText(
+                "./*[local-name()='ImageAspectRatio']",
+                in: output
+            ).flatMap(Double.init)
+            let activeArea = try imageAspectRatio.map {
+                try profile7RasterPlan.activeArea(imageAspectRatio: $0)
+            } ?? profile7RasterPlan.defaultActiveArea
+            defaultBlocks.append(.level5(nativeProfile7Level5(from: activeArea)))
+        }
         if isCMV4 {
             defaultBlocks.append(.level3(NativeLevel3Block(minPQOffset: 2048, avgPQOffset: 2048, maxPQOffset: 2048)))
             defaultBlocks.append(.level9(NativeLevel9Block(length: 1, sourcePrimaryIndex: 0, primaries: [])))
@@ -1172,6 +1294,10 @@ private struct NativeDolbyVisionXMLParser {
         guard let text = nativeText("./*[local-name()='AspectRatios']", in: node) else { return nil }
         let values = nativeParseNumbers(text, separator: separator)
         guard values.count == 2 else { return nil }
+        if profile.isProfile76, let profile7RasterPlan {
+            let activeArea = try profile7RasterPlan.activeArea(imageAspectRatio: values[1])
+            return nativeProfile7Level5(from: activeArea)
+        }
         return NativeLevel5Block(leftOffset: 0, rightOffset: 0, topOffset: 0, bottomOffset: 0)
     }
 

@@ -10,6 +10,7 @@ func cmuPreflight(
     inputAsset: AVAsset,
     quality: String,
     colorTransform: ColorTransformRequest?,
+    dolbyVisionProfile: DolbyVisionHEVCProfile? = nil,
     masteringPeakNits: Float
 ) async throws {
     guard masteringPeakNits.isFinite,
@@ -47,10 +48,17 @@ func cmuPreflight(
                         "or Rec.2020-encoded PQ base layer."
                     )
                 }
-                print(
-                    "[CMU] \(quality.uppercased()) CMU analysis will apply the requested " +
-                    "\(resolved.outputGamut.label) PQ transform before measuring the pixels."
-                )
+                if let dolbyVisionProfile, !dolbyVisionProfile.usesNativeIPT {
+                    print(
+                        "[CMU] Profile \(dolbyVisionProfile.displayName) Level 4 analysis " +
+                        "uses the common PQ master before compatibility base-layer conversion."
+                    )
+                } else {
+                    print(
+                        "[CMU] \(quality.uppercased()) CMU analysis will apply the requested " +
+                        "\(resolved.outputGamut.label) PQ transform before measuring the pixels."
+                    )
+                }
             default:
                 throw CMUError.unsupportedColorSpace(
                     "Compressed Dolby Vision generation supports a preserved PQ base layer " +
@@ -140,6 +148,7 @@ func runCMUAnalysisBeforeCompressedEncode(
     sidecarBaseURL: URL,
     quality: String,
     colorTransform: ColorTransformRequest?,
+    dolbyVisionProfile: DolbyVisionHEVCProfile?,
     masteringPeakNits: Float,
     forcedStartTimecode: String?
 ) async throws -> CMUOutputArtifacts {
@@ -156,7 +165,9 @@ func runCMUAnalysisBeforeCompressedEncode(
     let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
     var descriptor = inputDescriptor
     var resolvedTransform: ResolvedColorTransform?
-    if let colorTransform, colorTransform.outputOETF == .pq {
+    if let colorTransform,
+       colorTransform.outputOETF == .pq,
+       dolbyVisionProfile == nil || dolbyVisionProfile?.usesNativeIPT == true {
         guard let track = try await inputAsset.loadTracks(withMediaType: .video).first else {
             throw CMUError.noVideoTrack(inputURL)
         }
@@ -223,8 +234,60 @@ private func runCMUAnalysis(
         "[CMU] Analyzed \(document.durationFrames) actual decoded frames " +
         "(\(document.recordIn)...\(document.recordOut)); MaxCLL \(document.maxCLL), MaxFALL \(document.maxFALL)."
     )
+    if let first = artifacts.level4Measurements.first,
+       let last = artifacts.level4Measurements.last {
+        print(
+            "[CMU] L4 PQ(maxRGB) moments \(artifacts.level4Measurements.count) frames; " +
+            "first \(String(format: "%.6f", first.meanMaxRGBPQ))/" +
+            "\(String(format: "%.6f", first.stdevMaxRGBPQ)), last " +
+            "\(String(format: "%.6f", last.meanMaxRGBPQ))/" +
+            "\(String(format: "%.6f", last.stdevMaxRGBPQ))."
+        )
+    }
     print("[CMU] XML -> \(artifacts.xmlURL.path)")
     return artifacts
+}
+
+/// Runs the Metal statistics prepass required when an external authoring XML
+/// does not carry the RPU-only per-frame Level 4 analysis sequence.
+func runDolbyVisionLevel4Analysis(
+    inputAsset: AVAsset,
+    colorTransform: ResolvedColorTransform?,
+    profile: DolbyVisionHEVCProfile
+) async throws -> [DolbyVisionLevel4Measurement] {
+    guard let inputURL = (inputAsset as? AVURLAsset)?.url else {
+        throw CMUError.unsupportedColorSpace(
+            "Dolby Vision Level 4 analysis requires file-based input media."
+        )
+    }
+    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
+    // P8.4/P10.4 still derives authoring L4 from the common PQ master, never
+    // from the HLG compatibility base layer.
+    let analysisTransform = profile.usesNativeIPT && colorTransform?.outputOETF == .pq
+        ? colorTransform
+        : nil
+    let descriptor = analysisTransform.map(inputDescriptor.applying) ?? inputDescriptor
+    let timecode = CMUTimecodeReference(
+        startFrame: 0,
+        stringValue: "00:00:00:00",
+        isDropFrame: false,
+        origin: .zero
+    )
+    print(
+        "[DoVi] Metal PQ-master Level 4 analysis: \(inputURL.lastPathComponent), " +
+        "\(descriptor.primaries.displayName) PQ."
+    )
+    let document = try await CMUMetalAnalyzer().analyze(
+        url: inputURL,
+        descriptor: descriptor,
+        source: analysisTransform == nil ? .input : .transformedInput,
+        masteringPeakNits: 10_000,
+        timecode: timecode,
+        colorTransform: analysisTransform
+    )
+    return cmuBuildDolbyVisionLevel4Measurements(
+        frames: document.frames
+    )
 }
 
 @discardableResult
