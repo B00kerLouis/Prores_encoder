@@ -21,7 +21,7 @@ final class SendableRef<T>: @unchecked Sendable {
     init(_ v: T) { value = v }
 }
 
-/// Bundles an AVAssetWriterInput + AVAssetReaderOutput pair for pump-based writing.
+/// Bundles one reader output with its destination writer input.
 final class MediaPumpPair: @unchecked Sendable {
     let input:  AVAssetWriterInput
     let output: AVAssetReaderOutput
@@ -540,7 +540,7 @@ private final class AVAudioFilePCMSource: AudioSampleBufferSource, @unchecked Se
     }
 }
 
-/// Bundles a synthetic QuickTime timecode sample with its writer input.
+/// Bundles a synthetic MOV timecode sample with its writer input.
 final class SyntheticTimecodePumpPair: @unchecked Sendable {
     let input: AVAssetWriterInput
     let sampleBuffer: CMSampleBuffer
@@ -552,7 +552,7 @@ final class SyntheticTimecodePumpPair: @unchecked Sendable {
     }
 }
 
-/// Generated Dolby Vision PHDR timed metadata writer state.
+/// Generated PHDR timed metadata writer state.
 private final class DolbyVisionMetadataPumpPair: @unchecked Sendable {
     let input: AVAssetWriterInput
     let writerAdaptor: AVAssetWriterInputMetadataAdaptor
@@ -1089,6 +1089,7 @@ private struct QuickTimeTimecodeInfo {
     let startFrame: Int64
     let fps: Int
     let isDropFrame: Bool
+    let formatFlags: UInt32
     let stringValue: String
 }
 
@@ -1098,6 +1099,7 @@ private struct SyntheticQuickTimeTimecodeTrack {
     let sampleBuffer: CMSampleBuffer
     let info: QuickTimeTimecodeInfo
     let endString: String
+    let isSourceDerived: Bool
 }
 
 /// Chooses source passthrough, synthesized timecode, or no timecode track.
@@ -1965,12 +1967,14 @@ private func timecodeFrameQuanta(for fpsInfo: FramerateInfo) -> Int {
 private func makeQuickTimeTimecodeInfo(
     startFrame: Int64,
     fps: Int,
-    isDropFrame: Bool
+    formatFlags: UInt32
 ) -> QuickTimeTimecodeInfo {
-    QuickTimeTimecodeInfo(
+    let isDropFrame = formatFlags & kCMTimeCodeFlag_DropFrame != 0
+    return QuickTimeTimecodeInfo(
         startFrame: startFrame,
         fps: fps,
         isDropFrame: isDropFrame,
+        formatFlags: formatFlags,
         stringValue: timecodeString(from: startFrame, fps: fps, dropFrame: isDropFrame)
     )
 }
@@ -2018,6 +2022,28 @@ private func makeSyntheticQuickTimeTimecodeTrack(
         )
     }
 
+    let formatFlags = kCMTimeCodeFlag_24HourMax
+        | (isDropFrame ? kCMTimeCodeFlag_DropFrame : 0)
+    let info = makeQuickTimeTimecodeInfo(
+        startFrame: startFrame,
+        fps: fps,
+        formatFlags: formatFlags
+    )
+    return try makeSyntheticQuickTimeTimecodeTrack(
+        info: info,
+        fpsInfo: fpsInfo,
+        frameCount: frameCount,
+        isSourceDerived: false
+    )
+}
+
+/// Rebuilds a timecode sample from parsed source state or a validated synthetic start.
+private func makeSyntheticQuickTimeTimecodeTrack(
+    info: QuickTimeTimecodeInfo,
+    fpsInfo: FramerateInfo,
+    frameCount: Int64,
+    isSourceDerived: Bool
+) throws -> SyntheticQuickTimeTimecodeTrack {
     let effectiveFrameCount = max(frameCount, 1)
     let frameDuration = CMTime(
         value: CMTimeValue(fpsInfo.denominator),
@@ -2028,15 +2054,13 @@ private func makeSyntheticQuickTimeTimecodeTrack(
         timescale: CMTimeScale(fpsInfo.numerator)
     )
 
-    let tcFlags = kCMTimeCodeFlag_24HourMax | (isDropFrame ? kCMTimeCodeFlag_DropFrame : 0)
-
     var formatDescription: CMFormatDescription?
     let formatStatus = CMTimeCodeFormatDescriptionCreate(
         allocator: kCFAllocatorDefault,
         timeCodeFormatType: kCMTimeCodeFormatType_TimeCode32,
         frameDuration: frameDuration,
-        frameQuanta: UInt32(fps),
-        flags: tcFlags,
+        frameQuanta: UInt32(info.fps),
+        flags: info.formatFlags,
         extensions: nil,
         formatDescriptionOut: &formatDescription
     )
@@ -2072,7 +2096,7 @@ private func makeSyntheticQuickTimeTimecodeTrack(
         )
     }
 
-    var startFrameBE = Int32(startFrame).bigEndian
+    var startFrameBE = Int32(info.startFrame).bigEndian
     let replaceStatus = withUnsafeBytes(of: &startFrameBE) { rawBytes in
         CMBlockBufferReplaceDataBytes(
             with: rawBytes.baseAddress!,
@@ -2119,17 +2143,17 @@ private func makeSyntheticQuickTimeTimecodeTrack(
         )
     }
 
-    let info = makeQuickTimeTimecodeInfo(
-        startFrame: startFrame,
-        fps: fps,
-        isDropFrame: isDropFrame
-    )
-    let endFrame = startFrame + effectiveFrameCount - 1
+    let endFrame = info.startFrame + effectiveFrameCount - 1
     return SyntheticQuickTimeTimecodeTrack(
         formatDescription: formatDescription,
         sampleBuffer: sampleBuffer,
         info: info,
-        endString: timecodeString(from: endFrame, fps: fps, dropFrame: isDropFrame)
+        endString: timecodeString(
+            from: endFrame,
+            fps: info.fps,
+            dropFrame: info.isDropFrame
+        ),
+        isSourceDerived: isSourceDerived
     )
 }
 
@@ -2145,6 +2169,29 @@ private func resolveMOVTimecodePlan(
             let info = try await readQuickTimeTimecodeInfo(asset: asset, track: sourceTrack)
             return .passthrough(track: sourceTrack, info: info)
         } catch {
+            if let sourceURL = (asset as? AVURLAsset)?.url {
+                do {
+                    let info = try readQuickTimeTimecodeInfoFromMOVSample(
+                        sourceURL: sourceURL,
+                        trackID: sourceTrack.trackID,
+                        expectedFormatDescription: try? await sourceTrack.load(.formatDescriptions).first
+                    )
+                    let reconstructed = try makeSyntheticQuickTimeTimecodeTrack(
+                        info: info,
+                        fpsInfo: fpsInfo,
+                        frameCount: estimatedFrames,
+                        isSourceDerived: true
+                    )
+                    print(
+                        "[TC] Reconstructing source QuickTime TC \(info.stringValue) from the MOV sample table because AVFoundation exposed no sample payload."
+                    )
+                    return .synthetic(reconstructed)
+                } catch let structuralError {
+                    print(
+                        "[TC] MOV timecode fallback also failed: \(structuralError.localizedDescription)"
+                    )
+                }
+            }
             let replacementStart = forcedStartTimecode ?? "01:00:00:00"
             print(
                 "[TC] Source QuickTime TC track is not readable (\(error.localizedDescription)); " +
@@ -2304,7 +2351,7 @@ private func writeUInt32BE(
 
 /// Reads a four-character atom type at a validated offset.
 private func atomType(in data: Data, at offset: Int) -> String? {
-    guard offset + 8 <= data.count else { return nil }
+    guard offset >= 0, offset <= data.count, data.count - offset >= 8 else { return nil }
     return String(data: data[(offset + 4)..<(offset + 8)], encoding: .isoLatin1)
 }
 
@@ -2314,6 +2361,13 @@ private func readExactData(
     at offset: UInt64,
     count: Int
 ) throws -> Data {
+    guard count >= 0 else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Invalid negative read size at offset \(offset)"]
+        )
+    }
     try handle.seek(toOffset: offset)
     guard let data = try handle.read(upToCount: count), data.count == count else {
         throw NSError(
@@ -2331,7 +2385,7 @@ private func readAtomDescriptor(
     at offset: UInt64,
     limit: UInt64
 ) throws -> MOVAtomDescriptor? {
-    guard offset + 8 <= limit else { return nil }
+    guard offset <= limit, limit - offset >= 8 else { return nil }
 
     let header = try readExactData(from: handle, at: offset, count: 8)
     var size = UInt64(readUInt32BE(from: header))
@@ -2339,6 +2393,13 @@ private func readAtomDescriptor(
     var headerSize: UInt64 = 8
 
     if size == 1 {
+        guard limit - offset >= 16 else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Truncated extended atom header at offset \(offset)"]
+            )
+        }
         let extendedSize = try readExactData(from: handle, at: offset + 8, count: 8)
         size = readUInt64BE(from: extendedSize)
         headerSize = 16
@@ -2346,7 +2407,7 @@ private func readAtomDescriptor(
         size = limit - offset
     }
 
-    guard size >= headerSize, offset + size <= limit else {
+    guard size >= headerSize, size <= limit - offset else {
         throw NSError(
             domain: "encodeMOV",
             code: 1,
@@ -2568,7 +2629,8 @@ private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) asyn
 
     let frameQuanta = Int(CMTimeCodeFormatDescriptionGetFrameQuanta(fd))
     let fps = frameQuanta > 0 ? frameQuanta : 25
-    let isDropFrame = (CMTimeCodeFormatDescriptionGetTimeCodeFlags(fd) & kCMTimeCodeFlag_DropFrame) != 0
+    let formatFlags = CMTimeCodeFormatDescriptionGetTimeCodeFlags(fd)
+    let isDropFrame = (formatFlags & kCMTimeCodeFlag_DropFrame) != 0
 
     let reader = try AVAssetReader(asset: asset)
     let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
@@ -2599,15 +2661,7 @@ private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) asyn
         )
     }
 
-    var totalLength = 0
-    var pointer: UnsafeMutablePointer<CChar>?
-    CMBlockBufferGetDataPointer(
-        blockBuffer,
-        atOffset: 0,
-        lengthAtOffsetOut: nil,
-        totalLengthOut: &totalLength,
-        dataPointerOut: &pointer)
-    guard totalLength >= 4, let pointer else {
+    guard CMBlockBufferGetDataLength(blockBuffer) >= 4 else {
         throw NSError(
             domain: "DolbyVisionMetadata",
             code: 1,
@@ -2615,12 +2669,256 @@ private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) asyn
         )
     }
 
-    let startFrame = Int64(Int32(bigEndian: pointer.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }))
+    var raw = Int32.zero
+    let copyStatus = withUnsafeMutableBytes(of: &raw) { bytes in
+        CMBlockBufferCopyDataBytes(
+            blockBuffer,
+            atOffset: 0,
+            dataLength: 4,
+            destination: bytes.baseAddress!
+        )
+    }
+    guard copyStatus == kCMBlockBufferNoErr else {
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: Int(copyStatus),
+            userInfo: [NSLocalizedDescriptionKey: "Source QuickTime timecode sample could not be copied."]
+        )
+    }
+    let startFrame = Int64(Int32(bigEndian: raw))
     return QuickTimeTimecodeInfo(
         startFrame: startFrame,
         fps: fps,
         isDropFrame: isDropFrame,
+        formatFlags: formatFlags,
         stringValue: timecodeString(from: startFrame, fps: fps, dropFrame: isDropFrame))
+}
+
+/// Reads a 32-bit QuickTime timecode sample directly from a URL-backed MOV.
+/// This is used only when AVFoundation exposes the track and sample timing but
+/// omits the sample's CMBlockBuffer.
+private func readQuickTimeTimecodeInfoFromMOVSample(
+    sourceURL: URL,
+    trackID: CMPersistentTrackID,
+    expectedFormatDescription: CMFormatDescription?
+) throws -> QuickTimeTimecodeInfo {
+    func failure(_ detail: String) -> NSError {
+        NSError(
+            domain: "QuickTimeTimecode",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: detail]
+        )
+    }
+
+    let handle = try FileHandle(forReadingFrom: sourceURL)
+    defer { try? handle.close() }
+    let fileSize = try handle.seekToEnd()
+    try handle.seek(toOffset: 0)
+
+    var moov: MOVAtomDescriptor?
+    var cursor: UInt64 = 0
+    while cursor < fileSize {
+        guard let atom = try readAtomDescriptor(from: handle, at: cursor, limit: fileSize) else {
+            break
+        }
+        if atom.type == "moov" {
+            moov = atom
+            break
+        }
+        cursor += atom.size
+    }
+    guard let moov else {
+        throw failure("Source MOV has no readable moov atom for timecode recovery.")
+    }
+
+    let requestedTrackID = UInt32(bitPattern: trackID)
+    var trackCursor = moov.offset + moov.headerSize
+    let moovLimit = moov.offset + moov.size
+    while trackCursor < moovLimit {
+        guard let trak = try readAtomDescriptor(
+            from: handle,
+            at: trackCursor,
+            limit: moovLimit
+        ) else {
+            break
+        }
+        defer { trackCursor += trak.size }
+        guard trak.type == "trak",
+              let tkhd = try findChildAtom(named: "tkhd", in: trak, handle: handle)
+        else {
+            continue
+        }
+
+        let tkhdVersion = try readExactData(
+            from: handle,
+            at: tkhd.offset + tkhd.headerSize,
+            count: 1
+        )[0]
+        let trackIDOffset: UInt64
+        switch tkhdVersion {
+        case 0: trackIDOffset = tkhd.offset + tkhd.headerSize + 12
+        case 1: trackIDOffset = tkhd.offset + tkhd.headerSize + 20
+        default: continue
+        }
+        let parsedTrackID = readUInt32BE(
+            from: try readExactData(from: handle, at: trackIDOffset, count: 4)
+        )
+        guard parsedTrackID == requestedTrackID else { continue }
+
+        guard let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stsd = try findChildAtom(named: "stsd", in: stbl, handle: handle),
+              let stsz = try findChildAtom(named: "stsz", in: stbl, handle: handle),
+              let stsc = try findChildAtom(named: "stsc", in: stbl, handle: handle)
+        else {
+            throw failure("Source QuickTime timecode track has an incomplete sample table.")
+        }
+
+        let handlerType = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize + 8,
+            count: 4
+        )
+        guard String(data: handlerType, encoding: .isoLatin1) == "tmcd" else {
+            throw failure("Requested source track is not a QuickTime tmcd track.")
+        }
+
+        let stsdEntryCount = readUInt32BE(
+            from: try readExactData(
+                from: handle,
+                at: stsd.offset + stsd.headerSize + 4,
+                count: 4
+            )
+        )
+        guard stsdEntryCount == 1,
+              let entry = try readAtomDescriptor(
+                from: handle,
+                at: stsd.offset + stsd.headerSize + 8,
+                limit: stsd.offset + stsd.size
+              ),
+              entry.type == "tmcd",
+              entry.size >= 34
+        else {
+            throw failure("Source QuickTime timecode track has an unsupported sample description.")
+        }
+
+        let entryFields = try readExactData(
+            from: handle,
+            at: entry.offset + entry.headerSize + 12,
+            count: 13
+        )
+        let formatFlags = readUInt32BE(from: entryFields, at: 0)
+        let timeScale = readUInt32BE(from: entryFields, at: 4)
+        let frameDurationValue = readUInt32BE(from: entryFields, at: 8)
+        let frameQuanta = Int(entryFields[12])
+        guard timeScale > 0, frameDurationValue > 0, frameQuanta > 0 else {
+            throw failure("Source QuickTime timecode sample description has invalid timing fields.")
+        }
+
+        if let expectedFormatDescription {
+            let expectedQuanta = Int(
+                CMTimeCodeFormatDescriptionGetFrameQuanta(expectedFormatDescription)
+            )
+            let expectedFlags = CMTimeCodeFormatDescriptionGetTimeCodeFlags(
+                expectedFormatDescription
+            )
+            let expectedDuration = CMTimeCodeFormatDescriptionGetFrameDuration(
+                expectedFormatDescription
+            )
+            let parsedDuration = CMTime(
+                value: CMTimeValue(frameDurationValue),
+                timescale: CMTimeScale(timeScale)
+            )
+            guard (expectedQuanta == 0 || expectedQuanta == frameQuanta),
+                  expectedFlags == formatFlags,
+                  !expectedDuration.isValid || CMTimeCompare(expectedDuration, parsedDuration) == 0
+            else {
+                throw failure("MOV and AVFoundation disagree on the source timecode format.")
+            }
+        }
+
+        let stszHeader = try readExactData(
+            from: handle,
+            at: stsz.offset + stsz.headerSize + 4,
+            count: 8
+        )
+        let constantSampleSize = readUInt32BE(from: stszHeader, at: 0)
+        let sampleCount = readUInt32BE(from: stszHeader, at: 4)
+        guard sampleCount == 1 else {
+            throw failure("Only a single-sample QuickTime timecode track can be reconstructed.")
+        }
+        let sampleSize: UInt32
+        if constantSampleSize > 0 {
+            sampleSize = constantSampleSize
+        } else {
+            sampleSize = readUInt32BE(
+                from: try readExactData(
+                    from: handle,
+                    at: stsz.offset + stsz.headerSize + 12,
+                    count: 4
+                )
+            )
+        }
+        guard sampleSize >= 4 else {
+            throw failure("Source QuickTime timecode sample is smaller than four bytes.")
+        }
+
+        let stscFields = try readExactData(
+            from: handle,
+            at: stsc.offset + stsc.headerSize + 4,
+            count: 16
+        )
+        let stscEntryCount = readUInt32BE(from: stscFields, at: 0)
+        let firstChunk = readUInt32BE(from: stscFields, at: 4)
+        let samplesPerChunk = readUInt32BE(from: stscFields, at: 8)
+        guard stscEntryCount >= 1, firstChunk == 1, samplesPerChunk >= 1 else {
+            throw failure("Source QuickTime timecode track has an unsupported chunk map.")
+        }
+
+        let chunkOffset: UInt64
+        if let stco = try findChildAtom(named: "stco", in: stbl, handle: handle) {
+            let fields = try readExactData(
+                from: handle,
+                at: stco.offset + stco.headerSize + 4,
+                count: 8
+            )
+            guard readUInt32BE(from: fields, at: 0) >= 1 else {
+                throw failure("Source QuickTime timecode track has no chunk offset.")
+            }
+            chunkOffset = UInt64(readUInt32BE(from: fields, at: 4))
+        } else if let co64 = try findChildAtom(named: "co64", in: stbl, handle: handle) {
+            let fields = try readExactData(
+                from: handle,
+                at: co64.offset + co64.headerSize + 4,
+                count: 12
+            )
+            guard readUInt32BE(from: fields, at: 0) >= 1 else {
+                throw failure("Source QuickTime timecode track has no 64-bit chunk offset.")
+            }
+            chunkOffset = readUInt64BE(from: fields, at: 4)
+        } else {
+            throw failure("Source QuickTime timecode track has no stco or co64 atom.")
+        }
+        guard chunkOffset <= fileSize, fileSize - chunkOffset >= UInt64(sampleSize) else {
+            throw failure("Source QuickTime timecode sample points outside the MOV file.")
+        }
+
+        let sampleData = try readExactData(
+            from: handle,
+            at: chunkOffset,
+            count: Int(sampleSize)
+        )
+        let startFrame = Int64(Int32(bitPattern: readUInt32BE(from: sampleData)))
+        return makeQuickTimeTimecodeInfo(
+            startFrame: startFrame,
+            fps: frameQuanta,
+            formatFlags: formatFlags
+        )
+    }
+
+    throw failure("Could not locate the requested QuickTime timecode track in the source MOV.")
 }
 
 /// Requires Rec.2020 PQ matrix tags for HDR10 HEVC output.
@@ -2940,30 +3238,28 @@ private func data(for patch: MOVSizeFieldPatch) throws -> Data {
     }
 }
 
-/// Selects the dynamic HDR HEVC level from raster size and frame rate.
-private func dolbyVisionHEVCLevel(width: Int, height: Int, fps: Double) -> UInt8 {
-    let pixels = width * height
-    if pixels >= 3840 * 2160 {
-        return fps > 30.0 ? 9 : 7
-    }
-    if pixels >= 1920 * 1080 {
-        return fps > 30.0 ? 6 : 4
-    }
-    return 3
-}
-
-/// Selects levels for full-range Native IPT profiles without changing legacy tables.
-private func dolbyVisionNativeLevel(width: Int, height: Int, fps: Double) -> UInt8 {
-    if width >= 3840 || height >= 2160 {
-        if fps > 60.0 { return 9 }
-        if fps > 30.0 { return 8 }
-        if fps > 24.0 { return 7 }
-        return 6
-    }
-    if width >= 1920 || height >= 1080 {
-        return fps > 30.0 ? 6 : 4
-    }
-    return 3
+/// Selects the smallest Dolby Vision level whose raster width and pixel rate
+/// both cover the encoded signal. Pixel count thresholds alone misclassify
+/// non-16:9 DCI/letterboxed UHD rasters such as 3840x2076 at 24 fps.
+private func dolbyVisionLevel(width: Int, height: Int, fps: Double) -> UInt8 {
+    let limits: [(level: UInt8, maxWidth: Int, maxPixelsPerSecond: Double)] = [
+        (1, 1_280, 22_118_400),
+        (2, 1_280, 27_648_000),
+        (3, 1_920, 49_766_400),
+        (4, 2_560, 62_208_000),
+        (5, 3_840, 124_416_000),
+        (6, 3_840, 199_065_600),
+        (7, 3_840, 248_832_000),
+        (8, 3_840, 398_131_200),
+        (9, 3_840, 497_664_000),
+        (10, 3_840, 995_328_000)
+    ]
+    let pixelRate = Double(max(width, 0))
+        * Double(max(height, 0))
+        * max(fps, 0)
+    return limits.first {
+        width <= $0.maxWidth && pixelRate <= $0.maxPixelsPerSecond
+    }?.level ?? 10
 }
 
 /// Builds a codec configuration box for the selected profile and compatibility ID.
@@ -2976,12 +3272,10 @@ private func makeDolbyVisionHEVCConfigurationBox(
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
     let dvLevel: UInt8
-    if profile.usesNativeIPT {
-        dvLevel = dolbyVisionNativeLevel(width: width, height: height, fps: fps)
-    } else if profile.isProfile76 {
+    if profile.isProfile76 {
         dvLevel = 6
     } else {
-        dvLevel = dolbyVisionHEVCLevel(width: width, height: height, fps: fps)
+        dvLevel = dolbyVisionLevel(width: width, height: height, fps: fps)
     }
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let layerFlags: UInt8 = profile.isProfile76 ? 0x07 : 0x05
@@ -2996,21 +3290,6 @@ private func makeDolbyVisionHEVCConfigurationBox(
     return box
 }
 
-/// Selects the dynamic HDR AV1 level from raster size and frame rate.
-private func dolbyVisionAV1Level(width: Int, height: Int, fps: Double) -> UInt8 {
-    let pixels = width * height
-    if pixels >= 3840 * 2160 {
-        if fps > 60.0 { return 9 }
-        if fps > 30.0 { return 8 }
-        if fps > 24.0 { return 7 }
-        return 6
-    }
-    if pixels >= 1920 * 1080 {
-        return fps > 30.0 ? 6 : 4
-    }
-    return 3
-}
-
 /// Builds the AV1 dynamic HDR configuration box for the selected profile.
 private func makeDolbyVisionAV1ConfigurationBox(
     profile: DolbyVisionHEVCProfile,
@@ -3020,9 +3299,7 @@ private func makeDolbyVisionAV1ConfigurationBox(
 ) -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel = profile.usesNativeIPT
-        ? dolbyVisionNativeLevel(width: width, height: height, fps: fps)
-        : dolbyVisionAV1Level(width: width, height: height, fps: fps)
+    let dvLevel = dolbyVisionLevel(width: width, height: height, fps: fps)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
     let byte4 = compatibilityID << 4
@@ -3127,6 +3404,53 @@ private func videoSampleEntry(
         }
     }
     return nil
+}
+
+/// Replaces an existing fixed-size dvcC/dvvC box without growing the MOV.
+/// VideoToolbox may author one itself, but its inferred level can be wrong for
+/// non-16:9 UHD rasters, so the project-owned configuration remains canonical.
+private func replaceExistingDolbyVisionConfigurationBox(
+    in movieURL: URL,
+    codec: DolbyVisionCompressedCodec,
+    replacementBox: Data
+) throws -> Bool {
+    guard let entry = try videoSampleEntry(
+        in: movieURL,
+        acceptedTypes: codec.acceptedSampleEntryTypes
+    ) else {
+        return false
+    }
+
+    let handle = try FileHandle(forUpdating: movieURL)
+    defer { try? handle.close() }
+    var cursor = entry.offset + 86
+    let limit = entry.offset + entry.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(
+            from: handle,
+            at: cursor,
+            limit: limit
+        ) else {
+            break
+        }
+        if child.type == "dvcC" || child.type == "dvvC" {
+            guard child.size == UInt64(replacementBox.count) else {
+                throw NSError(
+                    domain: "encodeMOV",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Existing \(child.type) size \(child.size) cannot be replaced by the \(replacementBox.count)-byte Dolby Vision configuration."
+                    ]
+                )
+            }
+            try handle.seek(toOffset: child.offset)
+            try handle.write(contentsOf: replacementBox)
+            try handle.synchronize()
+            return true
+        }
+        cursor += child.size
+    }
+    return false
 }
 
 @discardableResult
@@ -3861,7 +4185,7 @@ private func copyBytes(
                 userInfo: [NSLocalizedDescriptionKey: "Unexpected EOF while patching MOV."]
             )
         }
-        output.write(chunk)
+        try output.write(contentsOf: chunk)
         remaining -= UInt64(chunk.count)
     }
 }
@@ -3880,7 +4204,13 @@ private func rewriteMovieFile(
     defer { try? fm.removeItem(at: tempURL) }
 
     let input = try FileHandle(forReadingFrom: movieURL)
-    fm.createFile(atPath: tempURL.path, contents: nil)
+    guard fm.createFile(atPath: tempURL.path, contents: nil) else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Could not create temporary MOV rewrite file."]
+        )
+    }
     let output = try FileHandle(forWritingTo: tempURL)
     defer {
         try? input.close()
@@ -3890,17 +4220,34 @@ private func rewriteMovieFile(
     let fileSize = try input.seekToEnd()
     try input.seek(toOffset: 0)
 
+    guard insertionOffset <= fileSize else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "MOV insertion offset is outside the file."]
+        )
+    }
+
     let sortedPatches = try (sizePatches
         .map { ($0.offset, try data(for: $0)) } + dataPatches.map { ($0.offset, $0.data) })
         .sorted { $0.0 < $1.0 }
     var cursor: UInt64 = 0
 
     for (offset, patchData) in sortedPatches {
-        guard offset >= cursor else { continue }
+        let patchLength = UInt64(patchData.count)
+        guard offset >= cursor,
+              offset <= fileSize,
+              patchLength <= fileSize - offset else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "MOV patch range is invalid or overlaps another patch."]
+            )
+        }
         try copyBytes(from: input, to: output, count: offset - cursor)
-        output.write(patchData)
-        try input.seek(toOffset: offset + UInt64(patchData.count))
-        cursor = offset + UInt64(patchData.count)
+        try output.write(contentsOf: patchData)
+        try input.seek(toOffset: offset + patchLength)
+        cursor = offset + patchLength
     }
 
     guard insertionOffset >= cursor else {
@@ -3911,15 +4258,14 @@ private func rewriteMovieFile(
         )
     }
     try copyBytes(from: input, to: output, count: insertionOffset - cursor)
-    output.write(insertionData)
+    try output.write(contentsOf: insertionData)
     cursor = insertionOffset
     try input.seek(toOffset: cursor)
     try copyBytes(from: input, to: output, count: fileSize - cursor)
 
     try output.close()
     try input.close()
-    try fm.removeItem(at: movieURL)
-    try fm.moveItem(at: tempURL, to: movieURL)
+    _ = try fm.replaceItemAt(movieURL, withItemAt: tempURL)
 }
 
 /// Rewrites a movie while omitting disjoint ranges and updating size fields.
@@ -3936,7 +4282,13 @@ private func rewriteMovieFileRemovingRanges(
     defer { try? fm.removeItem(at: tempURL) }
 
     let input = try FileHandle(forReadingFrom: movieURL)
-    fm.createFile(atPath: tempURL.path, contents: nil)
+    guard fm.createFile(atPath: tempURL.path, contents: nil) else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Could not create temporary MOV rewrite file."]
+        )
+    }
     let output = try FileHandle(forWritingTo: tempURL)
     defer {
         try? input.close()
@@ -3965,7 +4317,10 @@ private func rewriteMovieFileRemovingRanges(
 
         if nextPatchOffset <= nextRangeOffset {
             let (offset, patchData) = sortedPatches[patchIndex]
-            guard offset >= cursor else {
+            let patchLength = UInt64(patchData.count)
+            guard offset >= cursor,
+                  offset <= fileSize,
+                  patchLength <= fileSize - offset else {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -3973,14 +4328,15 @@ private func rewriteMovieFileRemovingRanges(
                 )
             }
             try copyBytes(from: input, to: output, count: offset - cursor)
-            output.write(patchData)
-            try input.seek(toOffset: offset + UInt64(patchData.count))
-            cursor = offset + UInt64(patchData.count)
+            try output.write(contentsOf: patchData)
+            try input.seek(toOffset: offset + patchLength)
+            cursor = offset + patchLength
             patchIndex += 1
         } else {
             let range = sortedRanges[rangeIndex]
             guard range.offset >= cursor,
-                  range.offset + range.length <= fileSize else {
+                  range.offset <= fileSize,
+                  range.length <= fileSize - range.offset else {
                 throw NSError(
                     domain: "encodeMOV",
                     code: 1,
@@ -3998,8 +4354,7 @@ private func rewriteMovieFileRemovingRanges(
 
     try output.close()
     try input.close()
-    try fm.removeItem(at: movieURL)
-    try fm.moveItem(at: tempURL, to: movieURL)
+    _ = try fm.replaceItemAt(movieURL, withItemAt: tempURL)
 }
 
 /// Normalizes the HEVC sample entry and dynamic HDR configuration after writing.
@@ -4010,15 +4365,22 @@ private func patchDolbyVisionHEVCConfigurationAtom(
     height: Int,
     fps: Double
 ) throws {
-    guard let targets = try findHEVCSampleEntryPatchTargets(in: movieURL) else {
-        return
-    }
     let box = makeDolbyVisionHEVCConfigurationBox(
         profile: profile,
         width: width,
         height: height,
         fps: fps
     )
+    if try replaceExistingDolbyVisionConfigurationBox(
+        in: movieURL,
+        codec: .hevc,
+        replacementBox: box
+    ) {
+        return
+    }
+    guard let targets = try findHEVCSampleEntryPatchTargets(in: movieURL) else {
+        return
+    }
     try rewriteMovieFile(
         movieURL: movieURL,
         insertionOffset: targets.insertOffset,
@@ -4036,15 +4398,22 @@ private func patchDolbyVisionAV1ConfigurationAtom(
     height: Int,
     fps: Double
 ) throws {
-    guard let targets = try findAV1SampleEntryPatchTargets(in: movieURL) else {
-        return
-    }
     let box = makeDolbyVisionAV1ConfigurationBox(
         profile: profile,
         width: width,
         height: height,
         fps: fps
     )
+    if try replaceExistingDolbyVisionConfigurationBox(
+        in: movieURL,
+        codec: .av1,
+        replacementBox: box
+    ) {
+        return
+    }
+    guard let targets = try findAV1SampleEntryPatchTargets(in: movieURL) else {
+        return
+    }
     try rewriteMovieFile(
         movieURL: movieURL,
         insertionOffset: targets.insertOffset,
@@ -4207,7 +4576,7 @@ private func startAudioSampleSourcePump(
     }
 }
 
-/// Writes a one-sample synthetic QuickTime TC track.
+/// Writes a one-sample synthetic MOV timecode track.
 private func startSyntheticTimecodePump(
     _ pair: SyntheticTimecodePumpPair,
     queueLabel: String,
@@ -4387,9 +4756,357 @@ private func startVideoSourcePump(
     }
 }
 
+// MARK: - Encoded Container and Elementary Stream Output
+
+/// The two ISO base-media containers supported by the single-file encoder.
+enum EncodedVideoContainer: Sendable {
+    case mov
+    case mp4
+
+    var fileType: AVFileType {
+        switch self {
+        case .mov: return .mov
+        case .mp4: return .mp4
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .mov: return "mov"
+        case .mp4: return "mp4"
+        }
+    }
+
+    /// Timecode and timed metadata tracks are intentionally MOV-only.
+    var supportsQuickTimeAncillaryTracks: Bool {
+        self == .mov
+    }
+}
+
+/// Emits a decodable elementary stream from the samples that were actually muxed.
+/// The dual-layer profile is handled by its dedicated writer because the base and
+/// enhancement layers are distinct streams rather than one HEVC elementary stream.
+enum EncodedVideoRawOutput {
+    struct AV1OBU {
+        let type: UInt8
+        let data: Data
+    }
+
+    static func outputURL(for encodedOutputURL: URL, quality: String) -> URL {
+        let rawExtension: String
+        if isHEVCQuality(quality) {
+            rawExtension = "hevc"
+        } else if isAV1Quality(quality) {
+            rawExtension = "obu"
+        } else {
+            rawExtension = "prores"
+        }
+        let directoryURL = encodedOutputURL.deletingLastPathComponent()
+        let basename = encodedOutputURL.deletingPathExtension().lastPathComponent
+        return directoryURL.appendingPathComponent("\(basename)_raw.\(rawExtension)")
+    }
+
+    static func outputURLs(
+        for encodedOutputURL: URL,
+        quality: String,
+        profile: DolbyVisionHEVCProfile?
+    ) -> [URL] {
+        if isHEVCQuality(quality), profile?.isProfile76 == true {
+            let dual = DolbyVisionProfile7DualWriter.outputURLs(for: encodedOutputURL)
+            return [dual.baseLayerURL, dual.enhancementLayerURL]
+        }
+        return [outputURL(for: encodedOutputURL, quality: quality)]
+    }
+
+    static func hevcRawParameterSets(from sampleBuffer: CMSampleBuffer) -> [Data] {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return []
+        }
+        var parameterSetCount = 0
+        guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: &parameterSetCount,
+            nalUnitHeaderLengthOut: nil
+        ) == noErr else {
+            return []
+        }
+        return (0..<parameterSetCount).compactMap { index in
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: index,
+                parameterSetPointerOut: &pointer,
+                parameterSetSizeOut: &size,
+                parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil
+            ) == noErr, let pointer, size > 0 else {
+                return nil
+            }
+            return Data(bytes: pointer, count: size)
+        }
+    }
+
+    static func av1SequenceHeaderOBU(from sampleBuffer: CMSampleBuffer) -> Data? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let extensions = CMFormatDescriptionGetExtensions(formatDescription) as? [String: Any],
+              let atoms = extensions[
+                kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+              ] as? [String: Any],
+              let av1C = atoms["av1C"] as? Data,
+              av1C.count > 4 else {
+            return nil
+        }
+        // ISO/IEC 14496-15 av1C carries configOBUs after its four fixed bytes.
+        return Data(av1C.dropFirst(4))
+    }
+
+    /// Splits a low-overhead AV1 stream into complete size-delimited OBUs.
+    static func av1OBUs(in data: Data) throws -> [AV1OBU] {
+        func failure(_ offset: Int, _ detail: String) -> NSError {
+            NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 13,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Invalid AV1 OBU at byte \(offset): \(detail)"
+                ]
+            )
+        }
+
+        var result: [AV1OBU] = []
+        var cursor = data.startIndex
+        while cursor < data.endIndex {
+            let start = cursor
+            let byteOffset = data.distance(from: data.startIndex, to: start)
+            let header = data[cursor]
+            cursor = data.index(after: cursor)
+            let type = (header >> 3) & 0x0f
+            let hasExtension = header & 0x04 != 0
+            let hasSizeField = header & 0x02 != 0
+            guard header & 0x80 == 0, hasSizeField else {
+                throw failure(byteOffset, "forbidden bit is set or the size field is absent.")
+            }
+            if hasExtension {
+                guard cursor < data.endIndex else {
+                    throw failure(byteOffset, "extension header is truncated.")
+                }
+                cursor = data.index(after: cursor)
+            }
+
+            var payloadSize = 0
+            var shift = 0
+            var completedLEB128 = false
+            while cursor < data.endIndex, shift <= 56 {
+                let byte = data[cursor]
+                cursor = data.index(after: cursor)
+                payloadSize |= Int(byte & 0x7f) << shift
+                if byte & 0x80 == 0 {
+                    completedLEB128 = true
+                    break
+                }
+                shift += 7
+            }
+            guard completedLEB128,
+                  let end = data.index(
+                    cursor,
+                    offsetBy: payloadSize,
+                    limitedBy: data.endIndex
+                  )
+            else {
+                throw failure(byteOffset, "payload size is truncated or out of range.")
+            }
+            result.append(AV1OBU(type: type, data: Data(data[start..<end])))
+            cursor = end
+        }
+        return result
+    }
+
+    static func appendHEVCAnnexB(
+        _ data: Data,
+        from sampleBuffer: CMSampleBuffer,
+        to handle: FileHandle
+    ) throws {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            throw NSError(domain: "EncodedVideoRawOutput", code: 8)
+        }
+        var nalLengthSize: Int32 = 4
+        guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: nil,
+            nalUnitHeaderLengthOut: &nalLengthSize
+        ) == noErr,
+              nalLengthSize > 0 else {
+            throw NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "Could not determine the HEVC NAL length prefix size."]
+            )
+        }
+        let prefixSize = Int(nalLengthSize)
+        guard (1...4).contains(prefixSize) else {
+            throw NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported HEVC NAL length prefix size \(prefixSize)."]
+            )
+        }
+        var offset = 0
+        while offset <= data.count, data.count - offset >= prefixSize {
+            var nalLength = 0
+            for byte in data[offset..<(offset + prefixSize)] {
+                nalLength = (nalLength << 8) | Int(byte)
+            }
+            offset += prefixSize
+            guard nalLength > 0, nalLength <= data.count - offset else {
+                throw NSError(
+                    domain: "EncodedVideoRawOutput",
+                    code: 10,
+                    userInfo: [NSLocalizedDescriptionKey: "Encountered an invalid HEVC NAL length while writing raw output."]
+                )
+            }
+            try handle.write(contentsOf: Data([0, 0, 0, 1]))
+            try handle.write(contentsOf: Data(data[offset..<(offset + nalLength)]))
+            offset += nalLength
+        }
+        guard offset == data.count else {
+            throw NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "HEVC sample ended in a partial NAL length prefix."]
+            )
+        }
+    }
+}
+
+/// Synchronously receives the exact encoded samples immediately before muxing.
+/// One writer task owns each instance, so raw output preserves ordering and RPU
+/// injection without requiring a second decode/read pass over the container.
+final class EncodedVideoRawWriter: @unchecked Sendable {
+    let outputURL: URL
+    private let handle: FileHandle
+    private let isHEVC: Bool
+    private let isAV1: Bool
+    private var wroteParameterSets = false
+    private var wroteAV1SequenceHeader = false
+    private var startedAV1TemporalUnit = false
+    private var sawAV1Frame = false
+    private var isFinished = false
+
+    init(encodedOutputURL: URL, quality: String) throws {
+        outputURL = EncodedVideoRawOutput.outputURL(for: encodedOutputURL, quality: quality)
+        isHEVC = isHEVCQuality(quality)
+        isAV1 = isAV1Quality(quality)
+        try? FileManager.default.removeItem(at: outputURL)
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
+            throw NSError(
+                domain: "EncodedVideoRawWriter",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not create raw video output at \(outputURL.path)."]
+            )
+        }
+        do {
+            handle = try FileHandle(forWritingTo: outputURL)
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
+    }
+
+    func write(_ sampleBuffer: CMSampleBuffer) throws {
+        guard !isFinished else {
+            throw NSError(domain: "EncodedVideoRawWriter", code: 2)
+        }
+        guard let data = compressedData(from: sampleBuffer), !data.isEmpty else {
+            throw NSError(
+                domain: "EncodedVideoRawWriter",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "The encoded video stream contains an empty sample."]
+            )
+        }
+        if isHEVC {
+            if !wroteParameterSets {
+                let parameterSets = EncodedVideoRawOutput.hevcRawParameterSets(from: sampleBuffer)
+                guard !parameterSets.isEmpty else {
+                    throw NSError(
+                        domain: "EncodedVideoRawWriter",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "HEVC output has no parameter sets."]
+                    )
+                }
+                for parameterSet in parameterSets {
+                    try handle.write(contentsOf: Data([0, 0, 0, 1]))
+                    try handle.write(contentsOf: parameterSet)
+                }
+                wroteParameterSets = true
+            }
+            try EncodedVideoRawOutput.appendHEVCAnnexB(data, from: sampleBuffer, to: handle)
+        } else if isAV1 {
+            if !wroteAV1SequenceHeader {
+                guard let sequenceHeader = EncodedVideoRawOutput.av1SequenceHeaderOBU(
+                    from: sampleBuffer
+                ), !sequenceHeader.isEmpty else {
+                    throw NSError(
+                        domain: "EncodedVideoRawWriter",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "AV1 output has no sequence-header OBU."]
+                    )
+                }
+                try writeAV1OBUs(sequenceHeader)
+                wroteAV1SequenceHeader = true
+            }
+            try writeAV1OBUs(data)
+        } else {
+            try handle.write(contentsOf: data)
+        }
+    }
+
+    /// Restores one delimiter per AV1 temporal unit. Dolby Vision metadata OBU
+    /// type 5 starts the next unit after the preceding frame OBU.
+    private func writeAV1OBUs(_ data: Data) throws {
+        for obu in try EncodedVideoRawOutput.av1OBUs(in: data) {
+            if obu.type == 2 {
+                continue
+            }
+            if !startedAV1TemporalUnit || (sawAV1Frame && obu.type == 5) {
+                try handle.write(contentsOf: Data([0x12, 0x00]))
+                startedAV1TemporalUnit = true
+                sawAV1Frame = false
+            }
+            try handle.write(contentsOf: obu.data)
+            if obu.type == 3 || obu.type == 6 || obu.type == 7 {
+                sawAV1Frame = true
+            }
+        }
+    }
+
+    func finish() throws {
+        guard !isFinished else { return }
+        do {
+            try handle.close()
+            isFinished = true
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
+    }
+
+    deinit {
+        if !isFinished {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+    }
+}
+
 // MARK: - MOV Encode Pipeline
 
-/// Encode an AVAsset to MOV using VTCompressionSession (or passthrough).
+/// Encodes a media asset to MOV or MP4, with optional passthrough.
 func encodeMOV(
     asset: AVAsset,
     outputURL: URL,
@@ -4406,11 +5123,12 @@ func encodeMOV(
     fpsInfo: FramerateInfo,
     colorTransform: ColorTransformRequest?,
     useDolbyVisionCodecTag: Bool = false,
-    dolbyVisionDualOutput: Bool = false
+    container: EncodedVideoContainer = .mov,
+    outputVideoRaw: Bool = false
 ) async -> Bool {
 
-    guard outputURL.pathExtension.lowercased() == "mov" else {
-        print("[Error] MOV encoding requires a .mov output path; MP4 output is not supported.")
+    guard outputURL.pathExtension.lowercased() == container.fileExtension else {
+        print("[Error] \(container.fileExtension.uppercased()) encoding requires a .\(container.fileExtension) output path.")
         return false
     }
 
@@ -4420,9 +5138,12 @@ func encodeMOV(
     let isCompressedHDR = isHEVC || isAV1
     let requestedDVProfile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
     let usesNativeDolbyVision = requestedDVProfile?.usesNativeIPT == true
-    if dolbyVisionDualOutput
-        && !(isHEVC && hevcOptions?.dvProfile?.isProfile76 == true) {
-        print("[Error] --dual requires HEVC Dolby Vision Profile 7.6 output.")
+    if container == .mp4 && !isCompressedHDR {
+        print("[Error] MP4 output supports only HEVC and AV1 encoding.")
+        return false
+    }
+    if outputVideoRaw && isPassthrough {
+        print("[Error] --outupt-video-raw / -ovr requires a re-encoded video quality, not pass-through.")
         return false
     }
     let resolvedColorTransform: ResolvedColorTransform?
@@ -4476,19 +5197,23 @@ func encodeMOV(
     let audioTrack = removesSourceAudio
         ? nil
         : (try? await asset.loadTracks(withMediaType: .audio).first)
-    let sourceMetadataTracks = (try? await asset.loadTracks(withMediaType: .metadata)) ?? []
+    let sourceMetadataTracks = container.supportsQuickTimeAncillaryTracks
+        ? ((try? await asset.loadTracks(withMediaType: .metadata)) ?? [])
+        : []
     let estimatedFrames = await estimateFrameCount(asset: asset)
     let sourceIsProRes = isAV1 ? await isSourceProRes(videoTrack) : false
 
     let timecodePlan: MOVTimecodePlan
     let sourceTimecodeInfo: QuickTimeTimecodeInfo?
     do {
-        timecodePlan = try await resolveMOVTimecodePlan(
-            asset: asset,
-            fpsInfo: fpsInfo,
-            estimatedFrames: estimatedFrames,
-            forcedStartTimecode: forcedOutputStartTimecode
-        )
+        timecodePlan = container.supportsQuickTimeAncillaryTracks
+            ? try await resolveMOVTimecodePlan(
+                asset: asset,
+                fpsInfo: fpsInfo,
+                estimatedFrames: estimatedFrames,
+                forcedStartTimecode: forcedOutputStartTimecode
+            )
+            : .none
         switch timecodePlan {
         case .none:
             sourceTimecodeInfo = nil
@@ -4500,8 +5225,23 @@ func encodeMOV(
                 print("[TC] Preserving source QuickTime TC \(info.stringValue).")
             }
         case .synthetic(let syntheticTrack):
-            sourceTimecodeInfo = nil
-            print("[TC] Writing synthetic QuickTime TC \(syntheticTrack.info.stringValue) -> \(syntheticTrack.endString).")
+            sourceTimecodeInfo = syntheticTrack.isSourceDerived
+                ? syntheticTrack.info
+                : nil
+            if syntheticTrack.isSourceDerived {
+                if let forcedOutputStartTimecode {
+                    print(
+                        "[TC] Source QuickTime TC \(syntheticTrack.info.stringValue) detected; ignoring -ffoa \(forcedOutputStartTimecode)."
+                    )
+                }
+                print(
+                    "[TC] Writing reconstructed source QuickTime TC \(syntheticTrack.info.stringValue) -> \(syntheticTrack.endString)."
+                )
+            } else {
+                print(
+                    "[TC] Writing synthetic QuickTime TC \(syntheticTrack.info.stringValue) -> \(syntheticTrack.endString)."
+                )
+            }
         }
     } catch {
         print("[Error] \(error.localizedDescription)")
@@ -4855,8 +5595,28 @@ func encodeMOV(
         var profile7DualWriter: DolbyVisionProfile7DualWriter? = nil
         var av1Bridge: AV1Bridge? = nil
         var av1FormatDescription: CMFormatDescription? = nil
+        var hevcFormatDescription: CMFormatDescription? = nil
         var av1DecodeSession: ProResNativeDecodeSession? = nil
         if !isPassthrough {
+            if isHEVC {
+                var description: CMVideoFormatDescription?
+                let status = CMVideoFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault,
+                    codecType: kCMVideoCodecType_HEVC,
+                    width: Int32(width),
+                    height: Int32(height),
+                    extensions: nil,
+                    formatDescriptionOut: &description
+                )
+                guard status == noErr, let description else {
+                    throw NSError(
+                        domain: "encodeMOV",
+                        code: Int(status),
+                        userInfo: [NSLocalizedDescriptionKey: "Could not create the HEVC sample description for the output container."]
+                    )
+                }
+                hevcFormatDescription = description
+            }
             if isAV1 {
                 guard let av1Options else {
                     throw NSError(
@@ -4866,7 +5626,7 @@ func encodeMOV(
                     )
                 }
                 let bridge = AV1Bridge()
-                let bridgeConfig = makeAV1BridgeConfig(
+                let bridgeConfig = try makeAV1BridgeConfig(
                     width: width,
                     height: height,
                     fpsInfo: fpsInfo,
@@ -4941,7 +5701,7 @@ func encodeMOV(
                     colorSpace: effectiveColorSpace,
                     bitrateMbps: hevcOptions!.bitrateMbps
                 )
-                if dolbyVisionDualOutput {
+                if outputVideoRaw {
                     let dualWriter = try DolbyVisionProfile7DualWriter(
                         outputURL: outputURL,
                         fpsInfo: fpsInfo,
@@ -4964,6 +5724,14 @@ func encodeMOV(
             }
         }
 
+        let rawVideoWriter = outputVideoRaw
+            && hevcOptions?.dvProfile?.isProfile76 != true
+            ? try EncodedVideoRawWriter(encodedOutputURL: outputURL, quality: quality)
+            : nil
+        if let rawVideoWriter {
+            print("[Raw] Writing video elementary stream: \(rawVideoWriter.outputURL.path)")
+        }
+
         // For passthrough, keep VideoFrameSource for the DispatchQueue pump.
         let videoSource: VideoFrameSource? = isPassthrough
             ? VideoFrameSource(output: videoOut, vtSession: nil,
@@ -4972,13 +5740,13 @@ func encodeMOV(
 
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: container.fileType)
         writer.shouldOptimizeForNetworkUse = false
 
         // Video input: nil outputSettings = passthrough of compressed data.
         let vFmtDesc = isPassthrough
             ? sourceVideoFormatDescription
-            : av1FormatDescription
+            : (isHEVC ? hevcFormatDescription : av1FormatDescription)
         let videoIn = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: vFmtDesc)
         videoIn.expectsMediaDataInRealTime = false
@@ -5163,7 +5931,7 @@ func encodeMOV(
         }
 
         var dolbyVisionPair: DolbyVisionMetadataPumpPair? = nil
-        if let dolbyVisionMetadata {
+        if container.supportsQuickTimeAncillaryTracks, let dolbyVisionMetadata {
             let doviFmt = try dolbyVisionMetadata.makeFormatDescription()
             let doviIn = AVAssetWriterInput(
                 mediaType: .metadata,
@@ -5242,6 +6010,7 @@ func encodeMOV(
         let videoInRef = SendableRef(videoIn)
         let writerRef = SendableRef(writer)
         let readerRef = SendableRef(reader)
+        let rawVideoWriterRef = rawVideoWriter.map(SendableRef.init)
         let extraAudioReaderRef = extraAudioReader.map(SendableRef.init)
         let pipelineCapacity = proResPipelineChannelCapacity(width: width, height: height, quality: quality)
         let failureBox = PipelineFailureBox()
@@ -5370,10 +6139,10 @@ func encodeMOV(
         } else {
             // ── Re-encode: 3-stage async pipeline ──
             //
-            // Stage 1 (readerTask):  AVAssetReader → pixelChannel (capacity 4)
+            // Stage 1 (readerTask):  reader output → pixelChannel (capacity 4)
             // Stage 2 (encoderTask): pixelChannel → VT submit (async)
             // Stage 2b (drainTask):  VT output → compressedChannel (capacity 4)
-            // Stage 3 (writerTask):  compressedChannel → AVAssetWriterInput.append
+            // Stage 3 (writerTask):  compressedChannel → writer input
             //
             // Audio/timecode/metadata pumps run concurrently alongside.
 
@@ -5541,6 +6310,14 @@ func encodeMOV(
                             }
                             guard vIn.append(sampleToAppend) else {
                                 failureBox.store(makeWriterFailure(stage: "AV1 video append failed", writer: writerRef.value, reader: readerRef.value))
+                                compressedChannel.finish()
+                                vIn.markAsFinished()
+                                return
+                            }
+                            do {
+                                try rawVideoWriterRef?.value.write(sampleToAppend)
+                            } catch {
+                                failureBox.store(error)
                                 compressedChannel.finish()
                                 vIn.markAsFinished()
                                 return
@@ -5848,6 +6625,14 @@ func encodeMOV(
                             vIn.markAsFinished()
                             return
                         }
+                        do {
+                            try rawVideoWriterRef?.value.write(sampleToAppend)
+                        } catch {
+                            failureBox.store(error)
+                            compressedChannel.finish()
+                            vIn.markAsFinished()
+                            return
+                        }
                         progress?.increment()
                         frameIndex += 1
                     }
@@ -5970,6 +6755,7 @@ func encodeMOV(
         if let error = failureBox.error {
             throw error
         }
+        try rawVideoWriter?.finish()
         await writer.finishWriting()
         if writer.status != .completed {
             throw makeWriterFailure(stage: "Writer finalize failed", writer: writer, reader: reader)
@@ -5987,7 +6773,7 @@ func encodeMOV(
                 ]
             )
         }
-        if let dolbyVisionMetadata {
+        if container.supportsQuickTimeAncillaryTracks, let dolbyVisionMetadata {
             try patchDolbyVisionMetadataTrackAtoms(
                 in: outputURL,
                 metadataKeyValue: dolbyVisionMetadata.metadataKeyValue)
@@ -6116,6 +6902,9 @@ func encodeMOV(
                 sourceURL: sourceURL,
                 outputURL: outputURL
             )
+        }
+        if let rawVideoWriter {
+            print("[Raw] Video elementary stream written: \(rawVideoWriter.outputURL.path)")
         }
         return true
 

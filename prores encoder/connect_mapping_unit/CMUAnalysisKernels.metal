@@ -460,18 +460,18 @@ inline float2 p7_adjoint_vertical_chroma_value(
 }
 
 // Annex B performs (+ half divisor) integer rounding and clips each spatial
-// resampling stage in the unsigned EL-code domain. Scratch textures carry the
-// same signal with the 512 NLQ offset removed, so the clip range is translated
-// by -512 here. The divisors are powers of two and therefore exact in float.
+// resampling stage in the unsigned 10-bit EL-code domain. Scratch textures
+// carry that signal with the 512 NLQ offset removed, translating [0, 1023] to
+// [-512, 511]. Keeping the upper limit in the same 10-bit code domain is
+// essential: a 16-bit-word limit here would permit positive filter overshoot
+// at bright edges while clipping the negative side.
 inline float p7_reference_resample_offset(float value) {
-    return clamp(floor(value + 0.5f), -512.0f, 65023.0f);
+    return clamp(floor(value + 0.5f), -512.0f, 511.0f);
 }
 
 inline float2 p7_reference_resample_offset(float2 value) {
     return clamp(
-        floor(value + float2(0.5f)),
-        float2(-512.0f),
-        float2(65023.0f)
+        floor(value + float2(0.5f)), float2(-512.0f), float2(511.0f)
     );
 }
 
@@ -649,6 +649,8 @@ kernel void p7_subtract_projection_chroma(
     target.write(float4(value, 0.0f, 1.0f), position);
 }
 
+// The correction is derived after subtracting the reconstructed projection;
+// it therefore has no DC component and preserves uniform white-area level.
 kernel void p7_finalize_luma(
     texture2d<float, access::read> horizontalCorrection [[texture(0)]],
     texture2d<float, access::read> initial [[texture(1)]],

@@ -82,8 +82,7 @@ struct DolbyVisionProfile7RasterPlan: Sendable {
         )
     }
 
-    /// Implements the Level 5 aspect-ratio calculation used by dovi_tool, using
-    /// the actual encoded canvas rather than an obsolete pre-padding canvas.
+    /// Calculates Level 5 active-area offsets from the actual encoded canvas.
     func activeArea(imageAspectRatio: Double) throws -> DolbyVisionProfile7ActiveArea {
         guard imageAspectRatio.isFinite, imageAspectRatio > 0 else {
             throw DolbyVisionProfile7Error.make(
@@ -176,7 +175,7 @@ private final class Profile7ReconstructionDecoder {
         }
 
         let waiter = Profile7DecodeWaiter()
-        // VideoToolbox owns this reference until it invokes the callback. A
+        // The decoder owns this reference until it invokes the callback. A
         // timeout must not leave an unretained frameRefcon that can later
         // dereference a deallocated waiter.
         let waiterReference = Unmanaged.passRetained(waiter)
@@ -461,8 +460,8 @@ private final class Profile7MetalResidualGenerator {
         return output
     }
 
-    /// Computes full-resolution forward-NLQ targets and projects them through
-    /// the reference Profile 7 EL upsampler into a half-resolution P010 frame.
+    /// Computes full-resolution forward-NLQ targets and projects them into a
+    /// half-resolution P010 enhancement frame.
     func makeEnhancementLayer(
         source: CVPixelBuffer,
         reconstructedBaseLayer: CVPixelBuffer
@@ -872,15 +871,21 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
         let p7ColorSpace = SourceColorSpace.hevcHDR10(basedOn: colorSpace)
 
         let baseLayerOptions = HEVCEncodeOptions(
-            // Dolby's UHD Blu-ray FEL default and the supplied reference stream
-            // both use an approximately 85/15 BL-to-EL allocation.
-            bitrateMbps: bitrateMbps * 0.85,
-            dvProfile: .profile76
+            // Keep a stable whole-percent split between the base and
+            // enhancement layers.
+            bitrateMbps: bitrateMbps *
+                DolbyVisionProfile7EncodingDefaults.baseLayerBitrateFraction,
+            dvProfile: .profile76,
+            keyFrameIntervalSeconds:
+                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds
         )
 
         let enhancementLayerOptions = HEVCEncodeOptions(
-            bitrateMbps: bitrateMbps * 0.15,
-            dvProfile: nil
+            bitrateMbps: bitrateMbps *
+                DolbyVisionProfile7EncodingDefaults.enhancementLayerBitrateFraction,
+            dvProfile: nil,
+            keyFrameIntervalSeconds:
+                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds
         )
 
         baseLayerEncoder = try ProResSession(

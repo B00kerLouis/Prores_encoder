@@ -1,25 +1,26 @@
-# ProRes Encoder 1.2.2
+# ProRes Encoder 1.2.3
 
 Native macOS CLI and Framework for professional video encoding, HDR color
-conversion, dynamic metadata processing, MOV/MXF mastering, linked timeline
+conversion, dynamic metadata processing, MOV/MP4/MXF mastering, linked timeline
 workflows, batch encoding, and external-audio replacement.
 
-All supported MOV outputs are written as `.mov` files. The encoder does not
-create MP4 containers; Profile 7.6 can optionally emit separate BL/EL HEVC
-elementary streams with `--dual`.
+MOV remains the default container. HEVC and AV1 can also be written to MP4
+with `-ef mp4` or simply by giving `-o` a `.mp4` filename. `--outupt-video-raw`
+(`-ovr`) writes the final encoded video elementary stream; Dolby Vision Profile
+7.6 writes its required separate BL and EL HEVC streams.
 
-## What’s New in 1.2.2
+## What’s New in 1.2.3
 
-- Native Metal `.cube` LUT burn-in without an additional runtime dependency.
-- Standard 1D, 3D, and combined 1D+3D LUT parsing with domain and input-range
-  directives.
-- `--lut` plus atomic LUT output declarations through `--gamut-lut`,
-  `--oetf-lut`, and `--nit-lut`.
-- `--color-space-lut` alias for `--gamut-lut`, alongside the direct-mapping
-  `--gamut` and `--color-space` aliases.
-- Correct red-fastest cube ordering and texel-centered linear Metal sampling.
-- Explicit rejection of conflicting direct color mapping and LUT output
-  declarations.
+- Framework-only multi-format, raw-only fan-out for every ProRes variant, HEVC,
+  AV1, and all supported Dolby Vision profiles; Profile 7.6 returns separate
+  base-layer and enhancement-layer streams.
+- QuickTime timecode recovery from MOV sample tables when AVFoundation exposes
+  a valid `tmcd` sample without its data buffer.
+- Correct AV1 temporal-unit delimiters in emitted `.obu` elementary streams.
+- Dolby Vision level selection by raster width and pixel rate, including
+  replacement of an incorrect existing `dvcC` or `dvvC` configuration box.
+- MOV/MP4 compressed output, native Metal color/LUT processing, and verified
+  Dolby Vision Profiles 5, 7.6, 8.1, 8.4, 10, 10.1, and 10.4.
 
 ## License
 
@@ -28,22 +29,16 @@ general public use. See [LICENSE](LICENSE).
 
 A designated commercial-license grant may be provided in the LICENSE file for
 specific organizations and their eligible subsidiaries or controlled affiliates.
-That grant applies only to source code owned by this project and does not apply
-to third-party components.
+That grant applies only to source code owned by this project.
 
-## Third-Party and Trademark Notice
+## Bundled Dependencies
 
-This repository may refer to industry formats, codecs, containers, metadata
-schemes, and operating-system technologies only for identification and
-interoperability purposes.
+The AV1 encoder integration uses the bundled SVT-AV1 library. AAF interchange
+uses the bundled AAF Framework. Their files and license terms remain separate
+from project-owned source code.
 
-No third-party certification, endorsement, partnership, official compatibility,
-or trademark license is claimed or implied by this README.
-
-Third-party components, if included in the repository or required by a build,
-remain governed by their own license terms. The project license and any
-designated commercial-license exception do not relicense third-party code,
-frameworks, SDKs, tools, assets, documentation, or generated files.
+The project license and any designated commercial-license exception do not
+relicense those bundled dependencies.
 
 ## Requirements
 
@@ -130,9 +125,36 @@ Set `ProResEncodeOptions.deleteSourceAudio` to `true` to omit input audio.
 It can be combined with `extraAudioURL` so the source audio is removed before
 the external track is added.
 
+Framework clients can also fan one input out to independently encoded raw video
+streams. Unlike `ProResEncodeOptions.outputVideoRaw` / CLI `-ovr`, this method is
+multi-format and raw-only: its temporary MOV staging files are deleted, and the
+result contains only `.prores`, `.hevc`, or `.obu` artifacts. Profile 7.6 returns
+separate base-layer and enhancement-layer files.
+
+```swift
+let rawResult = try await encoder.encodeVideoElementaryStreams(
+    inputURL: gradedMasterURL,
+    outputDirectoryURL: deliveryDirectoryURL,
+    options: ProResElementaryStreamOptions(
+        formats: ProResElementaryStreamFormat.allDolbyVision,
+        dolbyVisionXMLURL: dolbyVisionXMLURL,
+        hevcBitrateMbps: 50,
+        profile76BitrateMbps: 80,
+        av1BitrateMbps: 50,
+        dolbyVisionGamut: .rec2020,
+        targetPeakNits: 1_000
+    )
+)
+```
+
+`ProResElementaryStreamFormat.allStandard` includes every ProRes variant plus
+plain HEVC and AV1 and is the default. `allCases` adds every Dolby Vision
+profile, which requires `dolbyVisionXMLURL`. This batch API is Framework only;
+the CLI intentionally has no equivalent multi-format option.
+
 ## Native Pipeline Architecture
 
-- MOV outputs always use the MOV container.
+- MOV is the default container; MP4 is available for HEVC and AV1 only.
 - Source decode for compressed inputs uses native media sessions plus project
   pixel conversion and chroma downsampling.
 - Dynamic HDR metadata generation and writing are implemented in project code,
@@ -140,8 +162,9 @@ the external track is added.
 - Enhanced-layer workflows perform closed-loop base-layer encode and
   reconstruction, derive a residual signal on the GPU, encode the enhanced
   layer, and interleave metadata directly into output samples.
-- No separate elementary-stream files are emitted during normal MOV output
-  unless Profile 7.6 `--dual` output is explicitly requested.
+- CLI encoding emits no separate elementary-stream files unless
+  `--outupt-video-raw` (`-ovr`) is explicitly requested. Framework clients may
+  instead use the raw-only multi-format batch API described above.
 
 Final compressed samples are inspected before the file is accepted:
 
@@ -217,8 +240,8 @@ compatibility and prints a deprecation warning.
 ## Metal LUT Burn-In
 
 Burn a `.cube` LUT into the encoded pixels with the LUT's declared output color
-space. LUT processing is native Swift parsing plus Metal texture sampling; it
-does not use FFmpeg or another third-party runtime.
+space. LUT processing uses the built-in parser and GPU texture sampling without
+invoking a separate media-processing executable.
 
 ```bash
 proresencoder -i input.mov -o graded.mov -q 422hq \
@@ -300,10 +323,10 @@ HDR10 base layer. Without `-df`, P5/P10 keep the ordinary `hvc1`/`av01` sample
 entry for verifier compatibility. `-df` changes only the reserved player-facing
 sample entry to `dvh1`/`dav1`; it does not alter pixels, RPU, or bitstream
 processing. These additions target stream, color, RPU/EMDF, and container
-conformance only and do not claim Dolby certification.
+conformance.
 
 `--cmu` and `-dovi` are mutually exclusive.
-`--cmu-include` requires `--cmu`, supports MOV output only, and requires the
+`--cmu-include` requires `--cmu`, supports MOV or compressed MP4 output, and requires the
 matching `-dp` value for HEVC or AV1. For HEVC/AV1, the internally generated
 XML is converted to one native metadata unit per frame and injected during the
 encode; for ProRes it is embedded as a metadata track.
@@ -316,12 +339,15 @@ MOV:
 proresencoder -i input.mov -ef mov -q 422hq -o output.mov
 proresencoder -i input.mov -ef mov -q hevc -b 50 -o output_hevc.mov
 proresencoder -i input.mov -ef mov -q av1 -b 50 -o output_av1.mov
+proresencoder -i input.mov -ef mp4 -q hevc -b 50 -o output_hevc.mp4
+proresencoder -i input.mov -q av1 -b 50 -o output_av1.mp4  # infers MP4
 ```
 
-The CLI normalizes every MOV encode filename to `.mov`. The Framework requires
-an output URL ending in `.mov` for AV1. Neither interface emits MP4; raw HEVC
-elementary streams are emitted only for Dolby Vision Profile 7.6 when `--dual`
-is explicitly requested.
+The CLI defaults to `.mov` and normalizes an explicit `-ef mov` output to that
+extension. `-ef mp4`, or a `.mp4` `-o` filename when `-ef` is omitted, selects
+MP4; MP4 accepts HEVC and AV1 only. `-ovr` writes `*_raw.prores`,
+`*_raw.hevc`, or `*_raw.obu` next to the container. With HEVC Dolby Vision
+Profile 7.6 it instead writes `*_P7_6_BL.hevc` and `*_P7_6_EL.hevc`.
 
 MOV timecode behavior:
 
@@ -439,5 +465,4 @@ proresencoder -if input_folder -ef opatom -q 422hq --export-aaf-all -o output_di
 - `-ar` is replacement mode, not an additive mix mode.
 - MOV replacement output should contain only the replacement audio stream plus
   video and timecode/metadata tracks.
-- Third-party names, if any remain in code comments, build scripts, or source
-  paths, should be reviewed separately before public release.
+- Generated files and bundled dependency files retain their own notices.

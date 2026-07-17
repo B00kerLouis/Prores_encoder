@@ -455,8 +455,8 @@ private struct NativeDolbyVisionVdrDmData {
         self.cmv40 = cmv40
 
         if profile.usesNativeIPT {
-            // Exact Profile 5 values from dovi_tool Profile5::dm_data(). Native
-            // Profile 10 transports the same IPT-PQ-C2 RPU semantics in AV1.
+            // Fixed full-range profile coefficients. The native AV1 profile
+            // transports the same IPT-PQ-C2 metadata semantics.
             yccToRgbCoefficients = [8192, 799, 1681, 8192, -933, 1091, 8192, 267, -5545]
             yccToRgbOffsets = [0, 134217728, 134217728]
             rgbToLmsCoefficients = [17081, -349, -349, -349, 17081, -349, -349, -349, 17081]

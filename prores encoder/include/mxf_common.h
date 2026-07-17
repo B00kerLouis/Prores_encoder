@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -53,7 +54,7 @@ static inline void wbytes(std::vector<uint8_t>& b, const std::vector<uint8_t>& v
 // ============================================================
 // Generates a random version-4 UUID.
 static inline UUID16 make_uuid() {
-    static std::mt19937_64 rng(std::random_device{}());
+    static thread_local std::mt19937_64 rng(std::random_device{}());
     UUID16 u;
     uint64_t hi = rng(), lo = rng();
     for(int i=0;i<8;i++) { u[i]=(hi>>(i*8))&0xff; u[8+i]=(lo>>(i*8))&0xff; }
@@ -594,7 +595,7 @@ static inline std::vector<uint8_t> mk_ident(const UUID16& uid) {
     std::vector<uint8_t> b;
     lt_uuid(b,0x3c0a,uid); lt_uuid(b,0x3c09,make_uuid());
     lt_item(b,0x3c01,utf16("Prores_encoder")); lt_item(b,0x3c02,utf16("mxf_enc"));
-    lt_pversion(b,0x3c03,1,2,2,0,0); lt_item(b,0x3c04,utf16("1.2.2"));
+    lt_pversion(b,0x3c03,1,2,3,0,0); lt_item(b,0x3c04,utf16("1.2.3"));
     static const UUID16 PID = {0x6d,0x78,0x66,0x5f,0x65,0x6e,0x63,0x20,
                                 0x70,0x72,0x6f,0x72,0x65,0x73,0x5f,0x65};
     lt_uuid(b,0x3c05,PID); lt_ts(b,0x3c06,now_ts());
@@ -765,19 +766,33 @@ class FileIO {
 public:
     // Opens a buffered file for random-access binary output.
     bool open(const std::string& path) {
+        if(fp_) return false;
         fp_ = std::fopen(path.c_str(), "wb");
         if(!fp_) return false;
         buffer_.resize(4 * 1024 * 1024);
         std::setvbuf(fp_, reinterpret_cast<char*>(buffer_.data()), _IOFBF, buffer_.size());
         pos_ = 0; return true;
     }
-    // Flushes and closes the file when open.
-    void close() { if(fp_) { std::fclose(fp_); fp_=nullptr; } }
+    // Closes the file during cleanup without propagating an error.
+    void close() noexcept { if(fp_) { std::fclose(fp_); fp_=nullptr; } }
+    // Flushes and closes the file while reporting any persistence failure.
+    void finish() {
+        if(!fp_) throw std::runtime_error("MXF file is not open");
+        const int flushResult = std::fflush(fp_);
+        const int closeResult = std::fclose(fp_);
+        fp_ = nullptr;
+        if(flushResult != 0 || closeResult != 0)
+            throw std::runtime_error("MXF flush or close error");
+    }
     // Reports whether a file handle is active.
     bool ok() const { return fp_ != nullptr; }
     // Writes an unowned byte range and advances the tracked position.
     void write(const uint8_t* d, size_t n) {
         if(n == 0) return;
+        if(!fp_) throw std::runtime_error("MXF file is not open");
+        if(!d) throw std::runtime_error("MXF write received a null buffer");
+        if(n > std::numeric_limits<uint64_t>::max() - pos_)
+            throw std::runtime_error("MXF output position overflow");
         if(std::fwrite(d,1,n,fp_) != n) throw std::runtime_error("MXF write error");
         pos_ += n;
     }
@@ -787,6 +802,8 @@ public:
     uint64_t tell() const { return pos_; }
     // Writes a four- or five-byte BER length for large essence items.
     void write_ber(size_t len) {
+        if(len > std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("MXF essence item exceeds the BER length limit");
         uint8_t b[5];
         size_t n = 0;
         if(len <= 0xffffff) {
@@ -805,25 +822,30 @@ public:
     }
     // Patches a 64-bit big-endian field without changing the tracked position.
     void patch_u64(uint64_t off, uint64_t val) {
-        auto cur = ftello(fp_);
-        fseeko(fp_, (off_t)off, SEEK_SET);
         uint8_t buf[8]; for(int i=7;i>=0;i--) buf[7-i]=(val>>(i*8))&0xff;
-        std::fwrite(buf,1,8,fp_);
-        fseeko(fp_, cur, SEEK_SET);
+        patch_bytes(off, buf, sizeof(buf));
     }
     // Patches one byte without changing the tracked position.
     void patch_byte(uint64_t off, uint8_t val) {
-        auto cur = ftello(fp_);
-        fseeko(fp_, (off_t)off, SEEK_SET);
-        std::fwrite(&val,1,1,fp_);
-        fseeko(fp_, cur, SEEK_SET);
+        patch_bytes(off, &val, 1);
     }
     // Patches an arbitrary byte range without changing the tracked position.
     void patch_bytes(uint64_t off, const uint8_t* data, size_t len) {
-        auto cur = ftello(fp_);
-        fseeko(fp_, (off_t)off, SEEK_SET);
-        std::fwrite(data,1,len,fp_);
-        fseeko(fp_, cur, SEEK_SET);
+        if(len == 0) return;
+        if(!fp_) throw std::runtime_error("MXF file is not open");
+        if(!data) throw std::runtime_error("MXF patch received a null buffer");
+        if(off > pos_ || len > pos_ - off)
+            throw std::runtime_error("MXF patch range is outside the written file");
+        if(off > static_cast<uint64_t>(std::numeric_limits<off_t>::max()))
+            throw std::runtime_error("MXF patch offset exceeds the file API limit");
+        const off_t cur = ftello(fp_);
+        if(cur < 0) throw std::runtime_error("MXF tell error");
+        if(fseeko(fp_, static_cast<off_t>(off), SEEK_SET) != 0)
+            throw std::runtime_error("MXF patch seek error");
+        const bool writeFailed = std::fwrite(data, 1, len, fp_) != len;
+        if(fseeko(fp_, cur, SEEK_SET) != 0)
+            throw std::runtime_error("MXF patch restore seek error");
+        if(writeFailed) throw std::runtime_error("MXF patch write error");
     }
     // Closes the owned file handle.
     ~FileIO() { close(); }

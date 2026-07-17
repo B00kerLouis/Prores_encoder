@@ -283,14 +283,14 @@ struct CMUFrameStats: Codable, Sendable {
     let stdevMaxRGBPQ: Float
 }
 
-/// Raw per-frame PQ(maxRGB) moments measured before Dolby Vision base-layer encoding.
+/// Raw per-frame PQ(maxRGB) moments measured before base-layer encoding.
 struct DolbyVisionLevel4Measurement: Codable, Sendable, Equatable {
     let frameOffset: Int
     let meanMaxRGBPQ: Float
     let stdevMaxRGBPQ: Float
 }
 
-/// Frame-indexed Level 4 global-dimming anchors for Dolby Vision output.
+/// Frame-indexed Level 4 global-dimming anchors for dynamic metadata output.
 struct DolbyVisionLevel4Metadata: Codable, Sendable, Equatable {
     let frameOffset: Int
     let anchorPQ: UInt16

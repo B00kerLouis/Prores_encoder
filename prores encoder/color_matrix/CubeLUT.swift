@@ -180,8 +180,8 @@ struct CubeLUT: Sendable {
                 hasThreeDInputRange = true
             default:
                 guard Self.looksLikeSample(fields) else {
-                    // Vendor metadata is allowed by the .cube ecosystem. It has
-                    // no bearing on the RGB table and is intentionally ignored.
+                    // Unrecognized metadata has no bearing on the RGB table
+                    // and is intentionally ignored.
                     continue
                 }
                 guard fields.count == 3,

@@ -367,7 +367,7 @@ final class CMUMetalAnalyzer {
             generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
             author: "Dolby Laboratories",
             software: "Connect Mapping Unit",
-            softwareVersion: "1.2.2",
+            softwareVersion: "1.2.3",
             analysisSource: source,
             media: descriptor,
             masteringPeakNits: masteringPeakNits,
@@ -586,7 +586,7 @@ func cmuBuildDolbyVisionLevel4Measurements(
 }
 
 /// Builds ETSI TS 103 572 Level 4 anchors from Metal-measured PQ(maxRGB)
-/// moments. Resolve compatibility outputs use the adaptive every-frame form;
+/// moments.Compatibility outputs use the adaptive every-frame form;
 /// Profile 7.6 limits the difference term to XML shot starts.
 func cmuBuildDolbyVisionLevel4(
     measurements: [DolbyVisionLevel4Measurement],

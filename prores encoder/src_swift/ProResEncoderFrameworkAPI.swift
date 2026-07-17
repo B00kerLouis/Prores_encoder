@@ -8,6 +8,7 @@ import VideoToolbox
 /// Container layouts available to framework clients.
 public enum ProResOutputFormat: String, Sendable {
     case mov
+    case mp4
     case op1a
     case opatom
 }
@@ -50,6 +51,162 @@ public enum ProResDolbyVisionProfile: String, Sendable {
     case profile10 = "10"
     case profile101 = "101"
     case profile104 = "104"
+}
+
+/// Independently encoded elementary-stream formats available only through the Framework API.
+public enum ProResElementaryStreamFormat: String, CaseIterable, Hashable, Sendable {
+    case proResProxy = "prores_proxy"
+    case proRes422LT = "prores_422lt"
+    case proRes422 = "prores_422"
+    case proRes422HQ = "prores_422hq"
+    case proRes4444 = "prores_4444"
+    case proRes4444XQ = "prores_4444xq"
+    case hevc
+    case av1
+    case dolbyVisionProfile5 = "dolby_vision_p5"
+    case dolbyVisionProfile76 = "dolby_vision_p7_6"
+    case dolbyVisionProfile81 = "dolby_vision_p8_1"
+    case dolbyVisionProfile84 = "dolby_vision_p8_4"
+    case dolbyVisionProfile10 = "dolby_vision_p10"
+    case dolbyVisionProfile101 = "dolby_vision_p10_1"
+    case dolbyVisionProfile104 = "dolby_vision_p10_4"
+
+    /// Every Dolby Vision elementary-stream format supported by the encoder.
+    public static let allDolbyVision: [ProResElementaryStreamFormat] = [
+        .dolbyVisionProfile5,
+        .dolbyVisionProfile76,
+        .dolbyVisionProfile81,
+        .dolbyVisionProfile84,
+        .dolbyVisionProfile10,
+        .dolbyVisionProfile101,
+        .dolbyVisionProfile104
+    ]
+
+    /// Every format that does not require a Dolby Vision metadata source.
+    public static let allStandard: [ProResElementaryStreamFormat] = [
+        .proResProxy,
+        .proRes422LT,
+        .proRes422,
+        .proRes422HQ,
+        .proRes4444,
+        .proRes4444XQ,
+        .hevc,
+        .av1
+    ]
+
+    fileprivate var quality: String {
+        switch self {
+        case .proResProxy: return "proxy"
+        case .proRes422LT: return "422lt"
+        case .proRes422: return "422"
+        case .proRes422HQ: return "422hq"
+        case .proRes4444: return "4444"
+        case .proRes4444XQ: return "4444xq"
+        case .hevc,
+             .dolbyVisionProfile5,
+             .dolbyVisionProfile76,
+             .dolbyVisionProfile81,
+             .dolbyVisionProfile84:
+            return "hevc"
+        case .av1,
+             .dolbyVisionProfile10,
+             .dolbyVisionProfile101,
+             .dolbyVisionProfile104:
+            return "av1"
+        }
+    }
+
+    fileprivate var dolbyVisionProfile: ProResDolbyVisionProfile? {
+        switch self {
+        case .dolbyVisionProfile5: return .profile5
+        case .dolbyVisionProfile76: return .profile76
+        case .dolbyVisionProfile81: return .profile81
+        case .dolbyVisionProfile84: return .profile84
+        case .dolbyVisionProfile10: return .profile10
+        case .dolbyVisionProfile101: return .profile101
+        case .dolbyVisionProfile104: return .profile104
+        default: return nil
+        }
+    }
+
+    fileprivate var rawFileExtension: String {
+        switch quality {
+        case "hevc": return "hevc"
+        case "av1": return "obu"
+        default: return "prores"
+        }
+    }
+}
+
+/// Identifies the stream represented by one elementary-stream artifact.
+public enum ProResElementaryStreamLayer: String, Sendable {
+    case primary
+    case baseLayer
+    case enhancementLayer
+}
+
+/// One raw file produced by a Framework elementary-stream batch.
+public struct ProResElementaryStreamArtifact: Sendable {
+    public let format: ProResElementaryStreamFormat
+    public let layer: ProResElementaryStreamLayer
+    public let url: URL
+
+    public init(
+        format: ProResElementaryStreamFormat,
+        layer: ProResElementaryStreamLayer,
+        url: URL
+    ) {
+        self.format = format
+        self.layer = layer
+        self.url = url
+    }
+}
+
+/// Options for Framework-only multi-format, raw-only video fan-out.
+public struct ProResElementaryStreamOptions: Sendable {
+    public var formats: [ProResElementaryStreamFormat]
+    public var dolbyVisionXMLURL: URL?
+    public var hevcBitrateMbps: Double
+    public var profile76BitrateMbps: Double
+    public var av1BitrateMbps: Double
+    public var dolbyVisionGamut: ProResColorGamut
+    public var targetPeakNits: Float
+    public var baseColorConversion: ProResColorConversion?
+    public var fileNamePrefix: String?
+    public var overwriteExisting: Bool
+
+    public init(
+        formats: [ProResElementaryStreamFormat] = ProResElementaryStreamFormat.allStandard,
+        dolbyVisionXMLURL: URL? = nil,
+        hevcBitrateMbps: Double = 50,
+        profile76BitrateMbps: Double = 80,
+        av1BitrateMbps: Double = 50,
+        dolbyVisionGamut: ProResColorGamut = .rec2020,
+        targetPeakNits: Float = 1_000,
+        baseColorConversion: ProResColorConversion? = nil,
+        fileNamePrefix: String? = nil,
+        overwriteExisting: Bool = false
+    ) {
+        self.formats = formats
+        self.dolbyVisionXMLURL = dolbyVisionXMLURL
+        self.hevcBitrateMbps = hevcBitrateMbps
+        self.profile76BitrateMbps = profile76BitrateMbps
+        self.av1BitrateMbps = av1BitrateMbps
+        self.dolbyVisionGamut = dolbyVisionGamut
+        self.targetPeakNits = targetPeakNits
+        self.baseColorConversion = baseColorConversion
+        self.fileNamePrefix = fileNamePrefix
+        self.overwriteExisting = overwriteExisting
+    }
+}
+
+/// Raw-only artifacts returned after every requested format has encoded successfully.
+public struct ProResElementaryStreamResult: Sendable {
+    public let artifacts: [ProResElementaryStreamArtifact]
+
+    public init(artifacts: [ProResElementaryStreamArtifact]) {
+        self.artifacts = artifacts
+    }
 }
 
 /// Direct gamut, transfer, and peak-luminance mapping request.
@@ -126,7 +283,9 @@ public struct ProResEncodeOptions: Sendable {
     public var cmuMasteringNits: Float?
     public var includeGeneratedDolbyVisionMetadata: Bool
     public var useDolbyVisionCodecTag: Bool
-    public var dolbyVisionDualOutput: Bool
+    /// Also emits the encoded video as a raw elementary stream beside the container.
+    /// Profile 7.6 writes separate BL and EL HEVC streams.
+    public var outputVideoRaw: Bool
     public var aafMode: ProResAAFMode
 
     /// Creates an option set with MOV 422 HQ defaults and optional advanced features.
@@ -145,7 +304,7 @@ public struct ProResEncodeOptions: Sendable {
         cmuMasteringNits: Float? = nil,
         includeGeneratedDolbyVisionMetadata: Bool = false,
         useDolbyVisionCodecTag: Bool = false,
-        dolbyVisionDualOutput: Bool = false,
+        outputVideoRaw: Bool = false,
         aafMode: ProResAAFMode = .none
     ) {
         self.quality = quality
@@ -162,7 +321,7 @@ public struct ProResEncodeOptions: Sendable {
         self.cmuMasteringNits = cmuMasteringNits
         self.includeGeneratedDolbyVisionMetadata = includeGeneratedDolbyVisionMetadata
         self.useDolbyVisionCodecTag = useDolbyVisionCodecTag
-        self.dolbyVisionDualOutput = dolbyVisionDualOutput
+        self.outputVideoRaw = outputVideoRaw
         self.aafMode = aafMode
     }
 
@@ -256,7 +415,7 @@ public enum ProResEncoderError: LocalizedError, Sendable {
 
 /// Stateless entry point for media encoding and timeline conversion.
 public final class ProResEncoder: Sendable {
-    public static let version = "1.2.2"
+    public static let version = "1.2.3"
 
     /// Initializes GPU discovery and registers platform codec components.
     public init() {
@@ -323,12 +482,14 @@ public final class ProResEncoder: Sendable {
                 "includeGeneratedDolbyVisionMetadata requires cmuMasteringNits."
             )
         }
-        if options.includeGeneratedDolbyVisionMetadata && format != .mov {
+        if options.includeGeneratedDolbyVisionMetadata
+            && format != .mov
+            && format != .mp4 {
             throw ProResEncoderError.invalidOption(
-                "includeGeneratedDolbyVisionMetadata is supported only in MOV."
+                "includeGeneratedDolbyVisionMetadata is supported only in MOV or MP4 compressed output."
             )
         }
-        if format == .mov && options.aafMode != .none {
+        if (format == .mov || format == .mp4) && options.aafMode != .none {
             throw ProResEncoderError.invalidOption(
                 "AAF generation is available only for OP-1a or OP-Atom MXF output."
             )
@@ -385,14 +546,15 @@ public final class ProResEncoder: Sendable {
             options.dolbyVisionXMLURL != nil
             || options.includeGeneratedDolbyVisionMetadata
         if wantsHEVC || wantsAV1 {
-            guard format == .mov else {
+            guard format == .mov || format == .mp4 else {
                 throw ProResEncoderError.invalidOption(
-                    "\(quality) output is supported only in MOV."
+                    "\(quality) output is supported only in MOV or MP4."
                 )
             }
-            guard let bitrate = options.bitrateMbps, bitrate > 0 else {
+            guard let bitrate = options.bitrateMbps,
+                  encodedVideoBitrateIsRepresentable(bitrate, usesAV1: wantsAV1) else {
                 throw ProResEncoderError.invalidOption(
-                    "\(quality) output requires a positive bitrateMbps value."
+                    "\(quality) output requires a finite, representable bitrateMbps value."
                 )
             }
             if options.dolbyVisionProfile != nil && !hasDolbyVisionMetadataSource {
@@ -424,12 +586,6 @@ public final class ProResEncoder: Sendable {
                     "\(quality) with Dolby Vision metadata requires dolbyVisionProfile."
                 )
             }
-            if options.dolbyVisionDualOutput
-                && !(wantsHEVC && options.dolbyVisionProfile == .profile76) {
-                throw ProResEncoderError.invalidOption(
-                    "dolbyVisionDualOutput requires HEVC Dolby Vision Profile 7.6."
-                )
-            }
         } else {
             if options.bitrateMbps != nil {
                 throw ProResEncoderError.invalidOption(
@@ -446,18 +602,41 @@ public final class ProResEncoder: Sendable {
                     "useDolbyVisionCodecTag is available only for HEVC or AV1 output."
                 )
             }
-            if options.dolbyVisionDualOutput {
+            if options.outputVideoRaw && quality == "pass" {
                 throw ProResEncoderError.invalidOption(
-                    "dolbyVisionDualOutput is available only for HEVC Dolby Vision Profile 7.6 output."
+                    "outputVideoRaw requires a re-encoded video quality, not pass-through."
                 )
             }
+        }
+        if format == .mp4 && !(wantsHEVC || wantsAV1) {
+            throw ProResEncoderError.invalidOption(
+                "MP4 output supports HEVC and AV1 only."
+            )
+        }
+        if format == .mp4, options.forcedOutputStartTimecode != nil {
+            throw ProResEncoderError.invalidOption(
+                "forcedOutputStartTimecode is supported only in MOV."
+            )
         }
 
         switch format {
         case .mov:
             if outputURL.pathExtension.lowercased() != "mov" {
                 throw ProResEncoderError.invalidOption(
-                    "QuickTime MOV output requires a .mov outputURL; MP4 output is not supported."
+                    "QuickTime MOV output requires a .mov outputURL."
+                )
+            }
+            return try await encodeMOVFile(
+                inputURL: inputURL,
+                outputURL: outputURL,
+                quality: quality,
+                options: options,
+                colorTransform: colorTransform
+            )
+        case .mp4:
+            if outputURL.pathExtension.lowercased() != "mp4" {
+                throw ProResEncoderError.invalidOption(
+                    "MP4 output requires a .mp4 outputURL."
                 )
             }
             return try await encodeMOVFile(
@@ -477,6 +656,303 @@ public final class ProResEncoder: Sendable {
                 colorTransform: colorTransform
             )
         }
+    }
+
+    /// Independently encodes every requested video format and commits only raw streams.
+    /// Temporary MOV containers are private staging artifacts and are removed before return.
+    public func encodeVideoElementaryStreams(
+        inputURL: URL,
+        outputDirectoryURL: URL,
+        options: ProResElementaryStreamOptions = ProResElementaryStreamOptions()
+    ) async throws -> ProResElementaryStreamResult {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: inputURL.path) else {
+            throw ProResEncoderError.inputNotFound(inputURL.path)
+        }
+        guard !options.formats.isEmpty else {
+            throw ProResEncoderError.invalidOption(
+                "Elementary-stream encoding requires at least one format."
+            )
+        }
+        guard Set(options.formats).count == options.formats.count else {
+            throw ProResEncoderError.invalidOption(
+                "Elementary-stream formats must not contain duplicates."
+            )
+        }
+
+        let requestedDolbyVision = options.formats.contains {
+            $0.dolbyVisionProfile != nil
+        }
+        if requestedDolbyVision {
+            guard let xmlURL = options.dolbyVisionXMLURL else {
+                throw ProResEncoderError.invalidOption(
+                    "Dolby Vision elementary streams require dolbyVisionXMLURL."
+                )
+            }
+            guard fileManager.fileExists(atPath: xmlURL.path) else {
+                throw ProResEncoderError.auxiliaryFileNotFound(xmlURL.path)
+            }
+            guard options.targetPeakNits.isFinite,
+                  options.targetPeakNits >= 1,
+                  options.targetPeakNits <= 10_000 else {
+                throw ProResEncoderError.invalidOption(
+                    "targetPeakNits must be a finite value from 1 through 10000."
+                )
+            }
+        }
+
+        let requestsProfile76 = options.formats.contains(.dolbyVisionProfile76)
+        let requestsOtherHEVC = options.formats.contains {
+            $0.quality == "hevc" && $0 != .dolbyVisionProfile76
+        }
+        let requestsAV1 = options.formats.contains { $0.quality == "av1" }
+        if requestsOtherHEVC,
+           !encodedVideoBitrateIsRepresentable(
+                options.hevcBitrateMbps,
+                usesAV1: false
+           ) {
+            throw ProResEncoderError.invalidOption(
+                "hevcBitrateMbps must be a finite, representable positive value."
+            )
+        }
+        if requestsProfile76,
+           !encodedVideoBitrateIsRepresentable(
+                options.profile76BitrateMbps,
+                usesAV1: false
+           ) {
+            throw ProResEncoderError.invalidOption(
+                "profile76BitrateMbps must be a finite, representable positive value."
+            )
+        }
+        if requestsAV1,
+           !encodedVideoBitrateIsRepresentable(options.av1BitrateMbps, usesAV1: true) {
+            throw ProResEncoderError.invalidOption(
+                "av1BitrateMbps must be a finite, representable positive value."
+            )
+        }
+
+        var isOutputDirectory: ObjCBool = false
+        if fileManager.fileExists(
+            atPath: outputDirectoryURL.path,
+            isDirectory: &isOutputDirectory
+        ), !isOutputDirectory.boolValue {
+            throw ProResEncoderError.invalidOption(
+                "Elementary-stream output path is not a directory: \(outputDirectoryURL.path)"
+            )
+        }
+        try fileManager.createDirectory(
+            at: outputDirectoryURL,
+            withIntermediateDirectories: true
+        )
+
+        let defaultPrefix = inputURL.deletingPathExtension().lastPathComponent
+        let prefix = options.fileNamePrefix?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? defaultPrefix
+        guard !prefix.isEmpty,
+              prefix != ".",
+              prefix != "..",
+              !prefix.contains("/"),
+              prefix == URL(fileURLWithPath: prefix).lastPathComponent else {
+            throw ProResEncoderError.invalidOption(
+                "fileNamePrefix must be a non-empty file name without path separators."
+            )
+        }
+
+        typealias ArtifactPlan = (
+            format: ProResElementaryStreamFormat,
+            layer: ProResElementaryStreamLayer,
+            finalURL: URL
+        )
+        var artifactPlans: [ArtifactPlan] = []
+        for format in options.formats {
+            if format == .dolbyVisionProfile76 {
+                artifactPlans.append((
+                    format,
+                    .baseLayer,
+                    outputDirectoryURL.appendingPathComponent(
+                        "\(prefix)_\(format.rawValue)_bl.\(format.rawFileExtension)"
+                    )
+                ))
+                artifactPlans.append((
+                    format,
+                    .enhancementLayer,
+                    outputDirectoryURL.appendingPathComponent(
+                        "\(prefix)_\(format.rawValue)_el.\(format.rawFileExtension)"
+                    )
+                ))
+            } else {
+                artifactPlans.append((
+                    format,
+                    .primary,
+                    outputDirectoryURL.appendingPathComponent(
+                        "\(prefix)_\(format.rawValue).\(format.rawFileExtension)"
+                    )
+                ))
+            }
+        }
+
+        if !options.overwriteExisting,
+           let existing = artifactPlans.first(where: {
+               fileManager.fileExists(atPath: $0.finalURL.path)
+           }) {
+            throw ProResEncoderError.invalidOption(
+                "Elementary-stream output already exists: \(existing.finalURL.path)"
+            )
+        }
+
+        let stagingRoot = outputDirectoryURL.appendingPathComponent(
+            ".prores-elementary-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let readyDirectory = stagingRoot.appendingPathComponent("ready", isDirectory: true)
+        let backupDirectory = stagingRoot.appendingPathComponent("backup", isDirectory: true)
+        try fileManager.createDirectory(
+            at: readyDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: stagingRoot) }
+
+        var stagedArtifacts: [(
+            artifact: ProResElementaryStreamArtifact,
+            stagedURL: URL
+        )] = []
+        for (index, format) in options.formats.enumerated() {
+            let temporaryContainerURL = stagingRoot.appendingPathComponent(
+                String(format: "%02d_%@.mov", index, format.rawValue)
+            )
+            let bitrate: Double?
+            switch format.quality {
+            case "hevc":
+                bitrate = format == .dolbyVisionProfile76
+                    ? options.profile76BitrateMbps
+                    : options.hevcBitrateMbps
+            case "av1":
+                bitrate = options.av1BitrateMbps
+            default:
+                bitrate = nil
+            }
+
+            let colorConversion: ProResColorConversion?
+            switch format {
+            case .dolbyVisionProfile5, .dolbyVisionProfile10:
+                colorConversion = ProResColorConversion(
+                    gamut: options.dolbyVisionGamut,
+                    transferFunction: .pq,
+                    targetPeakNits: options.targetPeakNits
+                )
+            case .dolbyVisionProfile84, .dolbyVisionProfile104:
+                colorConversion = ProResColorConversion(
+                    gamut: options.dolbyVisionGamut,
+                    transferFunction: .hlg,
+                    targetPeakNits: options.targetPeakNits
+                )
+            case .dolbyVisionProfile76,
+                 .dolbyVisionProfile81,
+                 .dolbyVisionProfile101:
+                colorConversion = nil
+            default:
+                colorConversion = options.baseColorConversion
+            }
+
+            print(
+                "[Framework Raw Batch] Encoding \(format.rawValue) (\(index + 1)/\(options.formats.count))."
+            )
+            let encodeOptions = ProResEncodeOptions(
+                quality: format.quality,
+                deleteSourceAudio: true,
+                dolbyVisionXMLURL: format.dolbyVisionProfile == nil
+                    ? nil
+                    : options.dolbyVisionXMLURL,
+                bitrateMbps: bitrate,
+                dolbyVisionProfile: format.dolbyVisionProfile,
+                colorConversion: colorConversion,
+                useDolbyVisionCodecTag: format.dolbyVisionProfile != nil,
+                outputVideoRaw: true
+            )
+            _ = try await encode(
+                inputURL: inputURL,
+                outputURL: temporaryContainerURL,
+                format: .mov,
+                options: encodeOptions
+            )
+
+            let internalProfile = format.dolbyVisionProfile.flatMap {
+                DolbyVisionHEVCProfile(argument: $0.rawValue)
+            }
+            let rawURLs = EncodedVideoRawOutput.outputURLs(
+                for: temporaryContainerURL,
+                quality: format.quality,
+                profile: internalProfile
+            )
+            let matchingPlans = artifactPlans.filter { $0.format == format }
+            guard rawURLs.count == matchingPlans.count else {
+                throw ProResEncoderError.encodingFailed(
+                    "Raw artifact count mismatch for \(format.rawValue)."
+                )
+            }
+            for (rawURL, plan) in zip(rawURLs, matchingPlans) {
+                guard fileManager.fileExists(atPath: rawURL.path),
+                      (try rawURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0
+                else {
+                    throw ProResEncoderError.encodingFailed(
+                        "Encoder did not produce a non-empty raw stream for \(format.rawValue)."
+                    )
+                }
+                let stagedURL = readyDirectory.appendingPathComponent(
+                    plan.finalURL.lastPathComponent
+                )
+                try fileManager.moveItem(at: rawURL, to: stagedURL)
+                stagedArtifacts.append((
+                    ProResElementaryStreamArtifact(
+                        format: plan.format,
+                        layer: plan.layer,
+                        url: plan.finalURL
+                    ),
+                    stagedURL
+                ))
+            }
+            try? fileManager.removeItem(at: temporaryContainerURL)
+        }
+
+        try fileManager.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: true
+        )
+        var committedURLs: [URL] = []
+        var backups: [(original: URL, backup: URL)] = []
+        do {
+            for staged in stagedArtifacts {
+                let finalURL = staged.artifact.url
+                if fileManager.fileExists(atPath: finalURL.path) {
+                    let backupURL = backupDirectory.appendingPathComponent(
+                        finalURL.lastPathComponent
+                    )
+                    try fileManager.moveItem(at: finalURL, to: backupURL)
+                    backups.append((finalURL, backupURL))
+                }
+                try fileManager.moveItem(at: staged.stagedURL, to: finalURL)
+                committedURLs.append(finalURL)
+            }
+        } catch {
+            for url in committedURLs.reversed() {
+                try? fileManager.removeItem(at: url)
+            }
+            for backup in backups.reversed() {
+                if !fileManager.fileExists(atPath: backup.original.path) {
+                    try? fileManager.moveItem(
+                        at: backup.backup,
+                        to: backup.original
+                    )
+                }
+            }
+            throw ProResEncoderError.encodingFailed(
+                "Could not commit the elementary-stream batch: \(error.localizedDescription)"
+            )
+        }
+
+        return ProResElementaryStreamResult(
+            artifacts: stagedArtifacts.map(\.artifact)
+        )
     }
 
     /// Encodes supported media files in a folder and optionally writes a sequence AAF.
@@ -525,9 +1001,9 @@ public final class ProResEncoder: Sendable {
         var results: [ProResEncodeResult] = []
         for inputURL in inputs {
             let outputURL: URL
-            if format == .mov {
+            if format == .mov || format == .mp4 {
                 outputURL = outputDirectoryURL.appendingPathComponent(
-                    inputURL.deletingPathExtension().lastPathComponent + ".mov"
+                    inputURL.deletingPathExtension().lastPathComponent + ".\(format.rawValue)"
                 )
             } else {
                 outputURL = outputDirectoryURL
@@ -542,7 +1018,7 @@ public final class ProResEncoder: Sendable {
 
         var sequenceAAFURL: URL?
         if options.aafMode == .sequence {
-            guard format != .mov else {
+            guard format != .mov && format != .mp4 else {
                 throw ProResEncoderError.invalidOption(
                     "Sequence AAF generation requires OP-1a or OP-Atom MXF output."
                 )
@@ -826,11 +1302,12 @@ public final class ProResEncoder: Sendable {
             fpsInfo: await framerateInfo(from: asset),
             colorTransform: colorTransform,
             useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
-            dolbyVisionDualOutput: options.dolbyVisionDualOutput
+            container: outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov,
+            outputVideoRaw: options.outputVideoRaw
         )
         guard success else {
             throw ProResEncoderError.encodingFailed(
-                "MOV encoding failed for \(inputURL.lastPathComponent)."
+                "Container encoding failed for \(inputURL.lastPathComponent)."
             )
         }
         if let masteringPeakNits = options.cmuMasteringNits,
@@ -858,10 +1335,12 @@ public final class ProResEncoder: Sendable {
             }
         }
         var outputURLs = [outputURL]
-        if options.dolbyVisionDualOutput {
-            let dualURLs = DolbyVisionProfile7DualWriter.outputURLs(for: outputURL)
-            outputURLs.append(dualURLs.baseLayerURL)
-            outputURLs.append(dualURLs.enhancementLayerURL)
+        if options.outputVideoRaw {
+            outputURLs.append(contentsOf: EncodedVideoRawOutput.outputURLs(
+                for: outputURL,
+                quality: quality,
+                profile: internalProfile
+            ))
         }
         return ProResEncodeResult(
             outputURLs: outputURLs,
@@ -928,7 +1407,8 @@ public final class ProResEncoder: Sendable {
                 ? options.extraAudioURL
                 : nil,
             deleteSourceAudio: options.deleteSourceAudio,
-            colorTransform: colorTransform
+            colorTransform: colorTransform,
+            outputVideoRaw: options.outputVideoRaw
         )
         guard result.success else {
             throw ProResEncoderError.encodingFailed(

@@ -31,6 +31,7 @@
 @interface MXFBridge () {
     std::unique_ptr<mxf::Encoder> _enc;
     NSString *_lastError;
+    NSUInteger _audioTrackCount;
 }
 @end
 
@@ -46,6 +47,19 @@
 
 // Validates bridge values, maps them to C++ configuration, and opens the writer.
 - (BOOL)openWithPath:(NSString *)path config:(MXFBridgeConfig *)cfg {
+    _lastError = nil;
+    if (!path || !cfg || path.length == 0 || !path.UTF8String) {
+        _lastError = @"invalid output path or configuration";
+        return NO;
+    }
+    const BOOL audioOnly = cfg.opFormat == 1 && cfg.proResVariant == 0 &&
+        cfg.width == 0 && cfg.height == 0 && cfg.audioChannelCounts.count > 0;
+    if (cfg.totalFrames < 0 || (cfg.opFormat != 0 && cfg.opFormat != 1) ||
+        (!audioOnly && (cfg.width <= 0 || cfg.height <= 0 ||
+                        cfg.proResVariant < 1 || cfg.proResVariant > 6))) {
+        _lastError = @"invalid MXF video configuration";
+        return NO;
+    }
     if (cfg.fpsNum <= 0 || cfg.fpsDen <= 0) {
         _lastError = @"invalid frame rate";
         return NO;
@@ -56,6 +70,10 @@
     }
     if (cfg.audioBitDepth != 16 && cfg.audioBitDepth != 24) {
         _lastError = @"unsupported audio bit depth";
+        return NO;
+    }
+    if (cfg.audioChannelCounts.count > UINT8_MAX) {
+        _lastError = @"too many MXF audio tracks";
         return NO;
     }
 
@@ -96,6 +114,9 @@
         _lastError = @(_enc->lastError().c_str());
         return NO;
     }
+    _audioTrackCount = (cfg.opFormat == 0 || audioOnly)
+        ? cfg.audioChannelCounts.count
+        : 0;
     return YES;
 }
 
@@ -103,6 +124,14 @@
 - (BOOL)writeFrameVideo:(const void *)video
               videoSize:(size_t)videoSize
                   audio:(NSArray<NSData *> *)audioChunks {
+    if (videoSize > 0 && !video) {
+        _lastError = @"nonempty video frame has no data";
+        return NO;
+    }
+    if (audioChunks.count != _audioTrackCount) {
+        _lastError = @"audio chunk count does not match the MXF track configuration";
+        return NO;
+    }
     std::vector<const uint8_t *> ap;
     std::vector<size_t> as;
     for (NSData *d in audioChunks) {
@@ -119,6 +148,10 @@
 // Extracts compressed bytes from a sample buffer before forwarding one edit unit.
 - (BOOL)writeFrameSampleBuffer:(CMSampleBufferRef)sampleBuffer
                           audio:(NSArray<NSData *> *)audioChunks {
+    if (!sampleBuffer) {
+        _lastError = @"sample buffer is missing";
+        return NO;
+    }
     CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sampleBuffer);
     if (!block) {
         _lastError = @"sample buffer has no compressed data";
@@ -126,11 +159,17 @@
     }
 
     size_t lengthAtOffset = 0;
-    size_t totalLength = 0;
+    const size_t totalLength = CMBlockBufferGetDataLength(block);
+    if (totalLength == 0) {
+        _lastError = @"sample buffer has no compressed bytes";
+        return NO;
+    }
     char *dataPointer = nullptr;
+    size_t reportedTotalLength = 0;
     OSStatus status = CMBlockBufferGetDataPointer(block, 0, &lengthAtOffset,
-                                                  &totalLength, &dataPointer);
-    if (status == kCMBlockBufferNoErr && dataPointer && lengthAtOffset == totalLength) {
+                                                  &reportedTotalLength, &dataPointer);
+    if (status == kCMBlockBufferNoErr && dataPointer &&
+        lengthAtOffset == totalLength && reportedTotalLength == totalLength) {
         return [self writeFrameVideo:dataPointer videoSize:totalLength audio:audioChunks];
     }
 

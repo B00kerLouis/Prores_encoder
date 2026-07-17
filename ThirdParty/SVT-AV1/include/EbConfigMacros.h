@@ -36,13 +36,8 @@
 #define CONFIG_ENABLE_OBMC                  0
 #define CONFIG_ENABLE_FILM_GRAIN            0
 #define CONFIG_ENABLE_HIGH_BIT_DEPTH        0
-
-#define MIN_ENC_PRESET                      ENC_M9
 #endif
 
-#ifndef MIN_ENC_PRESET
-#define MIN_ENC_PRESET                      ENC_MR
-#endif
 
 // When set to 1, EB_CPU_FLAGS_NEON is unconditionally set for all ARCH_AARCH64
 // builds, i.e. requiring Neon for library to work. This also allows linker to
@@ -82,13 +77,6 @@
 
 #ifndef CONFIG_ENABLE_HIGH_BIT_DEPTH
 #define CONFIG_ENABLE_HIGH_BIT_DEPTH        1
-#endif
-
-// Single-thread kernel dispatch: at lp=1, bypass thread creation and run all
-// pipeline kernels cooperatively on one thread. Eliminates 15 context switches
-// per frame and all inter-stage semaphore/mutex overhead.
-#ifndef CONFIG_SINGLE_THREAD_KERNEL
-#define CONFIG_SINGLE_THREAD_KERNEL         1
 #endif
 
 // clang-format on

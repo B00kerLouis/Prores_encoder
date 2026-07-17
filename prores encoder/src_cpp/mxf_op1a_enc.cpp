@@ -306,7 +306,7 @@ bool Op1aEncoder::close() {
             io_.patch_u64(idxPartStart + 16 + bsz + FOOTER_BODY_OFF, footerStart);
         }
 
-        io_.close();
+        io_.finish();
         phase_ = Phase::Done;
         return true;
     } catch(const std::exception& ex) {

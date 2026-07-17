@@ -1,16 +1,13 @@
 // Implements the AV1 encoder bridge used by the Swift MOV pipeline.
 
-#import "../include/AV1Bridge.h"
-
-#include "../../ThirdParty/SVT-AV1/include/EbSvtAv1.h"
-#include "../../ThirdParty/SVT-AV1/include/EbSvtAv1Enc.h"
-#include "../../ThirdParty/SVT-AV1/include/EbSvtAv1Metadata.h"
+#import "../include/AV1UmbrellaHeader.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -125,7 +122,7 @@ static std::vector<uint8_t> sequenceHeaderOBU(const std::vector<uint8_t> &data) 
         } else {
             payloadSize = data.size() - cursor;
         }
-        if (cursor + payloadSize > data.size()) {
+        if (payloadSize > data.size() - cursor) {
             return {};
         }
         const size_t obuEnd = cursor + payloadSize;
@@ -148,7 +145,7 @@ public:
     bool read(uint32_t bits, uint32_t &value) {
         value = 0;
         for (uint32_t i = 0; i < bits; ++i) {
-            if (bitOffset_ >= size_ * 8) {
+            if (bitOffset_ / 8 >= size_) {
                 return false;
             }
             const size_t byteOffset = bitOffset_ / 8;
@@ -220,7 +217,7 @@ static uint8_t parsedSequenceLevel(const std::vector<uint8_t> &sequenceOBU) {
             return 31;
         }
     }
-    if (cursor + payloadSize > sequenceOBU.size()) {
+    if (payloadSize > sequenceOBU.size() - cursor) {
         return 31;
     }
 
@@ -347,8 +344,18 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
 - (BOOL)openWithConfig:(AV1BridgeConfig *)config {
     [self close];
     self.lastError = nil;
-    if (config.width <= 0 || config.height <= 0 || config.fpsNum <= 0 || config.fpsDen <= 0) {
+    if (!config || config.width <= 0 || config.height <= 0 || config.fpsNum <= 0 || config.fpsDen <= 0) {
         self.lastError = @"invalid AV1 dimensions or frame rate";
+        return NO;
+    }
+
+    const uint64_t width = static_cast<uint32_t>(config.width);
+    const uint64_t height = static_cast<uint32_t>(config.height);
+    const uint64_t chromaWidth = (width + 1) / 2;
+    const uint64_t chromaHeight = (height + 1) / 2;
+    const uint64_t sampleCount = width * height + 2 * chromaWidth * chromaHeight;
+    if (sampleCount > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t)) {
+        self.lastError = @"AV1 dimensions exceed the encoder input buffer limit";
         return NO;
     }
 
@@ -378,20 +385,37 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     _config.chroma_sample_position = EB_CSP_VERTICAL;
     _config.rate_control_mode = SVT_AV1_RC_MODE_VBR;
     _config.target_bit_rate = clampedBitrate(config.bitrateBitsPerSecond);
+    // The container writer stores one AV1 temporal unit per sample. Disable
+    // temporal filtering so this random-access session emits no hidden
+    // ALT-REF frames; omitting one leaves later pictures referring to an
+    // unavailable frame and produces stripe corruption on decode.
     _config.pred_structure = RANDOM_ACCESS;
     _config.hierarchical_levels = 4;
     _config.intra_refresh_type = SVT_AV1_FWDKF_REFRESH;
+    const int32_t miniGop = 1 << _config.hierarchical_levels;
+    const double keyIntervalFrames =
+        (static_cast<double>(config.fpsNum) / config.fpsDen) * 2.0;
+    if (!std::isfinite(keyIntervalFrames) ||
+        keyIntervalFrames > std::numeric_limits<int32_t>::max() - miniGop) {
+        self.lastError = @"AV1 frame rate exceeds the key-frame interval limit";
+        [self close];
+        return NO;
+    }
     const int32_t targetKeyIntervalFrames = std::max<int32_t>(
         1,
-        static_cast<int32_t>(std::lround((static_cast<double>(config.fpsNum) / config.fpsDen) * 2.0))
+        static_cast<int32_t>(std::lround(keyIntervalFrames))
     );
-    const int32_t miniGop = 1 << _config.hierarchical_levels;
     const int32_t alignedKeyIntervalFrames =
         ((targetKeyIntervalFrames + miniGop - 1) / miniGop) * miniGop;
     _config.intra_period_length = alignedKeyIntervalFrames - 1;
     _config.enc_mode = 8;
+    _config.tune = 0;
+    _config.enable_tf = 0;
     _config.enable_overlays = 0;
     _config.scene_change_detection = 1;
+    _config.enable_variance_boost = true;
+    _config.variance_boost_curve =
+        config.transferCharacteristics == EB_CICP_TC_SMPTE_2084 ? 3 : 0;
 
     const std::string mastering = masteringDisplayString(config.masteringDisplayColorVolume);
     if (!mastering.empty()) {
@@ -423,6 +447,9 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
         svt_av1_enc_stream_header_release(streamHeader);
     } else {
         self.codecConfigurationRecord = makeAV1CodecConfigurationRecord({});
+        if (streamHeader) {
+            svt_av1_enc_stream_header_release(streamHeader);
+        }
     }
 
     _opened = YES;
@@ -486,6 +513,10 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
 // Converts bi-planar source pixels to planar 10-bit storage and submits a frame.
 - (BOOL)fillAndSendPixelBuffer:(CVPixelBufferRef)pixelBuffer
              presentationIndex:(int64_t)presentationIndex {
+    if (!pixelBuffer) {
+        self.lastError = @"AV1 source pixel buffer is missing";
+        return NO;
+    }
     const OSType pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer);
     if (pixelFormat != kPixelFormatP010
         && pixelFormat != kPixelFormatP010FullRange
@@ -509,9 +540,17 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     const size_t chromaWidth = (width + 1) / 2;
     const size_t chromaHeight = (height + 1) / 2;
 
-    std::vector<uint16_t> y(width * height);
-    std::vector<uint16_t> u(chromaWidth * chromaHeight);
-    std::vector<uint16_t> v(chromaWidth * chromaHeight);
+    std::vector<uint16_t> y;
+    std::vector<uint16_t> u;
+    std::vector<uint16_t> v;
+    try {
+        y.resize(width * height);
+        u.resize(chromaWidth * chromaHeight);
+        v.resize(chromaWidth * chromaHeight);
+    } catch (const std::bad_alloc &) {
+        self.lastError = @"AV1 source frame allocation failed";
+        return NO;
+    }
 
     const CVReturn lockStatus = CVPixelBufferLockBaseAddress(
         pixelBuffer,
@@ -581,7 +620,12 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     EbBufferHeaderType header{};
     header.size = sizeof(EbBufferHeaderType);
     header.p_buffer = reinterpret_cast<uint8_t *>(&planes);
-    header.n_filled_len = static_cast<uint32_t>((y.size() + u.size() + v.size()) * sizeof(uint16_t));
+    const size_t filledLength = (y.size() + u.size() + v.size()) * sizeof(uint16_t);
+    if (filledLength > std::numeric_limits<uint32_t>::max()) {
+        self.lastError = @"AV1 source frame exceeds the encoder input buffer limit";
+        return NO;
+    }
+    header.n_filled_len = static_cast<uint32_t>(filledLength);
     header.pts = presentationIndex;
     header.dts = presentationIndex;
     header.pic_type = EB_AV1_INVALID_PICTURE;
@@ -595,7 +639,7 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
     return YES;
 }
 
-// Collects output packets, filtering end-of-stream and alternate-reference units.
+// Collects all encoded temporal units except the end-of-stream marker.
 - (nullable NSArray<AV1BridgePacket *> *)drainPacketsBlocking:(BOOL)blocking {
     NSMutableArray<AV1BridgePacket *> *packets = [NSMutableArray array];
     while (true) {
@@ -606,17 +650,25 @@ static NSData *makeAV1CodecConfigurationRecord(const std::vector<uint8_t> &strea
         }
         if (err == EB_ErrorMax) {
             self.lastError = @"SVT-AV1 returned an encode error";
+            if (output) {
+                svt_av1_enc_release_out_buffer(&output);
+            }
             return nil;
         }
         if (err != EB_ErrorNone || !output) {
             self.lastError = errorString("svt_av1_enc_get_packet", err);
+            if (output) {
+                svt_av1_enc_release_out_buffer(&output);
+            }
             return nil;
         }
 
         const uint32_t flags = output->flags;
         const BOOL eos = (flags & EB_BUFFERFLAG_EOS) != 0;
-        const BOOL altRef = (flags & EB_BUFFERFLAG_IS_ALT_REF) != 0;
-        if (!eos && !altRef && output->p_buffer && output->n_filled_len > 0) {
+        // A reference-only packet is still required by later packets.  The
+        // current session disables temporal filtering, but retain every valid
+        // packet if a future AV1 configuration emits one.
+        if (!eos && output->p_buffer && output->n_filled_len > 0) {
             NSData *data = [NSData dataWithBytes:output->p_buffer length:output->n_filled_len];
             const BOOL keyframe =
                 output->pic_type == EB_AV1_KEY_PICTURE ||

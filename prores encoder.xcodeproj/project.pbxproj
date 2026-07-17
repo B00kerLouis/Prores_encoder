@@ -358,8 +358,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
-					"$(SRCROOT)/prores\\ encoder/src_cpp",
-					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited)";
 				LIBRARY_SEARCH_PATHS = (
@@ -368,7 +366,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -404,8 +402,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
-					"$(SRCROOT)/prores\\ encoder/src_cpp",
-					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited)";
 				LIBRARY_SEARCH_PATHS = (
@@ -414,7 +410,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -457,8 +453,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
-					"$(SRCROOT)/prores\\ encoder/src_cpp",
-					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -472,7 +466,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -516,8 +510,6 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/prores\\ encoder/include",
-					"$(SRCROOT)/prores\\ encoder/src_cpp",
-					"$(SRCROOT)/ThirdParty/SVT-AV1/include",
 				);
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -531,7 +523,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",

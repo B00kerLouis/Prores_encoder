@@ -1,4 +1,4 @@
-// AV1Support.swift — AV1 CMSampleBuffer creation and Dolby Vision metadata OBU injection.
+// AV1 CMSampleBuffer creation and dynamic metadata OBU injection.
 
 import Foundation
 import AVFoundation
@@ -42,12 +42,22 @@ func makeAV1BridgeConfig(
     fpsInfo: FramerateInfo,
     options: AV1EncodeOptions,
     colorSpace: SourceColorSpace?
-) -> AV1BridgeConfig {
+) throws -> AV1BridgeConfig {
+    guard let bridgeWidth = Int32(exactly: width), bridgeWidth > 0,
+          let bridgeHeight = Int32(exactly: height), bridgeHeight > 0,
+          let fpsNumerator = Int32(exactly: fpsInfo.numerator), fpsNumerator > 0,
+          let fpsDenominator = Int32(exactly: fpsInfo.denominator), fpsDenominator > 0 else {
+        throw NSError(
+            domain: "AV1Encode",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "AV1 dimensions or frame rate exceed the bridge representation."]
+        )
+    }
     let config = AV1BridgeConfig()
-    config.width = Int32(width)
-    config.height = Int32(height)
-    config.fpsNum = Int32(fpsInfo.numerator)
-    config.fpsDen = Int32(fpsInfo.denominator)
+    config.width = bridgeWidth
+    config.height = bridgeHeight
+    config.fpsNum = fpsNumerator
+    config.fpsDen = fpsDenominator
     config.bitrateBitsPerSecond = Int64(options.bitrateBitsPerSecond)
     let nativeDolbyVision = options.dvProfile?.usesNativeIPT == true
     config.colorPrimaries = nativeDolbyVision ? 2 : av1ColorPrimaries(from: colorSpace)

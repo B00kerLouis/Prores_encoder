@@ -1,5 +1,5 @@
 // Converts Rec.2020/PQ YCbCr into the full-range IPT-PQ-C2 base layer used
-// by Dolby Vision Profile 5 and Native Profile 10.
+// by the native full-range profiles.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -41,7 +41,7 @@ inline float3 ndv_rgb_to_iptpqc2(float3 pqRGB, uint inputGamut) {
     // Convert the declared D65 RGB gamut to HPE LMS. rec2020lm remains a
     // Rec.2020 encoding after its P3-D65 gamut limiter, so it uses the first
     // matrix. Values are derived from the same D65 RGB-to-XYZ definitions as
-    // ColorTransform.swift and the fixed Dolby Vision BT.2020/HPE matrix.
+    // ColorTransform.swift and the fixed profile matrix.
     float3 hpeLMS;
     if (inputGamut == 2) {
         hpeLMS.x = 0.3567655860f * rgb.r + 0.5921667203f * rgb.g + 0.0510732323f * rgb.b;
@@ -53,8 +53,7 @@ inline float3 ndv_rgb_to_iptpqc2(float3 pqRGB, uint inputGamut) {
         hpeLMS.z = 0.0000000012f * rgb.r + 0.0257773102f * rgb.g + 0.9740729348f * rgb.b;
     }
 
-    // Inverse of dovi_tool Profile 5 rgb_to_lms. This applies the 2% C2
-    // crosstalk in linear LMS before PQ encoding.
+    // Apply the profile's 2% C2 crosstalk in linear LMS before PQ encoding.
     float3 c2LMS;
     c2LMS.x = 0.9600126966f * hpeLMS.x + 0.0200241711f * hpeLMS.y + 0.0200241711f * hpeLMS.z;
     c2LMS.y = 0.0200241711f * hpeLMS.x + 0.9600126966f * hpeLMS.y + 0.0200241711f * hpeLMS.z;

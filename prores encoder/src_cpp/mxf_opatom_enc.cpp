@@ -365,7 +365,7 @@ bool OpAtomEncoder::close() {
         io_.patch_u64(footer_field_in_header_, footerStart);
         io_.patch_byte(header_off_ + 14, 0x04);  // ClosedComplete
 
-        io_.close();
+        io_.finish();
         phase_ = Phase::Done;
         return true;
     } catch(const std::exception& ex) {

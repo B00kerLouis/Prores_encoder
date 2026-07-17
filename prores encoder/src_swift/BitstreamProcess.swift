@@ -100,17 +100,6 @@ enum DolbyVisionHEVCProfile: String, Sendable {
         }
     }
 
-    var doviToolProfileArgument: String {
-        switch self {
-        case .profile5, .profile10: return "5"
-        case .profile76: return "7.6"
-        case .profile81: return "8.1"
-        case .profile84: return "8.4"
-        case .profile101: return "8.1"
-        case .profile104: return "8.4"
-        }
-    }
-
     var displayName: String {
         switch self {
         case .profile5: return "5"
@@ -193,10 +182,38 @@ enum DolbyVisionHEVCProfile: String, Sendable {
 struct HEVCEncodeOptions: Sendable {
     let bitrateMbps: Double
     let dvProfile: DolbyVisionHEVCProfile?
+    let keyFrameIntervalSeconds: Int
+
+    init(
+        bitrateMbps: Double,
+        dvProfile: DolbyVisionHEVCProfile?,
+        keyFrameIntervalSeconds: Int = 2
+    ) {
+        self.bitrateMbps = bitrateMbps
+        self.dvProfile = dvProfile
+        self.keyFrameIntervalSeconds = keyFrameIntervalSeconds
+    }
 
     var bitrateBitsPerSecond: Int {
         Int((bitrateMbps * 1_000_000.0).rounded())
     }
+}
+
+/// Returns whether a requested bitrate can be represented by the selected encoder API.
+func encodedVideoBitrateIsRepresentable(_ bitrateMbps: Double, usesAV1: Bool) -> Bool {
+    guard bitrateMbps.isFinite, bitrateMbps > 0 else { return false }
+    let bitsPerSecond = bitrateMbps * 1_000_000.0
+    guard bitsPerSecond.isFinite else { return false }
+    return usesAV1
+        ? bitsPerSecond <= Double(UInt32.max)
+        : bitsPerSecond < Double(Int.max)
+}
+
+/// Profile 7 layer settings shared by the encoders and elementary-stream HRD.
+enum DolbyVisionProfile7EncodingDefaults {
+    static let baseLayerBitrateFraction = 0.80
+    static let enhancementLayerBitrateFraction = 0.20
+    static let keyFrameIntervalSeconds = 1
 }
 
 /// Reads video color extensions and maps them to MOV strings and MXF identifiers.
@@ -297,12 +314,19 @@ func readTimecodeString(from asset: AVAsset) async -> String {
         if reader.canAdd(output) { reader.add(output) }
         reader.startReading()
         if let sample = output.copyNextSampleBuffer(),
-           let bb = CMSampleBufferGetDataBuffer(sample) {
-            var length = 0; var ptr: UnsafeMutablePointer<CChar>?
-            CMBlockBufferGetDataPointer(bb, atOffset: 0, lengthAtOffsetOut: nil,
-                                        totalLengthOut: &length, dataPointerOut: &ptr)
-            if length >= 4, let p = ptr {
-                let N = Int(Int32(bigEndian: p.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }))
+           let bb = CMSampleBufferGetDataBuffer(sample),
+           CMBlockBufferGetDataLength(bb) >= 4 {
+            var raw = Int32.zero
+            let copyStatus = withUnsafeMutableBytes(of: &raw) { bytes in
+                CMBlockBufferCopyDataBytes(
+                    bb,
+                    atOffset: 0,
+                    dataLength: 4,
+                    destination: bytes.baseAddress!
+                )
+            }
+            if copyStatus == kCMBlockBufferNoErr {
+                let N = Int(Int32(bigEndian: raw))
                 var hh = 0, mm = 0, ss = 0, ff = 0
                 if isDF && fps % 30 == 0 && fps >= 30 {
                     let D = 2 * fps / 30; let ND = fps * 60 - D
@@ -962,14 +986,15 @@ final class ProResSession: @unchecked Sendable {
                 value: dataRateLimits,
                 required: requiresNativeHEVCHardware
             )
+            let keyFrameIntervalSeconds = max(hevcOptions.keyFrameIntervalSeconds, 1)
             try setProperty(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                value: NSNumber(value: max(fpsHint * 2, 1)),
+                value: NSNumber(value: max(fpsHint * keyFrameIntervalSeconds, 1)),
                 required: requiresNativeHEVCHardware
             )
             try setProperty(
                 kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
-                value: NSNumber(value: 2),
+                value: NSNumber(value: keyFrameIntervalSeconds),
                 required: requiresNativeHEVCHardware
             )
         }
@@ -1304,7 +1329,8 @@ func encodeMXF(
     audioCHperFile: Int,
     audioOverrideURL: URL?,
     deleteSourceAudio: Bool,
-    colorTransform: ColorTransformRequest?
+    colorTransform: ColorTransformRequest?,
+    outputVideoRaw: Bool = false
 ) async -> MXFEncodeResult {
 
     let emptyUMID = Data(repeating: 0, count: 32)
@@ -1397,6 +1423,22 @@ func encodeMXF(
     if isOP1a { outPath = outputDir + "/" + basename + ".mxf" }
     else      { outPath = outputDir + "/" + basename + "_v.mxf" }
 
+    let rawVideoWriter: EncodedVideoRawWriter?
+    if outputVideoRaw {
+        do {
+            rawVideoWriter = try EncodedVideoRawWriter(
+                encodedOutputURL: URL(fileURLWithPath: outPath),
+                quality: quality
+            )
+        } catch {
+            return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                                   error: error.localizedDescription, sourceAudioChannels: 0,
+                                   videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+        }
+    } else {
+        rawVideoWriter = nil
+    }
+
     // Open MXFBridge
     let bridge = MXFBridge()
     guard bridge.open(withPath: outPath, config: cfg) else {
@@ -1455,7 +1497,7 @@ func encodeMXF(
 
         // ── 3-Stage async pipeline ──────────────────────────────────────────
         //
-        // Stage 1 (readerTask):    AVAssetReader → pixelChannel  (or compressed → compressedChannel for passthrough)
+        // Stage 1 (readerTask):    reader output → pixelChannel  (or compressed → compressedChannel for passthrough)
         // Stage 2 (encoderTask):   pixelChannel  → VT submit + audio FIFO
         // Stage 2b (drainTask):    VT output + audio FIFO → compressedChannel
         // Stage 3 (writerTask):    compressedChannel → MXFBridge.writeFrameVideo
@@ -1475,13 +1517,24 @@ func encodeMXF(
         // Stage 1 — read
         let readerTask = Task<Void, Error> {
             if passthrough {
+                var frameIndex: Int64 = 0
                 while true {
-                    let payload: (SendableSampleBuffer, [Data])? = autoreleasepool {
+                    guard let sample: SendableSampleBuffer = autoreleasepool(invoking: {
                         guard let sample = vidOutput.copyNextSampleBuffer() else { return nil }
-                        return (SendableSampleBuffer(buf: sample), [])
+                        return SendableSampleBuffer(buf: sample)
+                    }) else { break }
+                    var chunks: [Data] = []
+                    for context in audioCtxs {
+                        let sampleCount = mxf_samples_for_frame(
+                            frameIndex,
+                            Int32(fpsInfo.numerator),
+                            Int32(fpsInfo.denominator),
+                            48_000
+                        )
+                        chunks.append(context.consumeFrame(sampleCount: Int(sampleCount)))
                     }
-                    guard let payload else { break }
-                    await compressedChannel.sendAsync(payload)
+                    await compressedChannel.sendAsync((sample, chunks))
+                    frameIndex += 1
                 }
                 compressedChannel.finish()
             } else {
@@ -1571,6 +1624,7 @@ func encodeMXF(
                             "Video MXF write failed: \(bridge.lastError ?? "unknown")"]
                     )
                 }
+                try rawVideoWriter?.write(sampleBuffer.buf)
                 written += 1
                 progress?.increment()
             }
@@ -1586,6 +1640,7 @@ func encodeMXF(
         vtRef?.value.invalidate()
         let (written, fps) = try await writerTask.value
         _ = written
+        try rawVideoWriter?.finish()
 
         guard bridge.close() else {
             return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
@@ -1599,6 +1654,9 @@ func encodeMXF(
 
         // ── OP-Atom: encode audio to separate MXF files ──
         var allPaths = [outPath]
+        if let rawVideoWriter {
+            allPaths.append(rawVideoWriter.outputURL.path)
+        }
         var audioUMIDs: [Data] = []
         if !isOP1a && audioChannels > 0, let aTrack = audioTracks.first {
             let groupCounts = cfg.audioChannelCounts.map { $0.intValue }

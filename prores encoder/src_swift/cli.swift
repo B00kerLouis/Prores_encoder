@@ -7,7 +7,7 @@ import Metal
 
 #if PRORES_ENCODER_CLI
 
-private let proResEncoderCLIVersion = "1.2.2"
+private let proResEncoderCLIVersion = "1.2.3"
 
 // MARK: - CLI Config (Sendable, passed by value)
 
@@ -57,7 +57,8 @@ struct CLIConfig: Sendable {
     let cmuMasteringNits: Float?
     let cmuInclude:     Bool
     let dvFlag:         Bool
-    let dolbyVisionDualOutput: Bool
+    /// Also writes the encoded elementary video stream(s) beside the container.
+    let outputVideoRaw: Bool
 }
 
 // MARK: - Entry Point
@@ -78,6 +79,7 @@ enum ProResEncoderCLI {
         var quality         = "422hq"
         var extraAudioPath  = ""
         var exportFormat    = "mov"
+        var exportFormatWasExplicitlySet = false
         var aafMode: AAFMode = .none
         var audioCHperFile  = 1
         var audioReplace    = false
@@ -99,7 +101,7 @@ enum ProResEncoderCLI {
         var cmuMasteringNits: Float? = nil
         var cmuInclude = false
         var dvFlag = false
-        var dolbyVisionDualOutput = false
+        var outputVideoRaw = false
 
         let args = CommandLine.arguments
         var idx = 1
@@ -147,7 +149,7 @@ enum ProResEncoderCLI {
                 dolbyVisionXMLPath = requireValue(for: args[idx])
             case "-b", "--bitrate":
                 let raw = requireValue(for: args[idx])
-                guard let parsed = Double(raw), parsed > 0 else {
+                guard let parsed = Double(raw), parsed.isFinite, parsed > 0 else {
                     print("[Error] --bitrate / -b must be a positive number in Mb/s.")
                     exit(1)
                 }
@@ -161,6 +163,7 @@ enum ProResEncoderCLI {
                 dolbyVisionProfile = parsed
             case "-ef", "--export-format":
                 exportFormat = requireValue(for: args[idx]).lowercased()
+                exportFormatWasExplicitlySet = true
             case "-ea", "--export-aaf", "--aaf":
                 aafMode = .sequence
             case "-ea-all", "--export-aaf-all":
@@ -212,8 +215,8 @@ enum ProResEncoderCLI {
                 cmuInclude = true
             case "--dv-flag", "-df":
                 dvFlag = true
-            case "--dual":
-                dolbyVisionDualOutput = true
+            case "--outupt-video-raw", "-ovr":
+                outputVideoRaw = true
             default:
                 print("[Error] Unknown argument: \(args[idx])")
                 printUsage()
@@ -222,9 +225,14 @@ enum ProResEncoderCLI {
             idx += 1
         }
 
-        let validExportFormats: Set<String> = ["mov", "op1a", "opatom"]
+        if !exportFormatWasExplicitlySet,
+           URL(fileURLWithPath: outputPath).pathExtension.lowercased() == "mp4" {
+            exportFormat = "mp4"
+        }
+
+        let validExportFormats: Set<String> = ["mov", "mp4", "op1a", "opatom"]
         guard validExportFormats.contains(exportFormat) else {
-            print("[Error] Invalid export format: \(exportFormat). Use mov, op1a, or opatom.")
+            print("[Error] Invalid export format: \(exportFormat). Use mov, mp4, op1a, or opatom.")
             printUsage()
             exit(1)
         }
@@ -241,8 +249,8 @@ enum ProResEncoderCLI {
             print("[Error] --cmu-include requires --cmu <nits>.")
             exit(1)
         }
-        if cmuInclude && exportFormat != "mov" {
-            print("[Error] --cmu-include is supported only with MOV output.")
+        if cmuInclude && !(exportFormat == "mov" || exportFormat == "mp4") {
+            print("[Error] --cmu-include is supported only with MOV or MP4 compressed output.")
             exit(1)
         }
 
@@ -306,8 +314,8 @@ enum ProResEncoderCLI {
                 print("[Error] --dv-flag / -df is available only while encoding HEVC or AV1 media.")
                 exit(1)
             }
-            if dolbyVisionDualOutput {
-                print("[Error] --dual is available only while encoding HEVC Profile 7.6.")
+            if outputVideoRaw {
+                print("[Error] --outupt-video-raw / -ovr is available only while encoding media.")
                 exit(1)
             }
             guard !inputFilePath.isEmpty,
@@ -401,16 +409,17 @@ enum ProResEncoderCLI {
             exit(1)
         }
         if wantsCompressedHDR {
-            guard exportFormat == "mov" else {
-                print("[Error] -q \(quality) is supported only with MOV output.")
+            guard exportFormat == "mov" || exportFormat == "mp4" else {
+                print("[Error] -q \(quality) is supported only with MOV or MP4 output.")
                 exit(1)
             }
             guard inputXMLPath.isEmpty && inputAAFPath.isEmpty else {
                 print("[Error] -q \(quality) currently supports single-file or folder media input, not timeline XML/AAF bounce.")
                 exit(1)
             }
-            guard let bitrate = videoBitrateMbps, bitrate > 0 else {
-                print("[Error] -q \(quality) requires --bitrate / -b <Mb/s>.")
+            guard let bitrate = videoBitrateMbps,
+                  encodedVideoBitrateIsRepresentable(bitrate, usesAV1: wantsAV1) else {
+                print("[Error] -q \(quality) requires a finite, representable --bitrate / -b value in Mb/s.")
                 exit(1)
             }
             if dolbyVisionProfile != nil && !hasDolbyVisionMetadataSource {
@@ -430,11 +439,6 @@ enum ProResEncoderCLI {
                 print("[Error] -q \(quality) with Dolby Vision metadata requires --dv-profile \(required).")
                 exit(1)
             }
-            if dolbyVisionDualOutput
-                && !(wantsHEVC && dolbyVisionProfile?.isProfile76 == true) {
-                print("[Error] --dual requires -q hevc with --dv-profile 76 / 7.6.")
-                exit(1)
-            }
         } else {
             if videoBitrateMbps != nil {
                 print("[Error] --bitrate / -b is available only with -q hevc or -q av1.")
@@ -448,12 +452,16 @@ enum ProResEncoderCLI {
                 print("[Error] --dv-flag / -df is available only with -q hevc or -q av1.")
                 exit(1)
             }
-            if dolbyVisionDualOutput {
-                print("[Error] --dual is available only with -q hevc --dv-profile 76 / 7.6.")
+            if outputVideoRaw && quality == "pass" {
+                print("[Error] --outupt-video-raw / -ovr requires a re-encoded video quality, not -q pass.")
                 exit(1)
             }
         }
-        if exportFormat == "mov" && aafMode != .none {
+        if exportFormat == "mp4" && !wantsCompressedHDR {
+            print("[Error] MP4 output supports only -q hevc or -q av1.")
+            exit(1)
+        }
+        if (exportFormat == "mov" || exportFormat == "mp4") && aafMode != .none {
             print("[Error] AAF (-ea / -ea-all) is only available with MXF output formats (op1a / opatom)."); exit(1)
         }
         if forcedOutputStartTimecode != nil && exportFormat != "mov" {
@@ -461,8 +469,8 @@ enum ProResEncoderCLI {
             exit(1)
         }
         if !dolbyVisionXMLPath.isEmpty {
-            guard exportFormat == "mov" else {
-                print("[Error] Dolby Vision export is currently supported only with MOV output; MXF (OP-1A/OP-Atom) is not supported.")
+            guard exportFormat == "mov" || exportFormat == "mp4" else {
+                print("[Error] Dolby Vision export is supported only with MOV or MP4 compressed output; MXF (OP-1A/OP-Atom) is not supported.")
                 exit(1)
             }
             guard !inputFilePath.isEmpty else {
@@ -504,7 +512,7 @@ enum ProResEncoderCLI {
                                cmuMasteringNits: cmuMasteringNits,
                                cmuInclude: cmuInclude,
                                dvFlag: dvFlag,
-                               dolbyVisionDualOutput: dolbyVisionDualOutput)
+                               outputVideoRaw: outputVideoRaw)
         let fm = FileManager.default
         let outputURL = URL(fileURLWithPath: outputPath)
         let isOutFile = !outputURL.pathExtension.isEmpty
@@ -585,7 +593,7 @@ enum ProResEncoderCLI {
             }
             let asset = AVURLAsset(url: inputURL)
             let baseName = inputURL.deletingPathExtension().lastPathComponent
-            let movieExtension = "mov"
+        let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
             if isOutFile {
                 let finalOut = outputURL
                     .deletingPathExtension()
@@ -623,7 +631,7 @@ enum ProResEncoderCLI {
             var sequencedAAFClips: [AAFClipInfo] = []
             for file in videos {
                 let baseName = file.deletingPathExtension().lastPathComponent
-                let movieExtension = "mov"
+                let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
                 let finalOut = outputURL.appendingPathComponent(
                     "\(baseName).\(movieExtension)"
                 )
@@ -731,12 +739,17 @@ private func processSingleVideo(
             audioCHperFile: config.audioCHperFile,
             audioOverrideURL: (config.audioReplace || config.deleteSourceAudio) ? extraAudioURL : nil,
             deleteSourceAudio: config.deleteSourceAudio,
-            colorTransform: config.colorTransform)
+            colorTransform: config.colorTransform,
+            outputVideoRaw: config.outputVideoRaw)
 
         if result.success {
             print("[MXF] Encoded \(result.framesEncoded) frames at " +
                   "\(String(format: "%.1f", result.fps)) fps")
             print("[Success] MXF written for '\(assetName)'.")
+            if config.outputVideoRaw,
+               let rawPath = result.paths.first(where: { $0.hasSuffix("_raw.prores") }) {
+                print("[Raw] Video elementary stream written: \(rawPath)")
+            }
 
             if let masteringPeakNits = config.cmuMasteringNits,
                let videoPath = result.paths.first(where: { $0.hasSuffix("_v.mxf") })
@@ -882,9 +895,10 @@ private func processSingleVideo(
         hevcOptions: config.hevcOptions,
         av1Options: config.av1Options,
         colorSpace: cs, fpsInfo: fpsI,
-        colorTransform: config.colorTransform,
-        useDolbyVisionCodecTag: config.dvFlag,
-        dolbyVisionDualOutput: config.dolbyVisionDualOutput)
+            colorTransform: config.colorTransform,
+            useDolbyVisionCodecTag: config.dvFlag,
+        container: config.exportFormat == "mp4" ? .mp4 : .mov,
+        outputVideoRaw: config.outputVideoRaw)
 
     guard success else {
         print("[Failed] \(assetName)")
@@ -951,7 +965,7 @@ private func fileHasContent(_ url: URL) -> Bool {
 
 /// Checks every file produced by the selected container mode before starting work.
 private func encodingOutputExists(for requestedURL: URL, config: CLIConfig) -> Bool {
-    guard config.exportFormat != "mov" else {
+    guard config.exportFormat != "mov" && config.exportFormat != "mp4" else {
         return fileHasContent(requestedURL)
     }
     let directory = requestedURL.deletingLastPathComponent()
@@ -1206,7 +1220,8 @@ private func printUsage() {
 
     Output format:
       -ef, --export-format <format>   Export format (default: mov)
-        mov             MOV container
+        mov             MOV container (default)
+        mp4             MP4 container (HEVC and AV1 only; also inferred from a .mp4 -o path)
         op1a            MXF OP-1a (direct VT→MXF)
         opatom          MXF OP-Atom (direct VT→MXF)
 
@@ -1216,7 +1231,7 @@ private func printUsage() {
       -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
       -dp, --dv-profile <5|76|81|84|10|101|104> Dolby Vision profile: HEVC 5/7.6/8.1/8.4 or AV1 10/10.1/10.4
       -df, --dv-flag                  Use the reserved player-compatibility dvh1/dav1 sample entry; default output keeps hvc1/av01 for verifier compatibility
-      --dual                          With -q hevc -dp 76, also write Profile 7.6 BL/EL .hevc streams beside the MOV
+      --outupt-video-raw,-ovr         Also write the encoded ProRes, HEVC, or AV1 elementary stream; with -q hevc -dp 76 writes Profile 7.6 BL/EL .hevc streams
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio

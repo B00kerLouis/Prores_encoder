@@ -1,4 +1,4 @@
-// Writes an AAF timeline whose source mobs link directly to QuickTime media.
+// Writes an AAF timeline whose source mobs link directly to movie media.
 
 import Foundation
 import AVFoundation
