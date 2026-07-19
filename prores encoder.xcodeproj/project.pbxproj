@@ -366,7 +366,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -410,7 +410,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -466,7 +466,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -523,7 +523,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.3;
+				MARKETING_VERSION = 1.2.4;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",

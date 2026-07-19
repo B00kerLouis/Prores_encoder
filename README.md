@@ -1,4 +1,4 @@
-# ProRes Encoder 1.2.3
+# ProRes Encoder 1.2.4
 
 Native macOS CLI and Framework for professional video encoding, HDR color
 conversion, dynamic metadata processing, MOV/MP4/MXF mastering, linked timeline
@@ -9,18 +9,11 @@ with `-ef mp4` or simply by giving `-o` a `.mp4` filename. `--outupt-video-raw`
 (`-ovr`) writes the final encoded video elementary stream; Dolby Vision Profile
 7.6 writes its required separate BL and EL HEVC streams.
 
-## What’s New in 1.2.3
+## What’s New in 1.2.4
 
-- Framework-only multi-format, raw-only fan-out for every ProRes variant, HEVC,
-  AV1, and all supported Dolby Vision profiles; Profile 7.6 returns separate
-  base-layer and enhancement-layer streams.
-- QuickTime timecode recovery from MOV sample tables when AVFoundation exposes
-  a valid `tmcd` sample without its data buffer.
-- Correct AV1 temporal-unit delimiters in emitted `.obu` elementary streams.
-- Dolby Vision level selection by raster width and pixel rate, including
-  replacement of an incorrect existing `dvcC` or `dvvC` configuration box.
-- MOV/MP4 compressed output, native Metal color/LUT processing, and verified
-  Dolby Vision Profiles 5, 7.6, 8.1, 8.4, 10, 10.1, and 10.4.
+- Correct PQ source-peak fallback when static mastering metadata is absent, so
+  a 10,000-nit ST 2084 signal is tone-mapped correctly to the requested target
+  luminance.
 
 ## License
 

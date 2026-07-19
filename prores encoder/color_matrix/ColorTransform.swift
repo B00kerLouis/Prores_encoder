@@ -475,6 +475,15 @@ private func detectedSourcePeakNits(colorSpace: SourceColorSpace, oetf: VideoOET
     switch oetf {
     case .gamma24: return 100
     case .gamma26: return 48
-    case .pq, .hlg: return 1_000
+    case .pq:
+        // ST 2084 is an absolute transfer function whose signal domain is
+        // defined through 10,000 cd/m².  When static metadata is absent, a
+        // 1,000-nit fallback would make a real 10,000-nit PQ signal look
+        // equal to a 1,000-nit target and skip the Metal EETF entirely.
+        return 10_000
+    case .hlg:
+        // HLG is scene-referred; retain the reference-display fallback used
+        // for an untagged HLG source.
+        return 1_000
     }
 }
