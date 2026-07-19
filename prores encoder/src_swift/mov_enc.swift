@@ -5166,7 +5166,9 @@ func encodeMOV(
     var effectiveColorSpace: SourceColorSpace? = usesNativeDolbyVision
         ? nil
         : (resolvedColorTransform?.outputColorSpace
-            ?? (isCompressedHDR ? SourceColorSpace.hevcHDR10(basedOn: colorSpace) : colorSpace))
+            ?? (requestedDVProfile != nil
+                ? SourceColorSpace.hevcHDR10(basedOn: colorSpace)
+                : colorSpace))
     guard !audioReplace || extraAudioURL != nil else {
         print("[Error] --audio-replace requires -aa <audio_file>.")
         return false
@@ -5259,7 +5261,11 @@ func encodeMOV(
                     userInfo: [NSLocalizedDescriptionKey: "\(quality.uppercased()) encode requires --bitrate / -b options."]
                 )
             }
-            if resolvedColorTransform == nil {
+            // Ordinary HEVC/AV1 output is allowed to preserve SDR, HLG, PQ, or
+            // otherwise tagged source color without being promoted to HDR10.
+            // A Dolby Vision profile still requires its strictly conforming
+            // base layer when no explicit color conversion creates one.
+            if requestedDVProfile != nil, resolvedColorTransform == nil {
                 try await validateHDR10HEVCVideoColorProfile(from: videoTrack)
             }
         }
