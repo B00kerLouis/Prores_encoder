@@ -255,31 +255,10 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
         device: MTLDevice,
         requiredFunctions: [String]
     ) -> MTLLibrary? {
-        if let library = device.makeDefaultLibrary(),
-           containsFunctions(requiredFunctions, in: library) {
-            return library
-        }
-        let bundle = Bundle(for: NativeDolbyVisionMetalBundleToken.self)
-        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0])
-            .standardizedFileURL
-            .deletingLastPathComponent()
-        let candidates = [
-            bundle.url(forResource: "default", withExtension: "metallib"),
-            Bundle.main.url(forResource: "default", withExtension: "metallib"),
-            executableDirectory.appendingPathComponent("default.metallib")
-        ].compactMap { $0 }
-        var visited = Set<URL>()
-        for url in candidates where visited.insert(url.standardizedFileURL).inserted {
-            guard let library = try? device.makeLibrary(URL: url),
-                  containsFunctions(requiredFunctions, in: library) else {
-                continue
-            }
-            return library
-        }
-        return nil
-    }
-
-    private static func containsFunctions(_ names: [String], in library: MTLLibrary) -> Bool {
-        names.allSatisfy { library.makeFunction(name: $0) != nil }
+        EmbeddedMetalLibrary.load(
+            device: device,
+            bundle: Bundle(for: NativeDolbyVisionMetalBundleToken.self),
+            requiredFunctions: requiredFunctions
+        )
     }
 }

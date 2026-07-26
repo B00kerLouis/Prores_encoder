@@ -3,3 +3,4 @@
 
 #import "MXFBridge.h"
 #import "AV1UmbrellaHeader.h"
+#import "EmbeddedMetalLibrarySection.h"

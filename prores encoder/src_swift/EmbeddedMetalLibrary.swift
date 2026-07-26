@@ -1,9 +1,10 @@
-// Compiles embedded GPU kernels when a packaged Metal library is unavailable.
+// Loads the precompiled GPU kernels linked into the Mach-O image.
 
 import Foundation
+import Dispatch
 import Metal
 
-/// Resolves required GPU functions and compiles the embedded source when needed.
+/// Resolves required GPU functions from the build-time embedded Metal library.
 enum EmbeddedMetalLibrary {
     /// Returns the first library containing every required function.
     static func load(
@@ -11,11 +12,15 @@ enum EmbeddedMetalLibrary {
         bundle: Bundle,
         requiredFunctions: [String]
     ) -> MTLLibrary? {
+        if let library = makeLinkedLibrary(device: device),
+           library.hasMetalFunctions(requiredFunctions) {
+            return library
+        }
         if let library = device.makeDefaultLibrary(),
            library.hasMetalFunctions(requiredFunctions) {
             return library
         }
-        if let embedded = makeEmbeddedLibrary(device: device),
+        if let embedded = makeSourceFallbackLibrary(device: device),
            embedded.hasMetalFunctions(requiredFunctions) {
             return embedded
         }
@@ -41,8 +46,18 @@ enum EmbeddedMetalLibrary {
         return nil
     }
 
-    /// Compiles the concatenated color and analysis kernels at runtime.
-    private static func makeEmbeddedLibrary(device: MTLDevice) -> MTLLibrary? {
+    /// Loads the build-time Metal library placed in this image's __TEXT section.
+    private static func makeLinkedLibrary(device: MTLDevice) -> MTLLibrary? {
+        var byteCount = 0
+        guard let bytes = ProResEmbeddedMetalLibraryBytes(&byteCount), byteCount > 0 else {
+            return nil
+        }
+        let data = DispatchData(bytes: UnsafeRawBufferPointer(start: bytes, count: byteCount))
+        return try? device.makeLibrary(data: data)
+    }
+
+    /// Compatibility fallback for binaries built before the linked Metal section.
+    private static func makeSourceFallbackLibrary(device: MTLDevice) -> MTLLibrary? {
         let options = MTLCompileOptions()
         options.fastMathEnabled = true
         return try? device.makeLibrary(

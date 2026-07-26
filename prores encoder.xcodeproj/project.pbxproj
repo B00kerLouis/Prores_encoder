@@ -375,6 +375,7 @@
 					"-framework",
 					swiftaaf_Framework,
 					"-lSvtAv1Enc",
+					"-Wl,-sectcreate,__TEXT,__proresmetallib,$(METAL_LIBRARY_OUTPUT_DIR)/default.metallib",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -419,6 +420,7 @@
 					"-framework",
 					swiftaaf_Framework,
 					"-lSvtAv1Enc",
+					"-Wl,-sectcreate,__TEXT,__proresmetallib,$(METAL_LIBRARY_OUTPUT_DIR)/default.metallib",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -475,6 +477,7 @@
 					"-framework",
 					swiftaaf_Framework,
 					"-lSvtAv1Enc",
+					"-Wl,-sectcreate,__TEXT,__proresmetallib,$(METAL_LIBRARY_OUTPUT_DIR)/default.metallib",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.framework;
@@ -532,6 +535,7 @@
 					"-framework",
 					swiftaaf_Framework,
 					"-lSvtAv1Enc",
+					"-Wl,-sectcreate,__TEXT,__proresmetallib,$(METAL_LIBRARY_OUTPUT_DIR)/default.metallib",
 					"-Wl,-no_warn_duplicate_libraries",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.framework;
