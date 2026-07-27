@@ -305,22 +305,102 @@ private func sourceUsesDropFrameTimecode(from asset: AVAsset) async -> Bool {
     return (CMTimeCodeFormatDescriptionGetTimeCodeFlags(format) & kCMTimeCodeFlag_DropFrame) != 0
 }
 
-/// Normalizes nominal frame rate to an exact rational and source convention.
-func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
-    guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-          let rate  = try? await track.load(.nominalFrameRate) else {
-        return FramerateInfo(numerator: 25, denominator: 1, isDropFrame: false)
+/// Measures the video timeline from sample timing without decoding pixel data.
+///
+/// This is deliberately independent of a QuickTime timecode track. It is used
+/// only when AVFoundation cannot provide a usable nominal rate, because sample
+/// timing is the authoritative fallback while `minFrameDuration` may merely
+/// reflect a coarse container timebase.
+private func measuredVideoFrameRate(
+    asset: AVAsset,
+    track: AVAssetTrack
+) -> (numerator: Int, denominator: Int)? {
+    guard let reader = try? AVAssetReader(asset: asset) else { return nil }
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else { return nil }
+    reader.add(output)
+    guard reader.startReading() else { return nil }
+
+    var frameCount: Int64 = 0
+    var totalDuration = CMTime.zero
+    while let sampleBuffer = output.copyNextSampleBuffer() {
+        let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard sampleCount > 0 else { continue }
+        for index in 0..<sampleCount {
+            var timing = CMSampleTimingInfo()
+            guard CMSampleBufferGetSampleTimingInfo(
+                sampleBuffer,
+                at: index,
+                timingInfoOut: &timing
+            ) == noErr,
+            timing.duration.isNumeric,
+            timing.duration.value > 0 else {
+                continue
+            }
+            totalDuration = CMTimeAdd(totalDuration, timing.duration)
+            frameCount += 1
+        }
     }
-    let fps = Double(rate)
-    guard fps.isFinite, fps > 0, fps < 1000 else {
+
+    guard frameCount > 0,
+          totalDuration.isNumeric,
+          totalDuration.value > 0,
+          totalDuration.timescale > 0 else {
+        return nil
+    }
+
+    let measuredFPS = Double(frameCount) / totalDuration.seconds
+    if let exactRate = smpteFrameRateRational(for: measuredFPS) {
+        return exactRate
+    }
+
+    let numeratorResult = frameCount.multipliedReportingOverflow(
+        by: Int64(totalDuration.timescale)
+    )
+    let denominator = Int64(totalDuration.value)
+    guard !numeratorResult.overflow,
+          numeratorResult.partialValue > 0,
+          denominator > 0,
+          numeratorResult.partialValue <= Int64(Int.max),
+          denominator <= Int64(Int.max) else {
+        return nil
+    }
+    let divisor = frameRateGCD(
+        Int(numeratorResult.partialValue),
+        Int(denominator)
+    )
+    return (
+        Int(numeratorResult.partialValue) / divisor,
+        Int(denominator) / divisor
+    )
+}
+
+/// Normalizes video timing to an exact rational and source convention.
+func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
+    guard let track = try? await asset.loadTracks(withMediaType: .video).first else {
         return FramerateInfo(numerator: 25, denominator: 1, isDropFrame: false)
     }
 
+    // The absence of a timecode track only means NDF numbering is unavailable;
+    // it must never change how the video edit rate itself is measured.
     let isDropFrame = await sourceUsesDropFrameTimecode(from: asset)
-    if let exactRate = smpteFrameRateRational(for: fps) {
+    if let rate = try? await track.load(.nominalFrameRate) {
+        let fps = Double(rate)
+        if fps.isFinite, fps > 0, fps < 1000,
+           let exactRate = smpteFrameRateRational(for: fps) {
+            return FramerateInfo(
+                numerator: exactRate.numerator,
+                denominator: exactRate.denominator,
+                isDropFrame: isDropFrame
+            )
+        }
+    }
+
+    if let measuredRate = measuredVideoFrameRate(asset: asset, track: track) {
         return FramerateInfo(
-            numerator: exactRate.numerator,
-            denominator: exactRate.denominator,
+            numerator: measuredRate.numerator,
+            denominator: measuredRate.denominator,
             isDropFrame: isDropFrame
         )
     }
@@ -336,8 +416,12 @@ func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
             isDropFrame: isDropFrame
         )
     }
+
+    // This is reachable only for malformed media with neither a usable
+    // declared rate nor readable sample timing. Callers retain their historic
+    // default instead of failing an unrelated encode path.
     return FramerateInfo(
-        numerator: max(Int(fps.rounded()), 1),
+        numerator: 25,
         denominator: 1,
         isDropFrame: isDropFrame
     )

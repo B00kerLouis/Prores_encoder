@@ -243,7 +243,7 @@ struct CMUAssetDescriptor: Codable, Sendable {
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(format)
         let duration = try await asset.load(.duration)
-        let frameRate = await cmuEditRate(asset: asset, track: track)
+        let frameRate = await cmuEditRate(asset: asset)
         let codec = cmuFourCC(CMFormatDescriptionGetMediaSubType(format))
 
         return CMUAssetDescriptor(
@@ -371,47 +371,11 @@ func cmuFourCC(_ code: OSType) -> String {
     return String(bytes: bytes, encoding: .ascii) ?? "\(code)"
 }
 
-/// Derives an exact edit rate from the nominal track rate, with duration fallback.
-private func cmuEditRate(asset: AVAsset, track: AVAssetTrack) async -> CMURational {
-    // A MOV track's minimum frame duration describes its sample cadence, not
-    // necessarily its declared edit rate.  For example, a 24000/1001 stream
-    // carried in a 600 Hz media timebase reports 25/600 here (24 fps).  Prefer
-    // the nominal video rate, normalized to the exact SMPTE rational used by
-    // the rest of the Dolby Vision pipeline, and retain the duration only as
-    // a fallback for assets that do not expose a nominal rate.
-    if let nominalFrameRate = try? await track.load(.nominalFrameRate),
-       nominalFrameRate.isFinite,
-       nominalFrameRate > 0 {
-        let normalized = await framerateInfo(from: asset)
-        return CMURational(
-            numerator: normalized.numerator,
-            denominator: normalized.denominator
-        )
-    }
-
-    if let minDuration = try? await track.load(.minFrameDuration),
-       minDuration.isNumeric,
-       minDuration.value > 0,
-       minDuration.timescale > 0 {
-        let divisor = cmuGCD(Int(minDuration.timescale), Int(minDuration.value))
-        return CMURational(
-            numerator: Int(minDuration.timescale) / divisor,
-            denominator: Int(minDuration.value) / divisor
-        )
-    }
-
-    let fallback = await framerateInfo(from: asset)
-    return CMURational(numerator: fallback.numerator, denominator: fallback.denominator)
-}
-
-/// Returns a positive divisor for rational-rate reduction.
-private func cmuGCD(_ lhs: Int, _ rhs: Int) -> Int {
-    var a = abs(lhs)
-    var b = abs(rhs)
-    while b != 0 {
-        let remainder = a % b
-        a = b
-        b = remainder
-    }
-    return max(a, 1)
+/// Derives an exact edit rate from video timing, never from timecode metadata.
+private func cmuEditRate(asset: AVAsset) async -> CMURational {
+    let frameRate = await framerateInfo(from: asset)
+    return CMURational(
+        numerator: frameRate.numerator,
+        denominator: frameRate.denominator
+    )
 }
