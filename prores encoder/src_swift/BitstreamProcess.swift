@@ -274,7 +274,38 @@ struct FramerateInfo: Sendable {
     var fps: Double { Double(numerator) / Double(denominator) }
 }
 
-/// Normalizes nominal frame rate to a known rational and drop-frame convention.
+/// Converts a nominal frame-rate value into an exact SMPTE edit-rate rational.
+///
+/// SMPTE fractional rates are all represented as an integral nominal rate
+/// multiplied by 1000/1001.  Resolving that family generically preserves the
+/// exact rate for every supported SMPTE timecode quanta instead of rounding
+/// rates such as 24000/1001 to 24/1.
+private func smpteFrameRateRational(for fps: Double) -> (numerator: Int, denominator: Int)? {
+    let tolerance = 0.01
+    let integralRate = Int(fps.rounded())
+    if integralRate > 0, abs(fps - Double(integralRate)) < tolerance {
+        return (integralRate, 1)
+    }
+
+    let nominalRate = Int((fps * 1001.0 / 1000.0).rounded())
+    let fractionalRate = Double(nominalRate * 1000) / 1001.0
+    if nominalRate > 0, abs(fps - fractionalRate) < tolerance {
+        return (nominalRate * 1000, 1001)
+    }
+    return nil
+}
+
+/// Reads the drop-frame flag from source timecode rather than inferring it
+/// from the video rate: 30000/1001 and 60000/1001 are valid in both DF and NDF.
+private func sourceUsesDropFrameTimecode(from asset: AVAsset) async -> Bool {
+    guard let track = try? await asset.loadTracks(withMediaType: .timecode).first,
+          let format = try? await track.load(.formatDescriptions).first else {
+        return false
+    }
+    return (CMTimeCodeFormatDescriptionGetTimeCodeFlags(format) & kCMTimeCodeFlag_DropFrame) != 0
+}
+
+/// Normalizes nominal frame rate to an exact rational and source convention.
 func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
     guard let track = try? await asset.loadTracks(withMediaType: .video).first,
           let rate  = try? await track.load(.nominalFrameRate) else {
@@ -284,16 +315,43 @@ func framerateInfo(from asset: AVAsset) async -> FramerateInfo {
     guard fps.isFinite, fps > 0, fps < 1000 else {
         return FramerateInfo(numerator: 25, denominator: 1, isDropFrame: false)
     }
-    let known: [(Double, Int, Int, Bool)] = [
-        (23.976, 24000, 1001, false), (24.0, 24, 1, false),
-        (25.0, 25, 1, false),         (29.97, 30000, 1001, true),
-        (30.0, 30, 1, false),          (50.0, 50, 1, false),
-        (59.94, 60000, 1001, true),    (60.0, 60, 1, false),
-    ]
-    for (ref, num, den, df) in known {
-        if abs(fps - ref) < 0.02 { return FramerateInfo(numerator: num, denominator: den, isDropFrame: df) }
+
+    let isDropFrame = await sourceUsesDropFrameTimecode(from: asset)
+    if let exactRate = smpteFrameRateRational(for: fps) {
+        return FramerateInfo(
+            numerator: exactRate.numerator,
+            denominator: exactRate.denominator,
+            isDropFrame: isDropFrame
+        )
     }
-    return FramerateInfo(numerator: max(Int(fps.rounded()), 1), denominator: 1, isDropFrame: false)
+
+    if let minDuration = try? await track.load(.minFrameDuration),
+       minDuration.isNumeric,
+       minDuration.value > 0,
+       minDuration.timescale > 0 {
+        let divisor = frameRateGCD(Int(minDuration.timescale), Int(minDuration.value))
+        return FramerateInfo(
+            numerator: Int(minDuration.timescale) / divisor,
+            denominator: Int(minDuration.value) / divisor,
+            isDropFrame: isDropFrame
+        )
+    }
+    return FramerateInfo(
+        numerator: max(Int(fps.rounded()), 1),
+        denominator: 1,
+        isDropFrame: isDropFrame
+    )
+}
+
+private func frameRateGCD(_ lhs: Int, _ rhs: Int) -> Int {
+    var a = abs(lhs)
+    var b = abs(rhs)
+    while b != 0 {
+        let remainder = a % b
+        a = b
+        b = remainder
+    }
+    return max(a, 1)
 }
 
 // MARK: - Timecode reader

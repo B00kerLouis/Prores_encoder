@@ -371,8 +371,24 @@ func cmuFourCC(_ code: OSType) -> String {
     return String(bytes: bytes, encoding: .ascii) ?? "\(code)"
 }
 
-/// Derives an exact edit rate from frame duration, with asset metadata fallback.
+/// Derives an exact edit rate from the nominal track rate, with duration fallback.
 private func cmuEditRate(asset: AVAsset, track: AVAssetTrack) async -> CMURational {
+    // A MOV track's minimum frame duration describes its sample cadence, not
+    // necessarily its declared edit rate.  For example, a 24000/1001 stream
+    // carried in a 600 Hz media timebase reports 25/600 here (24 fps).  Prefer
+    // the nominal video rate, normalized to the exact SMPTE rational used by
+    // the rest of the Dolby Vision pipeline, and retain the duration only as
+    // a fallback for assets that do not expose a nominal rate.
+    if let nominalFrameRate = try? await track.load(.nominalFrameRate),
+       nominalFrameRate.isFinite,
+       nominalFrameRate > 0 {
+        let normalized = await framerateInfo(from: asset)
+        return CMURational(
+            numerator: normalized.numerator,
+            denominator: normalized.denominator
+        )
+    }
+
     if let minDuration = try? await track.load(.minFrameDuration),
        minDuration.isNumeric,
        minDuration.value > 0,
