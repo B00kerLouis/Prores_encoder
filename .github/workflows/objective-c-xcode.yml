@@ -2,10 +2,15 @@ name: Xcode Build
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches:
+      - main
+    tags:
+      - "v*"
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
   workflow_dispatch:
 
 permissions:
@@ -17,6 +22,7 @@ concurrency:
 
 jobs:
   build:
+    name: Build Apple Silicon
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -26,14 +32,30 @@ jobs:
       ARCH: arm64
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Select Xcode 26.3
+        shell: bash
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          set -euo pipefail
+
+          sudo xcode-select \
+            -s /Applications/Xcode_26.3.app/Contents/Developer
+
+          echo "Selected Xcode:"
           xcodebuild -version
+
+          echo "Swift version:"
           swift --version
+
+          echo "Runner architecture:"
+          uname -m
+
+          if [[ "$(uname -m)" != "arm64" ]]; then
+            echo "::error::The GitHub Actions runner is not Apple Silicon."
+            exit 1
+          fi
 
       - name: Check bundled dependency architectures
         shell: bash
@@ -46,50 +68,86 @@ jobs:
           )
 
           for dependency in "${dependencies[@]}"; do
-            test -e "$dependency"
+            if [[ ! -e "$dependency" ]]; then
+              echo "::error::Missing dependency: $dependency"
+              exit 1
+            fi
+
             architectures="$(lipo -archs "$dependency")"
-            echo "$dependency: $architectures"
+
+            echo "$dependency"
+            echo "Architectures: $architectures"
 
             if ! tr ' ' '\n' <<< "$architectures" | grep -qx "$ARCH"; then
-              echo "::error::$dependency does not contain the required $ARCH slice"
+              echo "::error::$dependency does not contain the required $ARCH architecture."
               exit 1
             fi
           done
 
       - name: List project schemes
-        run: xcodebuild -project "$PROJECT" -list
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -list
+
+      - name: Remove existing build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Removing old Build/build directories..."
+
+          rm -rf "$GITHUB_WORKSPACE/Build"
+          rm -rf "$GITHUB_WORKSPACE/build"
+          rm -rf "$GITHUB_WORKSPACE/dist"
+
+          mkdir -p "$GITHUB_WORKSPACE/Build"
+
+          xattr -w \
+            com.apple.xcode.CreatedByBuildSystem \
+            true \
+            "$GITHUB_WORKSPACE/Build"
 
       - name: Build CLI
         shell: bash
         run: |
           set -o pipefail
+
           xcodebuild \
             -project "$PROJECT" \
             -scheme "prores encoder" \
             -configuration "$CONFIGURATION" \
             -destination "generic/platform=macOS" \
             ARCHS="$ARCH" \
+            EXCLUDED_ARCHS=x86_64 \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            clean build | tee xcodebuild-cli.log
+            build \
+            | tee xcodebuild-cli.log
 
       - name: Build framework
         shell: bash
         run: |
           set -o pipefail
+
           xcodebuild \
             -project "$PROJECT" \
             -scheme "ProResEncoderFramework" \
             -configuration "$CONFIGURATION" \
             -destination "generic/platform=macOS" \
             ARCHS="$ARCH" \
+            EXCLUDED_ARCHS=x86_64 \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build | tee xcodebuild-framework.log
+            build \
+            | tee xcodebuild-framework.log
 
-      - name: Verify outputs
+      - name: Verify Apple Silicon outputs
         shell: bash
         run: |
           set -euo pipefail
@@ -98,44 +156,110 @@ jobs:
           framework="Build/Release/ProResEncoderFramework.framework"
           framework_binary="$framework/Versions/A/ProResEncoderFramework"
 
-          test -x "$cli"
-          test -d "$framework"
-          test -f "$framework_binary"
+          if [[ ! -x "$cli" ]]; then
+            echo "::error::CLI executable was not produced: $cli"
+            exit 1
+          fi
 
+          if [[ ! -d "$framework" ]]; then
+            echo "::error::Framework was not produced: $framework"
+            exit 1
+          fi
+
+          if [[ ! -f "$framework_binary" ]]; then
+            echo "::error::Framework binary was not produced: $framework_binary"
+            exit 1
+          fi
+
+          echo "CLI information:"
           file "$cli"
           lipo -info "$cli"
           otool -L "$cli"
+
+          echo
+          echo "Framework information:"
+          file "$framework_binary"
           lipo -info "$framework_binary"
+          otool -L "$framework_binary"
+
+          cli_architectures="$(lipo -archs "$cli")"
+          framework_architectures="$(lipo -archs "$framework_binary")"
+
+          if [[ "$cli_architectures" != "arm64" ]]; then
+            echo "::error::CLI contains unexpected architectures: $cli_architectures"
+            exit 1
+          fi
+
+          if [[ "$framework_architectures" != "arm64" ]]; then
+            echo "::error::Framework contains unexpected architectures: $framework_architectures"
+            exit 1
+          fi
+
+          echo
+          echo "Apple Silicon architecture verification passed."
 
       - name: Package artifacts
         shell: bash
         run: |
           set -euo pipefail
 
+          cli="Build/Release/prores encoder"
+          framework="Build/Release/ProResEncoderFramework.framework"
+
           rm -rf dist
+
           mkdir -p dist/ProResEncoder-CLI
+          mkdir -p dist/ProResEncoder-Framework
 
-          cp "Build/Release/prores encoder" dist/ProResEncoder-CLI/proresencoder
-          chmod +x dist/ProResEncoder-CLI/proresencoder
-          cp README.md LICENSE dist/ProResEncoder-CLI/
+          cp "$cli" \
+            dist/ProResEncoder-CLI/proresencoder
 
-          ditto -c -k --sequesterRsrc --keepParent \
+          chmod +x \
+            dist/ProResEncoder-CLI/proresencoder
+
+          cp README.md \
+            dist/ProResEncoder-CLI/
+
+          cp LICENSE \
+            dist/ProResEncoder-CLI/
+
+          ditto \
+            "$framework" \
+            dist/ProResEncoder-Framework/ProResEncoderFramework.framework
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
             dist/ProResEncoder-CLI \
             dist/ProResEncoder-CLI-arm64.zip
 
-          ditto -c -k --sequesterRsrc --keepParent \
-            "Build/Release/ProResEncoderFramework.framework" \
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            dist/ProResEncoder-Framework/ProResEncoderFramework.framework \
             dist/ProResEncoderFramework-arm64.zip
 
-          shasum -a 256 dist/*.zip > dist/SHA256SUMS.txt
+          shasum -a 256 \
+            dist/ProResEncoder-CLI-arm64.zip \
+            dist/ProResEncoderFramework-arm64.zip \
+            > dist/SHA256SUMS.txt
 
-      - name: Upload artifacts
+          echo "Packaged files:"
+          ls -lh dist
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: prores-encoder-arm64-${{ github.sha }}
+          name: prores-encoder-apple-silicon-${{ github.sha }}
           path: |
-            dist/*.zip
+            dist/ProResEncoder-CLI-arm64.zip
+            dist/ProResEncoderFramework-arm64.zip
             dist/SHA256SUMS.txt
-            xcodebuild-*.log
+            xcodebuild-cli.log
+            xcodebuild-framework.log
           if-no-files-found: error
           retention-days: 14
