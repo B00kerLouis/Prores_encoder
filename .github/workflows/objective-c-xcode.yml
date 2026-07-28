@@ -1,0 +1,141 @@
+name: Xcode Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xcode-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    env:
+      PROJECT: prores encoder.xcodeproj
+      CONFIGURATION: Release
+      ARCH: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      - name: Check bundled dependency architectures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dependencies=(
+            "ThirdParty/SVT-AV1/lib/libSvtAv1Enc.a"
+            "Frameworks/swiftaaf_Framework.framework/Versions/A/swiftaaf_Framework"
+          )
+
+          for dependency in "${dependencies[@]}"; do
+            test -e "$dependency"
+            architectures="$(lipo -archs "$dependency")"
+            echo "$dependency: $architectures"
+
+            if ! tr ' ' '\n' <<< "$architectures" | grep -qx "$ARCH"; then
+              echo "::error::$dependency does not contain the required $ARCH slice"
+              exit 1
+            fi
+          done
+
+      - name: List project schemes
+        run: xcodebuild -project "$PROJECT" -list
+
+      - name: Build CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "prores encoder" \
+            -configuration "$CONFIGURATION" \
+            -destination "generic/platform=macOS" \
+            ARCHS="$ARCH" \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            clean build | tee xcodebuild-cli.log
+
+      - name: Build framework
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "ProResEncoderFramework" \
+            -configuration "$CONFIGURATION" \
+            -destination "generic/platform=macOS" \
+            ARCHS="$ARCH" \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | tee xcodebuild-framework.log
+
+      - name: Verify outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cli="Build/Release/prores encoder"
+          framework="Build/Release/ProResEncoderFramework.framework"
+          framework_binary="$framework/Versions/A/ProResEncoderFramework"
+
+          test -x "$cli"
+          test -d "$framework"
+          test -f "$framework_binary"
+
+          file "$cli"
+          lipo -info "$cli"
+          otool -L "$cli"
+          lipo -info "$framework_binary"
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf dist
+          mkdir -p dist/ProResEncoder-CLI
+
+          cp "Build/Release/prores encoder" dist/ProResEncoder-CLI/proresencoder
+          chmod +x dist/ProResEncoder-CLI/proresencoder
+          cp README.md LICENSE dist/ProResEncoder-CLI/
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/ProResEncoder-CLI \
+            dist/ProResEncoder-CLI-arm64.zip
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "Build/Release/ProResEncoderFramework.framework" \
+            dist/ProResEncoderFramework-arm64.zip
+
+          shasum -a 256 dist/*.zip > dist/SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: prores-encoder-arm64-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            xcodebuild-*.log
+          if-no-files-found: error
+          retention-days: 14
