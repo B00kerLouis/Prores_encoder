@@ -15,9 +15,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "C9F100052FE0000100000001"
-               BuildableName = "ProResEncoderFramework.framework"
-               BlueprintName = "ProResEncoderFramework"
+               BlueprintIdentifier = "C9A110012FE1000100000001"
+               BuildableName = "Build All"
+               BlueprintName = "Build All"
                ReferencedContainer = "container:prores encoder.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>

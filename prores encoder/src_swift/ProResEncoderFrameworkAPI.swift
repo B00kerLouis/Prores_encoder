@@ -286,6 +286,11 @@ public struct ProResEncodeOptions: Sendable {
     /// Also emits the encoded video as a raw elementary stream beside the container.
     /// Profile 7.6 writes separate BL and EL HEVC streams.
     public var outputVideoRaw: Bool
+    /// H.264/HEVC VideoToolbox multi-pass. Nil uses the GOP-on / all-intra-off default.
+    public var multiPass: Bool?
+    /// H.264/HEVC B-frame reordering. Nil uses on for GOP encodes and off for all-intra.
+    /// Profile 7.6 ignores this and always encodes I/P.
+    public var bFrames: Bool?
     public var aafMode: ProResAAFMode
 
     /// Creates an option set with MOV 422 HQ defaults and optional advanced features.
@@ -305,6 +310,8 @@ public struct ProResEncodeOptions: Sendable {
         includeGeneratedDolbyVisionMetadata: Bool = false,
         useDolbyVisionCodecTag: Bool = false,
         outputVideoRaw: Bool = false,
+        multiPass: Bool? = nil,
+        bFrames: Bool? = nil,
         aafMode: ProResAAFMode = .none
     ) {
         self.quality = quality
@@ -322,6 +329,8 @@ public struct ProResEncodeOptions: Sendable {
         self.includeGeneratedDolbyVisionMetadata = includeGeneratedDolbyVisionMetadata
         self.useDolbyVisionCodecTag = useDolbyVisionCodecTag
         self.outputVideoRaw = outputVideoRaw
+        self.multiPass = multiPass
+        self.bFrames = bFrames
         self.aafMode = aafMode
     }
 
@@ -415,7 +424,7 @@ public enum ProResEncoderError: LocalizedError, Sendable {
 
 /// Stateless entry point for media encoding and timeline conversion.
 public final class ProResEncoder: Sendable {
-    public static let version = "1.2.3"
+    public static let version = "1.2.5"
 
     /// Initializes GPU discovery and registers platform codec components.
     public init() {
@@ -541,11 +550,13 @@ public final class ProResEncoder: Sendable {
         }
 
         let wantsHEVC = isHEVCQuality(quality)
+        let wantsH264 = isH264Quality(quality)
         let wantsAV1 = isAV1Quality(quality)
+        let wantsVideoBitrateOptions = wantsH264 || wantsHEVC || wantsAV1
         let hasDolbyVisionMetadataSource =
             options.dolbyVisionXMLURL != nil
             || options.includeGeneratedDolbyVisionMetadata
-        if wantsHEVC || wantsAV1 {
+        if wantsVideoBitrateOptions {
             guard format == .mov || format == .mp4 else {
                 throw ProResEncoderError.invalidOption(
                     "\(quality) output is supported only in MOV or MP4."
@@ -555,6 +566,21 @@ public final class ProResEncoder: Sendable {
                   encodedVideoBitrateIsRepresentable(bitrate, usesAV1: wantsAV1) else {
                 throw ProResEncoderError.invalidOption(
                     "\(quality) output requires a finite, representable bitrateMbps value."
+                )
+            }
+            if wantsH264 && hasDolbyVisionMetadataSource {
+                throw ProResEncoderError.invalidOption(
+                    "Dolby Vision metadata requires HEVC or AV1; H.264 has no supported Dolby Vision bitstream profile."
+                )
+            }
+            if options.multiPass != nil && !(wantsH264 || wantsHEVC) {
+                throw ProResEncoderError.invalidOption(
+                    "multiPass is available only for H.264 or HEVC output."
+                )
+            }
+            if options.bFrames != nil && !(wantsH264 || wantsHEVC) {
+                throw ProResEncoderError.invalidOption(
+                    "bFrames is available only for H.264 or HEVC output."
                 )
             }
             if options.dolbyVisionProfile != nil && !hasDolbyVisionMetadataSource {
@@ -589,7 +615,7 @@ public final class ProResEncoder: Sendable {
         } else {
             if options.bitrateMbps != nil {
                 throw ProResEncoderError.invalidOption(
-                    "bitrateMbps is available only for HEVC or AV1 output."
+                    "bitrateMbps is available only for H.264, HEVC, or AV1 output."
                 )
             }
             if options.dolbyVisionProfile != nil {
@@ -602,15 +628,25 @@ public final class ProResEncoder: Sendable {
                     "useDolbyVisionCodecTag is available only for HEVC or AV1 output."
                 )
             }
+            if options.multiPass != nil {
+                throw ProResEncoderError.invalidOption(
+                    "multiPass is available only for H.264 or HEVC output."
+                )
+            }
+            if options.bFrames != nil {
+                throw ProResEncoderError.invalidOption(
+                    "bFrames is available only for H.264 or HEVC output."
+                )
+            }
             if options.outputVideoRaw && quality == "pass" {
                 throw ProResEncoderError.invalidOption(
                     "outputVideoRaw requires a re-encoded video quality, not pass-through."
                 )
             }
         }
-        if format == .mp4 && !(wantsHEVC || wantsAV1) {
+        if format == .mp4 && !(wantsH264 || wantsHEVC || wantsAV1) && quality != "pass" {
             throw ProResEncoderError.invalidOption(
-                "MP4 output supports HEVC and AV1 only."
+                "MP4 output supports H.264, HEVC, AV1, or pass-through."
             )
         }
         if format == .mp4, options.forcedOutputStartTimecode != nil {
@@ -1243,10 +1279,12 @@ public final class ProResEncoder: Sendable {
         let internalProfile = options.dolbyVisionProfile.flatMap {
             DolbyVisionHEVCProfile(argument: $0.rawValue)
         }
-        let hevcOptions = isHEVCQuality(quality)
+        let hevcOptions = (isHEVCQuality(quality) || isH264Quality(quality))
             ? HEVCEncodeOptions(
                 bitrateMbps: options.bitrateMbps ?? 0,
-                dvProfile: internalProfile
+                dvProfile: isH264Quality(quality) ? nil : internalProfile,
+                bFrames: options.bFrames,
+                multiPass: options.multiPass
             )
             : nil
         let av1Options = isAV1Quality(quality)

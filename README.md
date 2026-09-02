@@ -1,19 +1,17 @@
-# ProRes Encoder 1.2.4
+# ProRes Encoder 1.2.5
 
 Native macOS CLI and Framework for professional video encoding, HDR color
 conversion, dynamic metadata processing, MOV/MP4/MXF mastering, linked timeline
 workflows, batch encoding, and external-audio replacement.
 
-MOV remains the default container. HEVC and AV1 can also be written to MP4
-with `-ef mp4` or simply by giving `-o` a `.mp4` filename. `--outupt-video-raw`
+MOV remains the default container. H.264, HEVC, and AV1 can also be written to
+MP4 with `-ef mp4` or simply by giving `-o` a `.mp4` filename. `--outupt-video-raw`
 (`-ovr`) writes the final encoded video elementary stream; Dolby Vision Profile
 7.6 writes its required separate BL and EL HEVC streams.
 
-## What’s New in 1.2.4
+## What’s New in 1.2.5
 
-- Correct PQ source-peak fallback when static mastering metadata is absent, so
-  a 10,000-nit ST 2084 signal is tone-mapped correctly to the requested target
-  luminance.
+- Fix known issues
 
 ## License
 
@@ -147,7 +145,7 @@ the CLI intentionally has no equivalent multi-format option.
 
 ## Native Pipeline Architecture
 
-- MOV is the default container; MP4 is available for HEVC and AV1 only.
+- MOV is the default container; MP4 is available for H.264, HEVC, and AV1.
 - Source decode for compressed inputs uses native media sessions plus project
   pixel conversion and chroma downsampling.
 - Dynamic HDR metadata generation and writing are implemented in project code,
@@ -165,7 +163,9 @@ Final compressed samples are inspected before the file is accepted:
   streams carrying dynamic HDR metadata.
 - AV1 output similarly uses a verifier-oriented sample entry by default.
 - Pass `--dv-flag` / `-df` only when an explicit alternate dynamic-HDR sample entry is
-  required.
+  required. Profile 5 already writes `dvh1` and Profile 7.6 already writes `dvhe`
+  so the Dolby verifier container check can pass without `-df`. Cross-compatible
+  Profile 8.1 / 8.4 keep `hvc1` unless `-df` is set.
 - A requested dynamic HDR metadata encode fails instead of returning a file if
   the finalized stream contains no requested metadata.
 
@@ -185,7 +185,30 @@ proresencoder -i input.mov -q 4444xq -o output.mov
 Supported quality values:
 
 ```text
-proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc, av1
+proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, h264, hevc, av1
+```
+
+H.264 and HEVC use VBR by default. Use `--cbr` for constant bitrate, or pass
+`--vbr` explicitly. `--all-intra` makes every encoded H.264/HEVC frame an
+I-frame and cannot be combined with `--b-frames on`. GOP encodes (the default)
+use B-frame reordering, including Dolby Vision Profile 5. Pass `--b-frames off`
+to encode I/P only. The flag is optional and defaults to on. Profile 7.6 always
+encodes I/P so the independent BL and EL VideoToolbox sessions emit matching
+picture types; `--b-frames on` is ignored for that profile. The hardware HEVC
+encoder chooses its own consecutive B-frame count when reordering is on.
+
+`--muti-pass on|off` (also `--multi-pass`) controls VideoToolbox multi-pass
+H.264/HEVC encoding (`VTMultiPassStorage`, `VTFrameSilo`, Begin/EndPass). It
+defaults to on for GOP encodes and off for `--all-intra`; either default can
+be overridden. Dolby Vision profile selection does not change this default.
+Each extra pass re-reads only the time ranges VideoToolbox requested; pixel
+buffers are not retained between passes.
+
+```bash
+proresencoder -i input.mov -o output.mp4 -q h264 -b 40 --all-intra --cbr
+proresencoder -i input.mov -o output.mov -q hevc -b 50 --vbr
+proresencoder -i input.mov -o output.mov -q hevc -b 50 --b-frames off
+proresencoder -i input.mov -o output.mov -q hevc -b 50 --muti-pass off
 ```
 
 Use `pass` when you want a stream copy where supported:
@@ -338,9 +361,9 @@ proresencoder -i input.mov -q av1 -b 50 -o output_av1.mp4  # infers MP4
 
 The CLI defaults to `.mov` and normalizes an explicit `-ef mov` output to that
 extension. `-ef mp4`, or a `.mp4` `-o` filename when `-ef` is omitted, selects
-MP4; MP4 accepts HEVC and AV1 only. `-ovr` writes `*_raw.prores`,
-`*_raw.hevc`, or `*_raw.obu` next to the container. With HEVC Dolby Vision
-Profile 7.6 it instead writes `*_P7_6_BL.hevc` and `*_P7_6_EL.hevc`.
+MP4; MP4 accepts H.264, HEVC, and AV1. `-ovr` writes `*_raw.prores`,
+`*_raw.h264`, `*_raw.hevc`, or `*_raw.obu` next to the container. With HEVC Dolby
+Vision Profile 7.6 it instead writes `*_P7_6_BL.hevc` and `*_P7_6_EL.hevc`.
 
 MOV timecode behavior:
 

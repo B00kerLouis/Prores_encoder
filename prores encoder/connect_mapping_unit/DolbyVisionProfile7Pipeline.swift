@@ -770,7 +770,7 @@ private final class Profile7MetalResidualGenerator {
     /// Creates one reusable Metal-compatible P010 pool.
     private static func makePixelBufferPool(width: Int, height: Int) throws -> CVPixelBufferPool {
         let poolAttributes = [
-            kCVPixelBufferPoolMinimumBufferCountKey as String: NSNumber(value: 3)
+            kCVPixelBufferPoolMinimumBufferCountKey as String: NSNumber(value: 16)
         ] as CFDictionary
         let pixelAttributes = [
             kCVPixelBufferPixelFormatTypeKey as String:
@@ -854,21 +854,65 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
     private let enhancementLayerEncoder: ProResSession
     private let reconstructionDecoder = Profile7ReconstructionDecoder()
     private let residualGenerator: Profile7MetalResidualGenerator
+    private let fpsInfo: FramerateInfo
+    private let baseLayerBitrateBitsPerSecond: Int
+    private let enhancementLayerBitrateBitsPerSecond: Int
+    private var accessUnitFrameIndex: UInt64 = 0
+    private var framesSinceBufferingPeriod: UInt64 = 0
+    private var muxedFormatDescription: CMFormatDescription?
+    private let bFrames: Bool
+    private var pendingSources: [Int64: Profile7PendingSource] = [:]
+    private var pendingBaseLayers: [Int64: CMSampleBuffer] = [:]
+    private var pendingResiduals: [Int64: CVPixelBuffer] = [:]
+    private var nextELSubmitIndex: Int64?
+    private var completedAfterPassEnd: [DolbyVisionProfile7EncodedFrame] = []
+
+    private struct Profile7PendingSource {
+        let pixelBuffer: CVPixelBuffer
+        let rpuNALUnit: Data
+        let hdr10Metadata: HEVCHDR10Metadata?
+        let pts: CMTime
+        let duration: CMTime
+    }
 
     /// Configures both layer encoders and the reconstruction/residual stages.
     init(
         rasterPlan: DolbyVisionProfile7RasterPlan,
-        fpsHint: Int,
+        fpsInfo: FramerateInfo,
         colorSpace: SourceColorSpace?,
-        bitrateMbps: Double
+        bitrateMbps: Double,
+        allIntra: Bool = false,
+        bFrames: Bool? = nil,
+        bitrateMode: VideoBitrateMode = .vbr,
+        multiPass: Bool? = nil,
+        sourceFrameCount: Int = 0,
+        sourceTimeRange: CMTimeRange = .invalid
     ) throws {
         guard bitrateMbps > 0 else {
             throw DolbyVisionProfile7Error.make(
                 "Profile 7.6 requires a positive total HEVC bitrate."
             )
         }
+        self.fpsInfo = fpsInfo
+        if resolvedHEVCBFrames(explicit: bFrames, allIntra: allIntra) {
+            print(
+                "[DoVi] Profile 7.6 dual-layer requires matching BL/EL picture types; --b-frames is ignored."
+            )
+        }
+        self.bFrames = false
+        baseLayerBitrateBitsPerSecond = Int((
+            bitrateMbps *
+                DolbyVisionProfile7EncodingDefaults.baseLayerBitrateFraction *
+                1_000_000.0
+        ).rounded())
+        enhancementLayerBitrateBitsPerSecond = Int((
+            bitrateMbps *
+                DolbyVisionProfile7EncodingDefaults.enhancementLayerBitrateFraction *
+                1_000_000.0
+        ).rounded())
         residualGenerator = try Profile7MetalResidualGenerator(rasterPlan: rasterPlan)
         let p7ColorSpace = SourceColorSpace.hevcHDR10(basedOn: colorSpace)
+        let fpsHint = max(1, Int(fpsInfo.fps.rounded()))
 
         let baseLayerOptions = HEVCEncodeOptions(
             // Keep a stable whole-percent split between the base and
@@ -877,7 +921,11 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
                 DolbyVisionProfile7EncodingDefaults.baseLayerBitrateFraction,
             dvProfile: .profile76,
             keyFrameIntervalSeconds:
-                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds
+                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds,
+            allIntra: allIntra,
+            bFrames: false,
+            bitrateMode: bitrateMode,
+            multiPass: multiPass
         )
 
         let enhancementLayerOptions = HEVCEncodeOptions(
@@ -885,7 +933,11 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
                 DolbyVisionProfile7EncodingDefaults.enhancementLayerBitrateFraction,
             dvProfile: nil,
             keyFrameIntervalSeconds:
-                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds
+                DolbyVisionProfile7EncodingDefaults.keyFrameIntervalSeconds,
+            allIntra: allIntra,
+            bFrames: false,
+            bitrateMode: bitrateMode,
+            multiPass: multiPass
         )
 
         baseLayerEncoder = try ProResSession(
@@ -894,7 +946,9 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
             codecType: kCMVideoCodecType_HEVC,
             fpsHint: fpsHint,
             colorSpace: p7ColorSpace,
-            hevcOptions: baseLayerOptions
+            hevcOptions: baseLayerOptions,
+            sourceFrameCount: sourceFrameCount,
+            sourceTimeRange: sourceTimeRange
         )
 
         enhancementLayerEncoder = try ProResSession(
@@ -903,12 +957,83 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
             codecType: kCMVideoCodecType_HEVC,
             fpsHint: fpsHint,
             colorSpace: p7ColorSpace,
-            hevcOptions: enhancementLayerOptions
+            hevcOptions: enhancementLayerOptions,
+            sourceFrameCount: sourceFrameCount,
+            sourceTimeRange: sourceTimeRange
         )
+        if self.bFrames {
+            baseLayerEncoder.enableEncodedSampleQueue()
+            enhancementLayerEncoder.enableEncodedSampleQueue()
+        }
     }
 
-    /// Encodes one source frame and returns its muxed Profile 7 representation.
+    /// True when both layer encoders attached VideoToolbox multi-pass storage.
+    var isMultiPassEnabled: Bool {
+        baseLayerEncoder.isMultiPassEnabled || enhancementLayerEncoder.isMultiPassEnabled
+    }
+
+    /// Encodes one source frame and returns any muxed Profile 7 samples that are now ready.
     func encode(
+        sourcePixelBuffer: CVPixelBuffer,
+        pts: CMTime,
+        duration: CMTime,
+        rpuNALUnit: Data,
+        hdr10Metadata: HEVCHDR10Metadata?
+    ) throws -> [DolbyVisionProfile7EncodedFrame] {
+        if !bFrames {
+            return [try encodeImmediate(
+                sourcePixelBuffer: sourcePixelBuffer,
+                pts: pts,
+                duration: duration,
+                rpuNALUnit: rpuNALUnit,
+                hdr10Metadata: hdr10Metadata
+            )]
+        }
+        let frameIndex = vtFrameIndex(for: pts, fps: fpsInfo)
+        if nextELSubmitIndex == nil {
+            nextELSubmitIndex = frameIndex
+        }
+        pendingSources[frameIndex] = Profile7PendingSource(
+            pixelBuffer: sourcePixelBuffer,
+            rpuNALUnit: rpuNALUnit,
+            hdr10Metadata: hdr10Metadata,
+            pts: pts,
+            duration: duration
+        )
+        let baseLayerInput = try residualGenerator.makeBaseLayerInput(
+            source: sourcePixelBuffer
+        )
+        guard baseLayerEncoder.submit(
+            pixelBuffer: baseLayerInput,
+            pts: pts,
+            duration: duration
+        ) else {
+            throw DolbyVisionProfile7Error.make(
+                "VideoToolbox failed to submit the Profile 7 base layer."
+            )
+        }
+        return try drainCompletedFrames()
+    }
+
+    /// Collects muxed samples that became ready after EndPass or a final flush.
+    func finishPending(flushEncoders: Bool = false) throws -> [DolbyVisionProfile7EncodedFrame] {
+        var completed = completedAfterPassEnd
+        completedAfterPassEnd.removeAll(keepingCapacity: true)
+        if flushEncoders {
+            baseLayerEncoder.flush()
+            baseLayerEncoder.waitForEncodedCallbacks()
+        }
+        completed += try drainCompletedFrames()
+        if flushEncoders {
+            enhancementLayerEncoder.flush()
+            enhancementLayerEncoder.waitForEncodedCallbacks()
+            completed += try drainCompletedFrames()
+        }
+        return completed
+    }
+
+    /// Closed-loop encode used when B-frames are disabled.
+    private func encodeImmediate(
         sourcePixelBuffer: CVPixelBuffer,
         pts: CMTime,
         duration: CMTime,
@@ -941,11 +1066,93 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
                 "VideoToolbox failed to encode the Profile 7 enhancement layer."
             )
         }
-        let sample = try sampleBufferByMuxingDolbyVisionProfile7(
+        return try muxEncodedLayers(
             baseLayerSample: baseLayerSample,
             enhancementLayerSample: enhancementLayerSample,
             rpuNALUnit: rpuNALUnit,
             hdr10Metadata: hdr10Metadata
+        )
+    }
+
+    private func drainCompletedFrames() throws -> [DolbyVisionProfile7EncodedFrame] {
+        var completed: [DolbyVisionProfile7EncodedFrame] = []
+        for baseLayerSample in baseLayerEncoder.drainEncodedSamples() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(baseLayerSample)
+            let frameIndex = vtFrameIndex(for: pts, fps: fpsInfo)
+            guard let source = pendingSources[frameIndex] else {
+                throw DolbyVisionProfile7Error.make(
+                    "Profile 7 base-layer sample has no matching source frame."
+                )
+            }
+            let reconstructedBaseLayer = try reconstructionDecoder.decode(baseLayerSample)
+            pendingBaseLayers[frameIndex] = baseLayerSample
+            pendingResiduals[frameIndex] = try residualGenerator.makeEnhancementLayer(
+                source: source.pixelBuffer,
+                reconstructedBaseLayer: reconstructedBaseLayer
+            )
+            try submitReadyEnhancementLayers()
+        }
+        for enhancementLayerSample in enhancementLayerEncoder.drainEncodedSamples() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(enhancementLayerSample)
+            let frameIndex = vtFrameIndex(for: pts, fps: fpsInfo)
+            guard let baseLayerSample = pendingBaseLayers.removeValue(forKey: frameIndex),
+                  let source = pendingSources.removeValue(forKey: frameIndex) else {
+                throw DolbyVisionProfile7Error.make(
+                    "Profile 7 enhancement-layer sample has no matching base layer."
+                )
+            }
+            completed.append(
+                try muxEncodedLayers(
+                    baseLayerSample: baseLayerSample,
+                    enhancementLayerSample: enhancementLayerSample,
+                    rpuNALUnit: source.rpuNALUnit,
+                    hdr10Metadata: source.hdr10Metadata
+                )
+            )
+        }
+        return completed
+    }
+
+    /// VideoToolbox requires EncodeFrame in presentation order. BL reconstructs
+    /// in decode order, so residuals are buffered and submitted by PTS.
+    private func submitReadyEnhancementLayers() throws {
+        guard var index = nextELSubmitIndex else { return }
+        while let residual = pendingResiduals.removeValue(forKey: index),
+              let source = pendingSources[index] {
+            guard enhancementLayerEncoder.submit(
+                pixelBuffer: residual,
+                pts: source.pts,
+                duration: source.duration
+            ) else {
+                throw DolbyVisionProfile7Error.make(
+                    "VideoToolbox failed to submit the Profile 7 enhancement layer."
+                )
+            }
+            index += 1
+        }
+        nextELSubmitIndex = index
+    }
+
+    private func muxEncodedLayers(
+        baseLayerSample: CMSampleBuffer,
+        enhancementLayerSample: CMSampleBuffer,
+        rpuNALUnit: Data,
+        hdr10Metadata: HEVCHDR10Metadata?
+    ) throws -> DolbyVisionProfile7EncodedFrame {
+        let isSync = sampleBufferIsSync(baseLayerSample)
+        let framesSinceBPForPicture = isSync ? 0 : framesSinceBufferingPeriod + 1
+        let concatenationFlag = isSync && accessUnitFrameIndex > 0
+        let sample = try sampleBufferByMuxingDolbyVisionProfile7(
+            baseLayerSample: baseLayerSample,
+            enhancementLayerSample: enhancementLayerSample,
+            rpuNALUnit: rpuNALUnit,
+            hdr10Metadata: hdr10Metadata,
+            fpsInfo: fpsInfo,
+            baseLayerBitrateBitsPerSecond: baseLayerBitrateBitsPerSecond,
+            enhancementLayerBitrateBitsPerSecond: enhancementLayerBitrateBitsPerSecond,
+            framesSinceBufferingPeriod: framesSinceBPForPicture,
+            concatenationFlag: concatenationFlag,
+            existingFormatDescription: muxedFormatDescription
         )
         guard sampleBufferContainsHEVCDolbyVisionEL(sample),
               sampleBufferContainsHEVCDolbyVisionRPU(sample) else {
@@ -953,12 +1160,95 @@ final class DolbyVisionProfile7Encoder: @unchecked Sendable {
                 "The encoded Profile 7 sample is missing its EL or RPU NAL unit."
             )
         }
+        muxedFormatDescription = CMSampleBufferGetFormatDescription(sample)
+        if isSync {
+            framesSinceBufferingPeriod = 0
+        } else {
+            framesSinceBufferingPeriod += 1
+        }
+        accessUnitFrameIndex += 1
         return DolbyVisionProfile7EncodedFrame(
             muxedSample: sample,
             baseLayerSample: baseLayerSample,
             enhancementLayerSample: enhancementLayerSample,
             rpuNALUnit: rpuNALUnit
         )
+    }
+
+    /// Updates `SourceFrameCount` on both layer encoders before the next pass.
+    func setSourceFrameCount(_ count: Int) {
+        baseLayerEncoder.setSourceFrameCount(count)
+        enhancementLayerEncoder.setSourceFrameCount(count)
+    }
+
+    /// Starts one VideoToolbox pass on both layer encoders.
+    func beginCompressionPass(isFinal: Bool = false) throws {
+        accessUnitFrameIndex = 0
+        framesSinceBufferingPeriod = 0
+        muxedFormatDescription = nil
+        pendingSources.removeAll(keepingCapacity: true)
+        pendingBaseLayers.removeAll(keepingCapacity: true)
+        pendingResiduals.removeAll(keepingCapacity: true)
+        nextELSubmitIndex = nil
+        completedAfterPassEnd.removeAll(keepingCapacity: true)
+        baseLayerEncoder.resetEncodedSampleQueue()
+        enhancementLayerEncoder.resetEncodedSampleQueue()
+        try baseLayerEncoder.beginCompressionPass(isFinal: isFinal)
+        try enhancementLayerEncoder.beginCompressionPass(isFinal: isFinal)
+    }
+
+    /// Ends the current pass and unions any extra time ranges both layers still want.
+    /// With B-frames, the base layer must EndPass and reconstruct before the
+    /// enhancement layer EndPass, or the delayed EL frames are submitted too late.
+    func endCompressionPass(evaluateFurtherPasses: Bool = true) throws -> Bool {
+        if !bFrames {
+            completedAfterPassEnd.removeAll(keepingCapacity: true)
+            let baseWantsMore = try baseLayerEncoder.endCompressionPass(
+                evaluateFurtherPasses: evaluateFurtherPasses
+            )
+            let enhancementWantsMore = try enhancementLayerEncoder.endCompressionPass(
+                evaluateFurtherPasses: evaluateFurtherPasses
+            )
+            return baseWantsMore || enhancementWantsMore
+        }
+        let baseWantsMore = try baseLayerEncoder.endCompressionPass(
+            evaluateFurtherPasses: evaluateFurtherPasses
+        )
+        var completed = try drainLayerUntilCaughtUp(baseLayerEncoder)
+        if let index = nextELSubmitIndex, !pendingResiduals.isEmpty {
+            let buffered = pendingResiduals.keys.sorted()
+            throw DolbyVisionProfile7Error.make(
+                "Profile 7 enhancement-layer submit stalled at frame \(index); buffered residuals \(buffered); pending BL callbacks \(baseLayerEncoder.pendingEncodedCallbacks())."
+            )
+        }
+        let enhancementWantsMore = try enhancementLayerEncoder.endCompressionPass(
+            evaluateFurtherPasses: evaluateFurtherPasses
+        )
+        completed += try drainLayerUntilCaughtUp(enhancementLayerEncoder)
+        completedAfterPassEnd = completed
+        return baseWantsMore || enhancementWantsMore
+    }
+
+    /// Drains layer callbacks until VideoToolbox has delivered every submitted frame.
+    private func drainLayerUntilCaughtUp(_ encoder: ProResSession) throws -> [DolbyVisionProfile7EncodedFrame] {
+        var completed: [DolbyVisionProfile7EncodedFrame] = []
+        let deadline = Date().addingTimeInterval(5)
+        repeat {
+            completed += try drainCompletedFrames()
+            if encoder.pendingEncodedCallbacks() == 0 {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.005)
+        } while Date() < deadline
+        completed += try drainCompletedFrames()
+        return completed
+    }
+
+    /// Combined next-pass ranges from the base and enhancement encoders.
+    func timeRangesForNextPass() throws -> [CMTimeRange] {
+        let baseRanges = try baseLayerEncoder.timeRangesForNextPass()
+        let enhancementRanges = try enhancementLayerEncoder.timeRangesForNextPass()
+        return mergedVTTimeRanges(baseRanges, enhancementRanges)
     }
 
     /// Flushes delayed frames from both layer encoders.

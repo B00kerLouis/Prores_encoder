@@ -178,25 +178,56 @@ enum DolbyVisionHEVCProfile: String, Sendable {
     }
 }
 
-/// Compressed encoder bitrate and optional dynamic HDR profile.
+enum VideoBitrateMode: String, Sendable {
+    case vbr
+    case cbr
+}
+
+/// H.264/HEVC encoder bitrate, GOP, and optional dynamic HDR profile.
 struct HEVCEncodeOptions: Sendable {
+    /// Upper bound on VideoToolbox analysis passes. The encoder may stop earlier.
+    static let maximumCompressionPasses = 8
+
     let bitrateMbps: Double
     let dvProfile: DolbyVisionHEVCProfile?
     let keyFrameIntervalSeconds: Int
+    let allIntra: Bool
+    let bFrames: Bool
+    let bitrateMode: VideoBitrateMode
+    let multiPass: Bool
 
     init(
         bitrateMbps: Double,
         dvProfile: DolbyVisionHEVCProfile?,
-        keyFrameIntervalSeconds: Int = 2
+        keyFrameIntervalSeconds: Int = 2,
+        allIntra: Bool = false,
+        bFrames: Bool? = nil,
+        bitrateMode: VideoBitrateMode = .vbr,
+        multiPass: Bool? = nil
     ) {
         self.bitrateMbps = bitrateMbps
         self.dvProfile = dvProfile
         self.keyFrameIntervalSeconds = keyFrameIntervalSeconds
+        self.allIntra = allIntra
+        self.bFrames = resolvedHEVCBFrames(explicit: bFrames, allIntra: allIntra)
+        self.bitrateMode = bitrateMode
+        self.multiPass = resolvedHEVCMultiPass(explicit: multiPass, allIntra: allIntra)
     }
 
     var bitrateBitsPerSecond: Int {
         Int((bitrateMbps * 1_000_000.0).rounded())
     }
+}
+
+/// GOP H.264/HEVC uses multi-pass by default; all-intra turns it off unless forced on.
+func resolvedHEVCMultiPass(explicit: Bool?, allIntra: Bool) -> Bool {
+    explicit ?? !allIntra
+}
+
+/// GOP H.264/HEVC uses B-frames by default; all-intra and `--b-frames off` turn them off.
+func resolvedHEVCBFrames(explicit: Bool?, allIntra: Bool) -> Bool {
+    if allIntra { return false }
+    return explicit ?? true
 }
 
 /// Returns whether a requested bitrate can be represented by the selected encoder API.
@@ -516,7 +547,7 @@ func videoSize(from asset: AVAsset) async -> (width: Int, height: Int) {
 // MARK: - ProRes codec type mapping
 
 let supportedProResQualities: Set<String> = [
-    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "hevc", "av1"
+    "proxy", "422lt", "422", "422hq", "4444", "4444xq", "pass", "h264", "hevc", "av1"
 ]
 
 /// Normalizes a quality argument for comparisons and switches.
@@ -533,12 +564,17 @@ func proResQualityValidationError(_ quality: String) -> String? {
     if normalized == "xq" {
         return "Unsupported quality '\(quality)'. Use '4444xq' explicitly."
     }
-    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, hevc, av1."
+    return "Unsupported quality '\(quality)'. Expected one of: proxy, 422lt, 422, 422hq, 4444, 4444xq, pass, h264, hevc, av1."
 }
 
 /// Returns whether the requested output codec is HEVC.
 func isHEVCQuality(_ quality: String) -> Bool {
     normalizedProResQuality(quality) == "hevc"
+}
+
+/// Returns whether the output codec is H.264/AVC.
+func isH264Quality(_ quality: String) -> Bool {
+    normalizedProResQuality(quality) == "h264"
 }
 
 /// Returns whether the requested ProRes variant carries 4:4:4 components.
@@ -547,17 +583,28 @@ func is4444FamilyQuality(_ quality: String) -> Bool {
     return q == "4444" || q == "4444xq"
 }
 
+/// Decoder output attributes that keep IOSurface-backed buffers for VT/Metal.
+func videoPixelBufferOutputSettings(_ pixelFormat: OSType) -> [String: Any] {
+    [
+        kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+        kCVPixelBufferMetalCompatibilityKey as String: true,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+    ]
+}
+
 /// Selects the decoded pixel layout consumed by the chosen encoder path.
 func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
     let pixelFormat: OSType
-    if isCompressedHDRQuality(quality) {
+    if isH264Quality(quality) {
+        pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    } else if isCompressedHDRQuality(quality) {
         pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     } else if is4444FamilyQuality(quality) {
         pixelFormat = kCVPixelFormatType_32BGRA
     } else {
         pixelFormat = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
     }
-    return [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
+    return videoPixelBufferOutputSettings(pixelFormat)
 }
 
 /// Requests a 16-bit 4:2:2 decode surface for Profile 7 only, preserving
@@ -575,6 +622,7 @@ func dolbyVisionProfile7ReaderOutputSettings() -> [String: Any] {
 func proResCodecType(_ quality: String) -> CMVideoCodecType {
     switch normalizedProResQuality(quality) {
     case "hevc":    return kCMVideoCodecType_HEVC
+    case "h264":    return kCMVideoCodecType_H264
     case "av1":     return kCMVideoCodecType_AV1
     case "proxy":   return kCMVideoCodecType_AppleProRes422Proxy
     case "422lt":   return kCMVideoCodecType_AppleProRes422LT
@@ -621,6 +669,9 @@ private func proResSourcePixelFormat(codecType: CMVideoCodecType) -> OSType {
     if codecType == kCMVideoCodecType_HEVC || codecType == kCMVideoCodecType_AV1 {
         return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     }
+    if codecType == kCMVideoCodecType_H264 {
+        return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    }
     switch codecType {
     case kCMVideoCodecType_AppleProRes4444, kCMVideoCodecType_AppleProRes4444XQ:
         return kCVPixelFormatType_32BGRA
@@ -642,6 +693,8 @@ private func proResEncoderImageBufferAttributes(
         ),
         kCVPixelBufferWidthKey as String: NSNumber(value: width),
         kCVPixelBufferHeightKey as String: NSNumber(value: height),
+        kCVPixelBufferMetalCompatibilityKey as String: kCFBooleanTrue as Any,
+        kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
     ] as CFDictionary
 }
 
@@ -677,6 +730,264 @@ private func vtSessionBooleanProperty(_ session: VTCompressionSession, key: CFSt
     return CFBooleanGetValue((value as! CFBoolean))
 }
 
+/// Returns whether the live encoder advertises multi-pass storage support.
+private func vtSessionSupportsMultiPass(_ session: VTCompressionSession) -> Bool {
+    var dictionary: CFDictionary?
+    let status = VTSessionCopySupportedPropertyDictionary(
+        session,
+        supportedPropertyDictionaryOut: &dictionary
+    )
+    guard status == noErr, let dictionary else { return false }
+    return (dictionary as NSDictionary).object(forKey: kVTCompressionPropertyKey_MultiPassStorage) != nil
+}
+
+/// Copies next-pass time ranges out of the session-owned C array.
+private func copyTimeRangesForNextPass(from session: VTCompressionSession) throws -> [CMTimeRange] {
+    var count: CMItemCount = 0
+    var pointer: UnsafePointer<CMTimeRange>?
+    let status = VTCompressionSessionGetTimeRangesForNextPass(
+        session,
+        timeRangeCountOut: &count,
+        timeRangeArrayOut: &pointer
+    )
+    guard status == noErr else {
+        throw NSError(
+            domain: "ProResSession",
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey:
+                "VTCompressionSessionGetTimeRangesForNextPass failed: \(status)"
+            ]
+        )
+    }
+    guard let pointer, count > 0 else { return [] }
+    return Array(UnsafeBufferPointer(start: pointer, count: Int(count)))
+}
+
+/// True when `time` is inside any of the encoder-requested ranges, or when all frames are in play.
+func vtTime(_ time: CMTime, isCoveredBy ranges: [CMTimeRange]?) -> Bool {
+    guard let ranges else { return true }
+    return ranges.contains { range in
+        CMTIMERANGE_IS_VALID(range) && CMTimeRangeContainsTime(range, time: time)
+    }
+}
+
+/// Maps a presentation timestamp onto the synthetic encode timeline (frame 0 at t=0).
+func vtFrameIndex(for time: CMTime, fps: FramerateInfo) -> Int64 {
+    guard CMTIME_IS_NUMERIC(time), fps.numerator > 0, fps.denominator > 0 else { return 0 }
+    let scaled = CMTimeConvertScale(
+        time,
+        timescale: Int32(fps.numerator),
+        method: .roundHalfAwayFromZero
+    )
+    guard CMTIME_IS_NUMERIC(scaled) else { return 0 }
+    return max(scaled.value / Int64(fps.denominator), 0)
+}
+
+/// Exclusive-end frame count covered by `ranges` on the synthetic encode timeline.
+func vtFrameCount(in ranges: [CMTimeRange], fps: FramerateInfo) -> Int {
+    ranges.reduce(0) { partial, range in
+        guard CMTIMERANGE_IS_VALID(range) else { return partial }
+        let start = vtFrameIndex(for: range.start, fps: fps)
+        let end = vtFrameIndex(for: CMTimeRangeGetEnd(range), fps: fps)
+        return partial + Int(max(end - start, 0))
+    }
+}
+
+/// True when the merged ranges already cover the whole source timeline.
+func vtRangesCoverFullTimeline(
+    _ ranges: [CMTimeRange],
+    frameCount: Int64,
+    fps: FramerateInfo
+) -> Bool {
+    guard frameCount > 0 else { return false }
+    let merged = mergedVTTimeRanges(ranges, [])
+    guard merged.count == 1, let range = merged.first else { return false }
+    let start = vtFrameIndex(for: range.start, fps: fps)
+    let end = vtFrameIndex(for: CMTimeRangeGetEnd(range), fps: fps)
+    return start <= 0 && end >= frameCount
+}
+
+/// Frame count this pass will submit to VideoToolbox.
+func vtPassFrameCount(
+    ranges: [CMTimeRange]?,
+    estimatedFrames: Int64,
+    fps: FramerateInfo
+) -> Int {
+    guard let ranges, !ranges.isEmpty,
+          !vtRangesCoverFullTimeline(ranges, frameCount: estimatedFrames, fps: fps) else {
+        return Int(max(estimatedFrames, 0))
+    }
+    return vtFrameCount(in: ranges, fps: fps)
+}
+
+/// Presentation timestamp assigned to source frame `frameIndex`.
+func vtSyntheticPTS(frameIndex: Int64, fps: FramerateInfo) -> CMTime {
+    CMTime(
+        value: CMTimeValue(frameIndex) * CMTimeValue(fps.denominator),
+        timescale: CMTimeScale(max(fps.numerator, 1))
+    )
+}
+
+/// Constant frame duration on the synthetic encode timeline.
+func vtSyntheticDuration(fps: FramerateInfo) -> CMTime {
+    CMTime(
+        value: CMTimeValue(fps.denominator),
+        timescale: CMTimeScale(max(fps.numerator, 1))
+    )
+}
+
+/// Maps a synthetic encode range onto the asset/track timeline used by AVAssetReader.
+func assetTimeRange(
+    coveringSynthetic synthetic: CMTimeRange,
+    trackTimeRange: CMTimeRange
+) -> CMTimeRange {
+    let trackStart = CMTIMERANGE_IS_VALID(trackTimeRange) ? trackTimeRange.start : .zero
+    let start = CMTIME_IS_NUMERIC(trackStart)
+        ? CMTimeAdd(trackStart, synthetic.start)
+        : synthetic.start
+    let mapped = CMTimeRange(start: start, duration: synthetic.duration)
+    guard CMTIMERANGE_IS_VALID(trackTimeRange) else { return mapped }
+    let clamped = CMTimeRangeGetIntersection(mapped, otherRange: trackTimeRange)
+    return CMTIMERANGE_IS_VALID(clamped) && CMTimeCompare(clamped.duration, .zero) > 0
+        ? clamped
+        : mapped
+}
+
+/// Human-readable extra-pass coverage for logs.
+func vtTimeRangeDescription(_ range: CMTimeRange, fps: FramerateInfo) -> String {
+    let start = vtFrameIndex(for: range.start, fps: fps)
+    let end = vtFrameIndex(for: CMTimeRangeGetEnd(range), fps: fps)
+    return "frames \(start)..<\(end) (\(max(end - start, 0)) frame(s))"
+}
+
+/// Merges two range lists into the non-overlapping, ascending list FrameSilo requires.
+func mergedVTTimeRanges(_ lhs: [CMTimeRange], _ rhs: [CMTimeRange]) -> [CMTimeRange] {
+    let sorted = (lhs + rhs)
+        .filter { CMTIMERANGE_IS_VALID($0) && CMTimeCompare($0.duration, .zero) > 0 }
+        .sorted { CMTimeCompare($0.start, $1.start) < 0 }
+    var merged: [CMTimeRange] = []
+    for range in sorted {
+        guard let last = merged.last else {
+            merged.append(range)
+            continue
+        }
+        let lastEnd = CMTimeRangeGetEnd(last)
+        if CMTimeCompare(range.start, lastEnd) <= 0 {
+            let end = CMTimeMaximum(lastEnd, CMTimeRangeGetEnd(range))
+            merged[merged.count - 1] = CMTimeRangeFromTimeToTime(start: last.start, end: end)
+        } else {
+            merged.append(range)
+        }
+    }
+    return merged
+}
+
+/// File-backed compressed-sample store used to merge VideoToolbox multi-pass output.
+final class VTEncodedFrameSilo: @unchecked Sendable {
+    private var silo: VTFrameSilo?
+
+    /// Creates a temporary-file silo covering the encoded timeline.
+    init(timeRange: CMTimeRange = .invalid) throws {
+        var created: VTFrameSilo?
+        let status = VTFrameSiloCreate(
+            allocator: kCFAllocatorDefault,
+            fileURL: nil,
+            timeRange: timeRange,
+            options: nil,
+            frameSiloOut: &created
+        )
+        guard status == noErr, let created else {
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTFrameSiloCreate failed: \(status)"
+                ]
+            )
+        }
+        silo = created
+    }
+
+    /// Appends one compressed sample in strictly increasing decode-timestamp order.
+    func add(_ sampleBuffer: CMSampleBuffer) throws {
+        guard let silo else { return }
+        let status = VTFrameSiloAddSampleBuffer(silo, sampleBuffer: sampleBuffer)
+        guard status == noErr else {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let dts = CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTFrameSiloAddSampleBuffer failed: \(status) pts=\(pts.seconds) dts=\(dts.seconds)"
+                ]
+            )
+        }
+    }
+
+    /// Drops previously stored samples in `ranges` so the next pass can replace them.
+    func setTimeRangesForNextPass(_ ranges: [CMTimeRange]) throws {
+        guard let silo, !ranges.isEmpty else { return }
+        let status = ranges.withUnsafeBufferPointer { buffer -> OSStatus in
+            guard let base = buffer.baseAddress else { return noErr }
+            return VTFrameSiloSetTimeRangesForNextPass(
+                silo,
+                timeRangeCount: CMItemCount(buffer.count),
+                timeRangeArray: base
+            )
+        }
+        guard status == noErr else {
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTFrameSiloSetTimeRangesForNextPass failed: \(status)"
+                ]
+            )
+        }
+    }
+
+    /// Iterates stored samples in decode order. Each buffer is copied; silo storage is not retained.
+    func forEachSample(_ body: (CMSampleBuffer) throws -> Void) throws {
+        guard let silo else { return }
+        var caught: Error?
+        let status = VTFrameSiloCallBlockForEachSampleBuffer(silo, in: .invalid) { sample in
+            do {
+                var copied: CMSampleBuffer?
+                let copyStatus = CMSampleBufferCreateCopy(
+                    allocator: kCFAllocatorDefault,
+                    sampleBuffer: sample,
+                    sampleBufferOut: &copied
+                )
+                guard copyStatus == noErr, let copied else {
+                    throw NSError(
+                        domain: "ProResSession",
+                        code: Int(copyStatus),
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "CMSampleBufferCreateCopy failed while draining VTFrameSilo: \(copyStatus)"
+                        ]
+                    )
+                }
+                try body(copied)
+                return noErr
+            } catch {
+                caught = error
+                return -1
+            }
+        }
+        if let caught { throw caught }
+        guard status == noErr else {
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTFrameSiloCallBlockForEachSampleBuffer failed: \(status)"
+                ]
+            )
+        }
+    }
+}
+
 // MARK: - Source ProRes check
 
 func isSourceProRes(_ track: AVAssetTrack) async -> Bool {
@@ -707,6 +1018,14 @@ func estimateFrameCount(asset: AVAsset) async -> Int64 {
         return Int64(CMTimeGetSeconds(d) * Double(fps) + 0.5)
     }
     return 0
+}
+
+/// Maps a compressed sample's presentation timestamp back to a zero-based frame index.
+func presentationFrameIndex(for sampleBuffer: CMSampleBuffer, fps: Double) -> Int64 {
+    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    let seconds = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : .nan
+    guard seconds.isFinite, fps > 0 else { return 0 }
+    return max(0, Int64((seconds * fps).rounded()))
 }
 
 // MARK: - AsyncChannel
@@ -862,17 +1181,94 @@ private final class VTCallbackRefcon: @unchecked Sendable {
     var sample: CMSampleBuffer?
     let syncLock = NSLock()
     var asyncChannel: AsyncChannel<SendableSampleBuffer>?
+    var frameSilo: VTEncodedFrameSilo?
     private let asyncStateLock = NSLock()
     private var asyncSubmittedCount: Int64 = 0
     private var asyncCompletedCount: Int64 = 0
     private var asyncDeliveryPendingCount: Int64 = 0
     private var asyncFlushRequested = false
     private var asyncChannelFinished = false
+    private var collectEncodedSamples = false
+    private var encodedSampleQueue: [CMSampleBuffer] = []
+    private var encodedSubmitCount = 0
+    private var encodedCallbackCount = 0
+    private let encodedSampleLock = NSLock()
+
+    /// Delivers compressed samples directly into a FrameSilo from the codec callback thread.
+    func configureFrameSilo(_ silo: VTEncodedFrameSilo) {
+        asyncStateLock.lock()
+        frameSilo = silo
+        asyncChannel = nil
+        collectEncodedSamples = false
+        asyncStateLock.unlock()
+    }
+
+    /// Keeps encoded samples in a FIFO for closed-loop Profile 7 reconstruction.
+    func configureEncodedSampleQueue() {
+        asyncStateLock.lock()
+        collectEncodedSamples = true
+        frameSilo = nil
+        asyncChannel = nil
+        asyncStateLock.unlock()
+        encodedSampleLock.lock()
+        encodedSampleQueue.removeAll(keepingCapacity: true)
+        encodedSubmitCount = 0
+        encodedCallbackCount = 0
+        encodedSampleLock.unlock()
+    }
+
+    var isCollectingEncodedSamples: Bool {
+        asyncStateLock.lock()
+        defer { asyncStateLock.unlock() }
+        return collectEncodedSamples
+    }
+
+    func noteEncodedSubmit() {
+        encodedSampleLock.lock()
+        encodedSubmitCount += 1
+        encodedSampleLock.unlock()
+    }
+
+    func noteEncodedCallback() {
+        encodedSampleLock.lock()
+        encodedCallbackCount += 1
+        encodedSampleLock.unlock()
+    }
+
+    func pendingEncodedCallbacks() -> Int {
+        encodedSampleLock.lock()
+        defer { encodedSampleLock.unlock() }
+        return max(0, encodedSubmitCount - encodedCallbackCount)
+    }
+
+    func resetEncodedSampleCounts() {
+        encodedSampleLock.lock()
+        encodedSubmitCount = 0
+        encodedCallbackCount = 0
+        encodedSampleQueue.removeAll(keepingCapacity: true)
+        encodedSampleLock.unlock()
+    }
+
+    func appendEncodedSample(_ sampleBuffer: CMSampleBuffer) {
+        encodedSampleLock.lock()
+        encodedSampleQueue.append(sampleBuffer)
+        encodedSampleLock.unlock()
+    }
+
+    func takeEncodedSamples() -> [CMSampleBuffer] {
+        encodedSampleLock.lock()
+        defer { encodedSampleLock.unlock() }
+        let samples = encodedSampleQueue
+        encodedSampleQueue.removeAll(keepingCapacity: true)
+        return samples
+    }
 
     /// Switches callback delivery from synchronous storage to an asynchronous channel.
     func configureAsyncChannel(_ channel: AsyncChannel<SendableSampleBuffer>) {
         asyncStateLock.lock()
         asyncChannel = channel
+        frameSilo = nil
+        collectEncodedSamples = false
         asyncSubmittedCount = 0
         asyncCompletedCount = 0
         asyncDeliveryPendingCount = 0
@@ -913,6 +1309,13 @@ private final class VTCallbackRefcon: @unchecked Sendable {
         let channel = finishChannelIfDrainedLocked()
         asyncStateLock.unlock()
         return channel
+    }
+
+    /// True while EncodeFrame callbacks or async silo delivery are still in flight.
+    func hasPendingAsyncWork() -> Bool {
+        asyncStateLock.lock()
+        defer { asyncStateLock.unlock() }
+        return asyncCompletedCount < asyncSubmittedCount || asyncDeliveryPendingCount > 0
     }
 
     /// Delivers callback output without blocking the codec callback thread.
@@ -964,6 +1367,23 @@ private func vtOutputCallback(
 ) {
     guard let refcon else { return }
     let rc = Unmanaged<VTCallbackRefcon>.fromOpaque(refcon).takeUnretainedValue()
+    if rc.frameSilo != nil {
+        if status == noErr, let sampleBuffer {
+            do {
+                try rc.frameSilo?.add(sampleBuffer)
+            } catch {
+                // Keep encoding; the MOV pipeline reports the silo error after the pass.
+            }
+        }
+        return
+    }
+    if rc.isCollectingEncodedSamples {
+        rc.noteEncodedCallback()
+        if status == noErr, let sampleBuffer {
+            rc.appendEncodedSample(sampleBuffer)
+        }
+        return
+    }
     if rc.asyncChannel != nil {
         if status == noErr, let sampleBuffer {
             rc.dispatchAsyncDelivery(of: sampleBuffer)
@@ -986,21 +1406,27 @@ final class ProResSession: @unchecked Sendable {
     private let hevcColorSpace: SourceColorSpace?
     private let hevcMasteringDisplayColorVolume: Data?
     private let hevcContentLightLevelInfo: Data?
+    private var multiPassStorage: VTMultiPassStorage?
+    private(set) var isMultiPassEnabled = false
 
     /// Creates and configures a compression session for ProRes or HEVC output.
     init(width: Int, height: Int, codecType: CMVideoCodecType,
          fpsHint: Int, colorSpace: SourceColorSpace?,
          hevcOptions: HEVCEncodeOptions? = nil,
-         sourcePixelFormat: OSType? = nil) throws {
+         sourcePixelFormat: OSType? = nil,
+         sourceFrameCount: Int = 0,
+         sourceTimeRange: CMTimeRange = .invalid) throws {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
+        let isH264 = (codecType == kCMVideoCodecType_H264)
+        let isAVCEncoder = isHEVC || isH264
         let requiresNativeHEVCHardware = isHEVC && hevcOptions?.dvProfile?.usesNativeIPT == true
         isHEVCSession = isHEVC
         hevcColorSpace = colorSpace
         hevcMasteringDisplayColorVolume = colorSpace?.masteringDisplayColorVolume
         hevcContentLightLevelInfo = colorSpace?.contentLightLevelInfo
-        let encoderSpecification = isHEVC
+        let encoderSpecification = isAVCEncoder
             ? hevcHardwareEncoderSpecification(requireHardware: requiresNativeHEVCHardware)
             : proResHardwareEncoderSpecification()
         let imageBufferAttributeCandidates: [CFDictionary?] = [
@@ -1059,11 +1485,6 @@ final class ProResSession: @unchecked Sendable {
             value: kCFBooleanFalse,
             required: requiresNativeHEVCHardware
         )
-        try setProperty(
-            kVTCompressionPropertyKey_AllowFrameReordering,
-            value: kCFBooleanFalse,
-            required: requiresNativeHEVCHardware
-        )
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
         let n = NSNumber(value: fpsHint)
         try setProperty(
@@ -1080,11 +1501,11 @@ final class ProResSession: @unchecked Sendable {
         if let m = colorSpace?.matrix {
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix, value: m as CFString)
         }
-        if isHEVC {
+        if isAVCEncoder {
             guard let hevcOptions else {
                 throw NSError(domain: "ProResSession", code: 1,
                               userInfo: [NSLocalizedDescriptionKey:
-                                "HEVC encode requires bitrate options."])
+                                "H.264/HEVC encode requires bitrate options."])
             }
             if let p = colorSpace?.primaries {
                 VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
@@ -1098,19 +1519,23 @@ final class ProResSession: @unchecked Sendable {
                 VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
                                      value: m as CFString)
             }
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_HDRMetadataInsertionMode,
-                                 value: kVTHDRMetadataInsertionMode_Auto)
-            if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MasteringDisplayColorVolume,
-                                     value: masteringDisplay as CFData)
-            }
-            if let contentLight = colorSpace?.contentLightLevelInfo {
-                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ContentLightLevelInfo,
-                                     value: contentLight as CFData)
+            if isHEVC {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_HDRMetadataInsertionMode,
+                                     value: kVTHDRMetadataInsertionMode_Auto)
+                if let masteringDisplay = colorSpace?.masteringDisplayColorVolume {
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MasteringDisplayColorVolume,
+                                         value: masteringDisplay as CFData)
+                }
+                if let contentLight = colorSpace?.contentLightLevelInfo {
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ContentLightLevelInfo,
+                                         value: contentLight as CFData)
+                }
             }
             try setProperty(
                 kVTCompressionPropertyKey_ProfileLevel,
-                value: kVTProfileLevel_HEVC_Main10_AutoLevel,
+                value: isHEVC
+                    ? kVTProfileLevel_HEVC_Main10_AutoLevel
+                    : kVTProfileLevel_H264_High_AutoLevel,
                 required: requiresNativeHEVCHardware
             )
             try setProperty(
@@ -1118,26 +1543,105 @@ final class ProResSession: @unchecked Sendable {
                 value: NSNumber(value: hevcOptions.bitrateBitsPerSecond),
                 required: requiresNativeHEVCHardware
             )
-            let bytesPerSecond = max(1, hevcOptions.bitrateBitsPerSecond / 8)
-            let dataRateLimits = [
-                NSNumber(value: bytesPerSecond),
-                NSNumber(value: 1)
-            ] as CFArray
-            try setProperty(
-                kVTCompressionPropertyKey_DataRateLimits,
-                value: dataRateLimits,
-                required: requiresNativeHEVCHardware
+            if hevcOptions.bitrateMode == .cbr, !hevcOptions.multiPass {
+                try setProperty(
+                    kVTCompressionPropertyKey_ConstantBitRate,
+                    value: NSNumber(value: hevcOptions.bitrateBitsPerSecond),
+                    required: true
+                )
+            } else if hevcOptions.bitrateMode == .cbr, hevcOptions.multiPass {
+                print("[VT] --cbr is incompatible with VideoToolbox multi-pass EndPass; using VBR analysis at the same target bitrate.")
+            }
+            if hevcOptions.bitrateMode != .cbr, !hevcOptions.multiPass {
+                // DataRateLimits makes VTCompressionSessionEndPass return kVTParameterErr
+                // on the hardware H.264/HEVC encoders, which disables multi-pass analysis.
+                let bytesPerSecond = max(1, hevcOptions.bitrateBitsPerSecond / 8)
+                let dataRateLimits = [NSNumber(value: bytesPerSecond), NSNumber(value: 1)] as CFArray
+                try setProperty(kVTCompressionPropertyKey_DataRateLimits,
+                                value: dataRateLimits,
+                                required: requiresNativeHEVCHardware)
+            }
+            // GOP H.264/HEVC uses B-frame reordering by default, including
+            // Profile 5. `--b-frames off` and `--all-intra` keep I/P or
+            // all-intra. Profile 7.6 forces I/P so BL/EL picture types match.
+            var allowFrameReordering = hevcOptions.bFrames
+            let reorderStatus = VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_AllowFrameReordering,
+                value: allowFrameReordering ? kCFBooleanTrue : kCFBooleanFalse
             )
+            if allowFrameReordering, reorderStatus != noErr {
+                print("[VT] Frame reordering was rejected (\(reorderStatus)); encoding without B-frames.")
+                allowFrameReordering = false
+                try setProperty(
+                    kVTCompressionPropertyKey_AllowFrameReordering,
+                    value: kCFBooleanFalse,
+                    required: requiresNativeHEVCHardware || hevcOptions.allIntra
+                )
+            } else if reorderStatus != noErr {
+                try setProperty(
+                    kVTCompressionPropertyKey_AllowFrameReordering,
+                    value: kCFBooleanFalse,
+                    required: requiresNativeHEVCHardware || hevcOptions.allIntra
+                )
+            }
+            if allowFrameReordering {
+                print("[VT] Frame reordering on.")
+            } else {
+                print("[VT] Frame reordering off.")
+            }
             let keyFrameIntervalSeconds = max(hevcOptions.keyFrameIntervalSeconds, 1)
             try setProperty(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                value: NSNumber(value: max(fpsHint * keyFrameIntervalSeconds, 1)),
+                value: NSNumber(value: hevcOptions.allIntra ? 1 : max(fpsHint * keyFrameIntervalSeconds, 1)),
                 required: requiresNativeHEVCHardware
             )
+            if !hevcOptions.allIntra {
+                try setProperty(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                                value: NSNumber(value: keyFrameIntervalSeconds),
+                                required: requiresNativeHEVCHardware)
+            }
+            if sourceFrameCount > 0 {
+                VTSessionSetProperty(
+                    session,
+                    key: kVTCompressionPropertyKey_SourceFrameCount,
+                    value: NSNumber(value: sourceFrameCount)
+                )
+            }
+            if hevcOptions.multiPass {
+                if vtSessionSupportsMultiPass(session) {
+                    var storage: VTMultiPassStorage?
+                    let storageStatus = VTMultiPassStorageCreate(
+                        allocator: kCFAllocatorDefault,
+                        fileURL: nil,
+                        timeRange: sourceTimeRange,
+                        options: nil,
+                        multiPassStorageOut: &storage
+                    )
+                    if storageStatus == noErr, let storage {
+                        let attachStatus = VTSessionSetProperty(
+                            session,
+                            key: kVTCompressionPropertyKey_MultiPassStorage,
+                            value: storage
+                        )
+                        if attachStatus == noErr {
+                            multiPassStorage = storage
+                            isMultiPassEnabled = true
+                        } else {
+                            VTMultiPassStorageClose(storage)
+                            print("[VT] Multi-pass storage was rejected (\(attachStatus)); using a single pass.")
+                        }
+                    } else {
+                        print("[VT] VTMultiPassStorageCreate failed (\(storageStatus)); using a single pass.")
+                    }
+                } else {
+                    print("[VT] This H.264/HEVC encoder does not advertise multi-pass support; using a single pass.")
+                }
+            }
+        } else {
             try setProperty(
-                kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
-                value: NSNumber(value: keyFrameIntervalSeconds),
-                required: requiresNativeHEVCHardware
+                kVTCompressionPropertyKey_AllowFrameReordering,
+                value: kCFBooleanFalse
             )
         }
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
@@ -1165,11 +1669,154 @@ final class ProResSession: @unchecked Sendable {
     }
 
     /// Switch to async mode: creates the outputChannel and routes VT callback to it.
-    /// Must be called before the first `submit()`.
+    /// Must be called before the first `submit()`. Multi-pass reuses this channel.
     func enableAsyncMode(channelCapacity: Int = 4) {
         let ch = AsyncChannel<SendableSampleBuffer>(capacity: channelCapacity)
         outputChannel = ch
         rc.configureAsyncChannel(ch)
+    }
+
+    /// Routes codec callbacks into `silo` on the VideoToolbox thread (no extra copies).
+    func attachFrameSilo(_ silo: VTEncodedFrameSilo) {
+        outputChannel = nil
+        rc.configureFrameSilo(silo)
+    }
+
+    /// Collects encoded samples in a FIFO instead of overwriting the sync slot.
+    func enableEncodedSampleQueue() {
+        outputChannel = nil
+        rc.configureEncodedSampleQueue()
+    }
+
+    /// Returns samples emitted since the previous drain.
+    func drainEncodedSamples() -> [CMSampleBuffer] {
+        rc.takeEncodedSamples()
+    }
+
+    /// EncodeFrame callbacks still outstanding for the Profile 7 sample queue.
+    func pendingEncodedCallbacks() -> Int {
+        rc.pendingEncodedCallbacks()
+    }
+
+    /// Drops queued samples and submit/callback counters at the start of a pass.
+    func resetEncodedSampleQueue() {
+        rc.resetEncodedSampleCounts()
+    }
+
+    /// Waits until VideoToolbox has delivered every submitted sample, or `timeout`.
+    func waitForEncodedCallbacks(timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while rc.pendingEncodedCallbacks() > 0, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+    }
+
+    /// Completes encoded frames up to `pts` without ending the compression pass.
+    func completeFrames(until pts: CMTime) {
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: pts)
+    }
+
+    /// Updates `SourceFrameCount` for the upcoming pass. Safe to call when multi-pass is off.
+    func setSourceFrameCount(_ count: Int) {
+        guard count > 0, session != nil else { return }
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_SourceFrameCount,
+            value: NSNumber(value: count)
+        )
+    }
+
+    /// Announces one VideoToolbox analysis/encode pass. No-ops when multi-pass is inactive.
+    func beginCompressionPass(isFinal: Bool = false) throws {
+        guard isMultiPassEnabled else { return }
+        let flags: VTCompressionSessionOptionFlags = isFinal ? .beginFinalPass : []
+        var reserved: UInt32 = 0
+        let status = VTCompressionSessionBeginPass(session, flags: flags, &reserved)
+        guard status == noErr else {
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTCompressionSessionBeginPass failed: \(status)"
+                ]
+            )
+        }
+    }
+
+    /// Ends the current pass and reports whether the encoder wants another scan.
+    func endCompressionPass(evaluateFurtherPasses: Bool = true) throws -> Bool {
+        guard isMultiPassEnabled else { return false }
+        var further: DarwinBoolean = false
+        var reserved: UInt32 = 0
+        var status: OSStatus
+        if evaluateFurtherPasses {
+            status = VTCompressionSessionEndPass(
+                session,
+                furtherPassesRequestedOut: &further,
+                &reserved
+            )
+            if status == kVTParameterErr {
+                reserved = 0
+                status = VTCompressionSessionEndPass(
+                    session,
+                    furtherPassesRequestedOut: nil,
+                    &reserved
+                )
+                further = false
+                if status == noErr {
+                    print("[VT] Encoder declined further-pass evaluation; keeping this pass.")
+                }
+            }
+        } else {
+            status = VTCompressionSessionEndPass(
+                session,
+                furtherPassesRequestedOut: nil,
+                &reserved
+            )
+        }
+        if status == kVTParameterErr {
+            print("[VT] VTCompressionSessionEndPass is not supported by this encoder; keeping the current pass.")
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+            isMultiPassEnabled = false
+            return false
+        }
+        guard status == noErr else {
+            throw NSError(
+                domain: "ProResSession",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "VTCompressionSessionEndPass failed: \(status)"
+                ]
+            )
+        }
+        return evaluateFurtherPasses && further.boolValue
+    }
+
+    /// Emits compressed frames with PTS up to `pts` without closing the session.
+    func completePendingFrames(until pts: CMTime) {
+        let completeUntil = CMTIME_IS_NUMERIC(pts) ? pts : .invalid
+        VTCompressionSessionCompleteFrames(
+            session,
+            untilPresentationTimeStamp: completeUntil
+        )
+    }
+
+    /// Waits until VT callbacks and async sample delivery have caught up with submissions.
+    func waitForAsyncDelivery() async {
+        while rc.hasPendingAsyncWork() {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    /// Closes the async output channel after the last pass has drained.
+    func finishAsyncOutput() {
+        rc.requestAsyncFlush()?.finish()
+    }
+
+    /// Time ranges the encoder still wants re-encoded. Empty means keep the last pass.
+    func timeRangesForNextPass() throws -> [CMTimeRange] {
+        guard isMultiPassEnabled else { return [] }
+        return try copyTimeRangesForNextPass(from: session)
     }
 
     // MARK: Sync path (used by VideoFrameSource → MOV pipeline)
@@ -1206,13 +1853,16 @@ final class ProResSession: @unchecked Sendable {
         if st != noErr, outputChannel != nil {
             rc.revertAsyncSubmission()?.finish()
         }
+        if st == noErr, rc.isCollectingEncodedSamples {
+            rc.noteEncodedSubmit()
+        }
         return st == noErr
     }
 
     /// Flush remaining frames, then close the outputChannel.
     func flushAsync() {
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        rc.requestAsyncFlush()?.finish()
+        finishAsyncOutput()
     }
 
     /// Completes all submitted frames for synchronous callers.
@@ -1222,6 +1872,11 @@ final class ProResSession: @unchecked Sendable {
 
     /// Invalidates the codec session and prevents further submission.
     func invalidate() {
+        if let storage = multiPassStorage {
+            VTMultiPassStorageClose(storage)
+            multiPassStorage = nil
+            isMultiPassEnabled = false
+        }
         if session != nil { VTCompressionSessionInvalidate(session); session = nil }
     }
 

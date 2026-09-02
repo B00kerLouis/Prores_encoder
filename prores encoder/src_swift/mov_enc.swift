@@ -3474,9 +3474,18 @@ private func normalizeCompressedVideoSampleEntry(
         )
     }
 
-    let requiredType = useDolbyVisionCodecTag
-        ? codec.dolbyVisionSampleEntryType(profile: profile)
-        : codec.baseLayerSampleEntryType
+    let requiredType: String
+    if useDolbyVisionCodecTag {
+        requiredType = codec.dolbyVisionSampleEntryType(profile: profile)
+    } else if codec == .hevc, profile?.isProfile76 == true {
+        // Profile 7 is dual-layer; dvesverifier Test 100 requires dvhe even without -df.
+        requiredType = "dvhe"
+    } else if codec == .hevc, profile?.usesNativeIPT == true {
+        // Profile 5 has no HDR10-compatible BL; dvesverifier Test 100 requires dvh1/dvhe.
+        requiredType = "dvh1"
+    } else {
+        requiredType = codec.baseLayerSampleEntryType
+    }
     if entry.type != requiredType {
         let handle = try FileHandle(forUpdating: movieURL)
         defer { try? handle.close() }
@@ -4796,6 +4805,8 @@ enum EncodedVideoRawOutput {
         let rawExtension: String
         if isHEVCQuality(quality) {
             rawExtension = "hevc"
+        } else if isH264Quality(quality) {
+            rawExtension = "h264"
         } else if isAV1Quality(quality) {
             rawExtension = "obu"
         } else {
@@ -4837,6 +4848,38 @@ enum EncodedVideoRawOutput {
             var pointer: UnsafePointer<UInt8>?
             var size = 0
             guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: index,
+                parameterSetPointerOut: &pointer,
+                parameterSetSizeOut: &size,
+                parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil
+            ) == noErr, let pointer, size > 0 else {
+                return nil
+            }
+            return Data(bytes: pointer, count: size)
+        }
+    }
+
+    static func h264RawParameterSets(from sampleBuffer: CMSampleBuffer) -> [Data] {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return []
+        }
+        var parameterSetCount = 0
+        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: &parameterSetCount,
+            nalUnitHeaderLengthOut: nil
+        ) == noErr else {
+            return []
+        }
+        return (0..<parameterSetCount).compactMap { index in
+            var pointer: UnsafePointer<UInt8>?
+            var size = 0
+            guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                 formatDescription,
                 parameterSetIndex: index,
                 parameterSetPointerOut: &pointer,
@@ -4924,6 +4967,52 @@ enum EncodedVideoRawOutput {
         return result
     }
 
+    static func appendLengthPrefixedAnnexB(
+        _ data: Data,
+        prefixSize: Int,
+        to handle: FileHandle,
+        codecLabel: String
+    ) throws {
+        guard (1...4).contains(prefixSize) else {
+            throw NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Unsupported \(codecLabel) NAL length prefix size \(prefixSize)."
+                ]
+            )
+        }
+        var offset = 0
+        while offset <= data.count, data.count - offset >= prefixSize {
+            var nalLength = 0
+            for byte in data[offset..<(offset + prefixSize)] {
+                nalLength = (nalLength << 8) | Int(byte)
+            }
+            offset += prefixSize
+            guard nalLength > 0, nalLength <= data.count - offset else {
+                throw NSError(
+                    domain: "EncodedVideoRawOutput",
+                    code: 10,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Encountered an invalid \(codecLabel) NAL length while writing raw output."
+                    ]
+                )
+            }
+            try handle.write(contentsOf: Data([0, 0, 0, 1]))
+            try handle.write(contentsOf: Data(data[offset..<(offset + nalLength)]))
+            offset += nalLength
+        }
+        guard offset == data.count else {
+            throw NSError(
+                domain: "EncodedVideoRawOutput",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "\(codecLabel) sample ended in a partial NAL length prefix."
+                ]
+            )
+        }
+    }
+
     static func appendHEVCAnnexB(
         _ data: Data,
         from sampleBuffer: CMSampleBuffer,
@@ -4948,39 +5037,44 @@ enum EncodedVideoRawOutput {
                 userInfo: [NSLocalizedDescriptionKey: "Could not determine the HEVC NAL length prefix size."]
             )
         }
-        let prefixSize = Int(nalLengthSize)
-        guard (1...4).contains(prefixSize) else {
+        try appendLengthPrefixedAnnexB(
+            data,
+            prefixSize: Int(nalLengthSize),
+            to: handle,
+            codecLabel: "HEVC"
+        )
+    }
+
+    static func appendH264AnnexB(
+        _ data: Data,
+        from sampleBuffer: CMSampleBuffer,
+        to handle: FileHandle
+    ) throws {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            throw NSError(domain: "EncodedVideoRawOutput", code: 8)
+        }
+        var nalLengthSize: Int32 = 4
+        guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: nil,
+            nalUnitHeaderLengthOut: &nalLengthSize
+        ) == noErr,
+              nalLengthSize > 0 else {
             throw NSError(
                 domain: "EncodedVideoRawOutput",
-                code: 12,
-                userInfo: [NSLocalizedDescriptionKey: "Unsupported HEVC NAL length prefix size \(prefixSize)."]
+                code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "Could not determine the H.264 NAL length prefix size."]
             )
         }
-        var offset = 0
-        while offset <= data.count, data.count - offset >= prefixSize {
-            var nalLength = 0
-            for byte in data[offset..<(offset + prefixSize)] {
-                nalLength = (nalLength << 8) | Int(byte)
-            }
-            offset += prefixSize
-            guard nalLength > 0, nalLength <= data.count - offset else {
-                throw NSError(
-                    domain: "EncodedVideoRawOutput",
-                    code: 10,
-                    userInfo: [NSLocalizedDescriptionKey: "Encountered an invalid HEVC NAL length while writing raw output."]
-                )
-            }
-            try handle.write(contentsOf: Data([0, 0, 0, 1]))
-            try handle.write(contentsOf: Data(data[offset..<(offset + nalLength)]))
-            offset += nalLength
-        }
-        guard offset == data.count else {
-            throw NSError(
-                domain: "EncodedVideoRawOutput",
-                code: 11,
-                userInfo: [NSLocalizedDescriptionKey: "HEVC sample ended in a partial NAL length prefix."]
-            )
-        }
+        try appendLengthPrefixedAnnexB(
+            data,
+            prefixSize: Int(nalLengthSize),
+            to: handle,
+            codecLabel: "H.264"
+        )
     }
 }
 
@@ -4991,6 +5085,7 @@ final class EncodedVideoRawWriter: @unchecked Sendable {
     let outputURL: URL
     private let handle: FileHandle
     private let isHEVC: Bool
+    private let isH264: Bool
     private let isAV1: Bool
     private var wroteParameterSets = false
     private var wroteAV1SequenceHeader = false
@@ -5001,6 +5096,7 @@ final class EncodedVideoRawWriter: @unchecked Sendable {
     init(encodedOutputURL: URL, quality: String) throws {
         outputURL = EncodedVideoRawOutput.outputURL(for: encodedOutputURL, quality: quality)
         isHEVC = isHEVCQuality(quality)
+        isH264 = isH264Quality(quality)
         isAV1 = isAV1Quality(quality)
         try? FileManager.default.removeItem(at: outputURL)
         guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
@@ -5029,14 +5125,18 @@ final class EncodedVideoRawWriter: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "The encoded video stream contains an empty sample."]
             )
         }
-        if isHEVC {
+        if isHEVC || isH264 {
             if !wroteParameterSets {
-                let parameterSets = EncodedVideoRawOutput.hevcRawParameterSets(from: sampleBuffer)
+                let parameterSets = isHEVC
+                    ? EncodedVideoRawOutput.hevcRawParameterSets(from: sampleBuffer)
+                    : EncodedVideoRawOutput.h264RawParameterSets(from: sampleBuffer)
                 guard !parameterSets.isEmpty else {
                     throw NSError(
                         domain: "EncodedVideoRawWriter",
                         code: 5,
-                        userInfo: [NSLocalizedDescriptionKey: "HEVC output has no parameter sets."]
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "\(isHEVC ? "HEVC" : "H.264") output has no parameter sets."
+                        ]
                     )
                 }
                 for parameterSet in parameterSets {
@@ -5045,7 +5145,11 @@ final class EncodedVideoRawWriter: @unchecked Sendable {
                 }
                 wroteParameterSets = true
             }
-            try EncodedVideoRawOutput.appendHEVCAnnexB(data, from: sampleBuffer, to: handle)
+            if isHEVC {
+                try EncodedVideoRawOutput.appendHEVCAnnexB(data, from: sampleBuffer, to: handle)
+            } else {
+                try EncodedVideoRawOutput.appendH264AnnexB(data, from: sampleBuffer, to: handle)
+            }
         } else if isAV1 {
             if !wroteAV1SequenceHeader {
                 guard let sequenceHeader = EncodedVideoRawOutput.av1SequenceHeaderOBU(
@@ -5104,6 +5208,87 @@ final class EncodedVideoRawWriter: @unchecked Sendable {
     }
 }
 
+/// One contiguous decode window for a VideoToolbox multi-pass scan.
+private struct DetachedVideoPassSegment {
+    let readerTimeRange: CMTimeRange?
+    let startIndex: Int64
+    let endIndex: Int64?
+}
+
+/// Builds per-range readers. A full-timeline request stays a single sequential scan.
+private func detachedVideoPassSegments(
+    ranges: [CMTimeRange]?,
+    fps: FramerateInfo,
+    trackTimeRange: CMTimeRange,
+    estimatedFrames: Int64
+) -> [DetachedVideoPassSegment] {
+    guard let ranges, !ranges.isEmpty else {
+        return [DetachedVideoPassSegment(readerTimeRange: nil, startIndex: 0, endIndex: nil)]
+    }
+    if vtRangesCoverFullTimeline(ranges, frameCount: estimatedFrames, fps: fps) {
+        return [DetachedVideoPassSegment(readerTimeRange: nil, startIndex: 0, endIndex: nil)]
+    }
+    return ranges.map { range in
+        DetachedVideoPassSegment(
+            readerTimeRange: assetTimeRange(
+                coveringSynthetic: range,
+                trackTimeRange: trackTimeRange
+            ),
+            startIndex: vtFrameIndex(for: range.start, fps: fps),
+            endIndex: vtFrameIndex(for: CMTimeRangeGetEnd(range), fps: fps)
+        )
+    }
+}
+
+/// Opens a video-only reader so H.264/HEVC multi-pass can rescan the source without extra copies.
+private func makeMovieVideoReader(
+    asset: AVAsset,
+    videoTrack: AVAssetTrack,
+    outputSettings: [String: Any]?,
+    timeRange: CMTimeRange? = nil
+) throws -> (reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
+    let reader = try AVAssetReader(asset: asset)
+    if let timeRange,
+       CMTIMERANGE_IS_VALID(timeRange),
+       CMTimeCompare(timeRange.duration, .zero) > 0 {
+        reader.timeRange = timeRange
+    }
+    let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Could not create a video reader for H.264/HEVC multi-pass."
+            ]
+        )
+    }
+    reader.add(output)
+    guard reader.startReading() else {
+        throw NSError(
+            domain: "encodeMOV",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Video reader failed to start for H.264/HEVC multi-pass: " +
+                (reader.error?.localizedDescription ?? "unknown error")
+            ]
+        )
+    }
+    return (reader, output)
+}
+
+/// Pulls the next IOSurface-backed pixel buffer and its source PTS without copying sample data.
+private func copyNextDecodedFrame(
+    from output: AVAssetReaderTrackOutput
+) -> (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)? {
+    autoreleasepool {
+        guard let sample = output.copyNextSampleBuffer(),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { return nil }
+        return (pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sample))
+    }
+}
+
 // MARK: - MOV Encode Pipeline
 
 /// Encodes a media asset to MOV or MP4, with optional passthrough.
@@ -5134,12 +5319,15 @@ func encodeMOV(
 
     let isPassthrough = (quality == "pass")
     let isHEVC = isHEVCQuality(quality)
+    let isH264 = isH264Quality(quality)
     let isAV1 = isAV1Quality(quality)
     let isCompressedHDR = isHEVC || isAV1
+    let isCompressedVideo = isH264 || isCompressedHDR
+    var usesDetachedVideoSource = isCompressedVideo && (hevcOptions?.multiPass == true)
     let requestedDVProfile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
     let usesNativeDolbyVision = requestedDVProfile?.usesNativeIPT == true
-    if container == .mp4 && !isCompressedHDR {
-        print("[Error] MP4 output supports only HEVC and AV1 encoding.")
+    if container == .mp4 && !isCompressedVideo && !isPassthrough {
+        print("[Error] MP4 output supports only H.264, HEVC, AV1 encoding, or -q pass remux.")
         return false
     }
     if outputVideoRaw && isPassthrough {
@@ -5253,8 +5441,8 @@ func encodeMOV(
     let dolbyVisionMetadata: DolbyVisionMetadataSource?
     let dolbyVisionRPUProvider: DolbyVisionRPUProvider?
     do {
-        if isCompressedHDR {
-            guard (isHEVC && hevcOptions != nil) || (isAV1 && av1Options != nil) else {
+        if isCompressedVideo {
+            guard ((isHEVC || isH264) && hevcOptions != nil) || (isAV1 && av1Options != nil) else {
                 throw NSError(
                     domain: "CompressedHDR",
                     code: 1,
@@ -5515,16 +5703,25 @@ func encodeMOV(
         let reader = try AVAssetReader(asset: asset)
         let useAV1NativeDecode = av1NativeDecodeReason != nil
 
+        let sourceIsH264OrHEVC = sourceVideoSubtype.map {
+            $0 == kCMVideoCodecType_H264 || $0 == kCMVideoCodecType_HEVC
+        } == true
+        let sourceDecodePixelFormat: OSType? = sourceIsH264OrHEVC && !isCompressedVideo
+            ? (sourceVideoSubtype == kCMVideoCodecType_H264
+                ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
+            : nil
         let vidSettings: [String: Any]? = isPassthrough
             ? nil
             : (useAV1NativeDecode
                 ? nil
                 : (profile7RasterPlan == nil
-                    ? proResReaderOutputSettings(quality)
+                    ? (sourceDecodePixelFormat.map { videoPixelBufferOutputSettings($0) }
+                        ?? proResReaderOutputSettings(quality))
                     : dolbyVisionProfile7ReaderOutputSettings()))
         let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: vidSettings)
         videoOut.alwaysCopiesSampleData = false
-        if reader.canAdd(videoOut) { reader.add(videoOut) }
+        if !usesDetachedVideoSource, reader.canAdd(videoOut) { reader.add(videoOut) }
 
         var audioOut: AVAssetReaderTrackOutput? = nil
         if let aTrack = audioTrack {
@@ -5601,14 +5798,14 @@ func encodeMOV(
         var profile7DualWriter: DolbyVisionProfile7DualWriter? = nil
         var av1Bridge: AV1Bridge? = nil
         var av1FormatDescription: CMFormatDescription? = nil
-        var hevcFormatDescription: CMFormatDescription? = nil
+        var videoToolboxFormatDescription: CMFormatDescription? = nil
         var av1DecodeSession: ProResNativeDecodeSession? = nil
         if !isPassthrough {
-            if isHEVC {
+            if isHEVC || isH264 {
                 var description: CMVideoFormatDescription?
                 let status = CMVideoFormatDescriptionCreate(
                     allocator: kCFAllocatorDefault,
-                    codecType: kCMVideoCodecType_HEVC,
+                    codecType: isHEVC ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
                     width: Int32(width),
                     height: Int32(height),
                     extensions: nil,
@@ -5618,10 +5815,10 @@ func encodeMOV(
                     throw NSError(
                         domain: "encodeMOV",
                         code: Int(status),
-                        userInfo: [NSLocalizedDescriptionKey: "Could not create the HEVC sample description for the output container."]
+                        userInfo: [NSLocalizedDescriptionKey: "Could not create the \(isHEVC ? "HEVC" : "H.264") sample description for the output container."]
                     )
                 }
-                hevcFormatDescription = description
+                videoToolboxFormatDescription = description
             }
             if isAV1 {
                 guard let av1Options else {
@@ -5703,9 +5900,21 @@ func encodeMOV(
                 }
                 profile7Encoder = try DolbyVisionProfile7Encoder(
                     rasterPlan: profile7RasterPlan,
-                    fpsHint: Int(fpsInfo.fps.rounded()),
+                    fpsInfo: fpsInfo,
                     colorSpace: effectiveColorSpace,
-                    bitrateMbps: hevcOptions!.bitrateMbps
+                    bitrateMbps: hevcOptions!.bitrateMbps,
+                    allIntra: hevcOptions!.allIntra,
+                    bFrames: hevcOptions!.bFrames,
+                    bitrateMode: hevcOptions!.bitrateMode,
+                    multiPass: hevcOptions!.multiPass,
+                    sourceFrameCount: Int(estimatedFrames),
+                    sourceTimeRange: CMTimeRange(
+                        start: .zero,
+                        duration: CMTime(
+                            value: CMTimeValue(estimatedFrames) * CMTimeValue(fpsInfo.denominator),
+                            timescale: CMTimeScale(max(fpsInfo.numerator, 1))
+                        )
+                    )
                 )
                 if outputVideoRaw {
                     let dualWriter = try DolbyVisionProfile7DualWriter(
@@ -5726,7 +5935,35 @@ func encodeMOV(
                     hevcOptions: hevcOptions,
                     sourcePixelFormat: usesNativeDolbyVision
                         ? NativeDolbyVisionColorPipeline.outputPixelFormat
-                        : nil)
+                        : sourceDecodePixelFormat,
+                    sourceFrameCount: Int(estimatedFrames),
+                    sourceTimeRange: CMTimeRange(
+                        start: .zero,
+                        duration: CMTime(
+                            value: CMTimeValue(estimatedFrames) * CMTimeValue(fpsInfo.denominator),
+                            timescale: CMTimeScale(max(fpsInfo.numerator, 1))
+                        )
+                    )
+                )
+            }
+        }
+
+        if isCompressedVideo {
+            let enabled = vtSession?.isMultiPassEnabled == true
+                || profile7Encoder?.isMultiPassEnabled == true
+            if hevcOptions?.multiPass == true {
+                if enabled {
+                    print("[VT] Multi-pass encoding on.")
+                } else {
+                    print("[VT] Multi-pass encoding requested; encoder fell back to a single pass.")
+                    if usesDetachedVideoSource, reader.canAdd(videoOut) {
+                        reader.add(videoOut)
+                        usesDetachedVideoSource = false
+                        print("[VT] Using the direct encode path for the single-pass fallback.")
+                    }
+                }
+            } else {
+                print("[VT] Multi-pass encoding off.")
             }
         }
 
@@ -5752,7 +5989,7 @@ func encodeMOV(
         // Video input: nil outputSettings = passthrough of compressed data.
         let vFmtDesc = isPassthrough
             ? sourceVideoFormatDescription
-            : (isHEVC ? hevcFormatDescription : av1FormatDescription)
+            : ((isHEVC || isH264) ? videoToolboxFormatDescription : av1FormatDescription)
         let videoIn = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: vFmtDesc)
         videoIn.expectsMediaDataInRealTime = false
@@ -6441,12 +6678,17 @@ func encodeMOV(
                     }
                 }
             } else {
-            vtSession?.enableAsyncMode(channelCapacity: pipelineCapacity)
+            if !usesDetachedVideoSource {
+                vtSession?.enableAsyncMode(channelCapacity: pipelineCapacity)
+            }
             let vtRef = vtSession.map(SendableRef.init)
             let profile7EncoderRef = profile7Encoder.map(SendableRef.init)
             let profile7DualWriterRef = profile7DualWriter.map(SendableRef.init)
             let fpsInfoRef = SendableRef(fpsInfo)
             let rpuProviderRef = dolbyVisionRPUProvider.map(SendableRef.init)
+            let assetRef = SendableRef(asset)
+            let videoTrackRef = SendableRef(videoTrack)
+            let vidSettingsRef = SendableRef(vidSettings)
             let hdr10Metadata = isHEVC
                 ? HEVCHDR10Metadata(
                     masteringDisplayColorVolume: effectiveColorSpace?.masteringDisplayColorVolume,
@@ -6455,6 +6697,333 @@ func encodeMOV(
             let hdr10MetadataRef = hdr10Metadata.map(SendableRef.init)
 
             await withTaskGroup(of: Void.self) { group in
+                if usesDetachedVideoSource {
+                    group.addTask(priority: .userInitiated) {
+                        let fi = fpsInfoRef.value
+                        let trackTimeRange = videoTrackRef.value.timeRange
+                        let estimatedFrameCount = estimatedFrames
+                        let silo: VTEncodedFrameSilo
+                        do {
+                            silo = try VTEncodedFrameSilo()
+                        } catch {
+                            failureBox.store(error)
+                            compressedChannel.finish()
+                            return
+                        }
+                        let actualMultiPass = vtRef?.value.isMultiPassEnabled == true
+                            || profile7EncoderRef?.value.isMultiPassEnabled == true
+                        var ranges: [CMTimeRange]? = nil
+                        var passIndex = 0
+                        let maxPasses = HEVCEncodeOptions.maximumCompressionPasses
+
+                        var profile7SiloBatch: [CMSampleBuffer] = []
+                        func encodeDetachedPass(
+                            into silo: VTEncodedFrameSilo,
+                            ranges: [CMTimeRange]?,
+                            writeProfile7Raw: Bool
+                        ) async -> (ok: Bool, lastPTS: CMTime) {
+                            let profile7Encoder = profile7EncoderRef?.value
+                            let rpuProvider = rpuProviderRef?.value
+                            if profile7Encoder != nil, rpuProvider == nil {
+                                failureBox.store(NSError(
+                                    domain: "DolbyVisionProfile7",
+                                    code: 1,
+                                    userInfo: [NSLocalizedDescriptionKey:
+                                        "Profile 7.6 encoder has no RPU metadata provider."
+                                    ]
+                                ))
+                                return (false, .invalid)
+                            }
+                            let vt = vtRef?.value
+                            if profile7Encoder == nil, vt == nil {
+                                failureBox.store(NSError(
+                                    domain: "encodeMOV",
+                                    code: 1,
+                                    userInfo: [NSLocalizedDescriptionKey:
+                                        "No video encoder was initialized for \(quality)."
+                                    ]
+                                ))
+                                return (false, .invalid)
+                            }
+
+                            let segments = detachedVideoPassSegments(
+                                ranges: ranges,
+                                fps: fi,
+                                trackTimeRange: trackTimeRange,
+                                estimatedFrames: estimatedFrameCount
+                            )
+                            var decodedCount: Int64 = 0
+                            var encodedCount: Int64 = 0
+                            var lastPTS = CMTime.invalid
+
+                            for segment in segments {
+                                let passReader: AVAssetReader
+                                let passOutput: AVAssetReaderTrackOutput
+                                do {
+                                    (passReader, passOutput) = try makeMovieVideoReader(
+                                        asset: assetRef.value,
+                                        videoTrack: videoTrackRef.value,
+                                        outputSettings: vidSettingsRef.value,
+                                        timeRange: segment.readerTimeRange
+                                    )
+                                } catch {
+                                    failureBox.store(error)
+                                    return (false, lastPTS)
+                                }
+                                defer { passReader.cancelReading() }
+
+                                var frameIndex = segment.startIndex
+                                while let decoded = copyNextDecodedFrame(from: passOutput) {
+                                    decodedCount += 1
+                                    if segment.readerTimeRange != nil,
+                                       CMTIME_IS_NUMERIC(decoded.presentationTime),
+                                       CMTIMERANGE_IS_VALID(trackTimeRange) {
+                                        let mapped = vtFrameIndex(
+                                            for: CMTimeSubtract(
+                                                decoded.presentationTime,
+                                                trackTimeRange.start
+                                            ),
+                                            fps: fi
+                                        )
+                                        if mapped < segment.startIndex {
+                                            continue
+                                        }
+                                        if let endIndex = segment.endIndex, mapped >= endIndex {
+                                            break
+                                        }
+                                    }
+
+                                    let pts = vtSyntheticPTS(frameIndex: frameIndex, fps: fi)
+                                    let duration = vtSyntheticDuration(fps: fi)
+                                    if vtTime(pts, isCoveredBy: ranges) {
+                                        if let encoder = profile7Encoder, let rpuProvider {
+                                            do {
+                                                let pixelBuffer = try metalColorPipelineRef?.value.process(
+                                                    decoded.pixelBuffer,
+                                                    pts: pts
+                                                ) ?? decoded.pixelBuffer
+                                                let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
+                                                let encodedFrames = try encoder.encode(
+                                                    sourcePixelBuffer: pixelBuffer,
+                                                    pts: pts,
+                                                    duration: duration,
+                                                    rpuNALUnit: rpu,
+                                                    hdr10Metadata: hdr10MetadataRef?.value
+                                                )
+                                                for encodedFrame in encodedFrames {
+                                                    if writeProfile7Raw {
+                                                        try profile7DualWriterRef?.value.write(
+                                                            frame: encodedFrame,
+                                                            hdr10Metadata: hdr10MetadataRef?.value
+                                                        )
+                                                    }
+                                                    profile7SiloBatch.append(encodedFrame.muxedSample)
+                                                }
+                                            } catch {
+                                                failureBox.store(error)
+                                                return (false, lastPTS)
+                                            }
+                                        } else if let vt {
+                                            let pixelBuffer: CVPixelBuffer
+                                            do {
+                                                let preparedPixelBuffer = try metalColorPipelineRef?.value.process(
+                                                    decoded.pixelBuffer,
+                                                    pts: pts
+                                                ) ?? decoded.pixelBuffer
+                                                pixelBuffer = try nativeDolbyVisionColorPipelineRef?.value.process(
+                                                    preparedPixelBuffer,
+                                                    pts: pts
+                                                ) ?? preparedPixelBuffer
+                                            } catch {
+                                                failureBox.store(error)
+                                                return (false, lastPTS)
+                                            }
+                                            guard vt.submit(
+                                                pixelBuffer: pixelBuffer,
+                                                pts: pts,
+                                                duration: duration
+                                            ) else {
+                                                failureBox.store(makeWriterFailure(
+                                                    stage: "VT submit failed",
+                                                    writer: writerRef.value,
+                                                    reader: readerRef.value
+                                                ))
+                                                return (false, lastPTS)
+                                            }
+                                        }
+                                        encodedCount += 1
+                                        lastPTS = pts
+                                    }
+                                    frameIndex += 1
+                                    if let endIndex = segment.endIndex, frameIndex >= endIndex {
+                                        break
+                                    }
+                                }
+                            }
+                            let label = profile7Encoder != nil ? "Profile 7.6 pass" : "Pass"
+                            print("[VT] \(label) encoded \(encodedCount) frame(s) from \(decodedCount) decoded.")
+                            return (failureBox.error == nil, lastPTS)
+                        }
+
+                        func appendProfile7FinishPending(
+                            encoder: DolbyVisionProfile7Encoder,
+                            writeRaw: Bool
+                        ) throws {
+                            for encodedFrame in try encoder.finishPending() {
+                                if writeRaw {
+                                    try profile7DualWriterRef?.value.write(
+                                        frame: encodedFrame,
+                                        hdr10Metadata: hdr10MetadataRef?.value
+                                    )
+                                }
+                                profile7SiloBatch.append(encodedFrame.muxedSample)
+                            }
+                        }
+
+                        func commitProfile7SiloBatch(to silo: VTEncodedFrameSilo) throws {
+                            guard !profile7SiloBatch.isEmpty else { return }
+                            let hasNumericDTS = profile7SiloBatch.contains {
+                                CMTIME_IS_NUMERIC(CMSampleBufferGetDecodeTimeStamp($0))
+                            }
+                            if hasNumericDTS {
+                                profile7SiloBatch.sort {
+                                    let lhs = CMSampleBufferGetDecodeTimeStamp($0)
+                                    let rhs = CMSampleBufferGetDecodeTimeStamp($1)
+                                    return CMTimeCompare(lhs, rhs) < 0
+                                }
+                            }
+                            for sample in profile7SiloBatch {
+                                try silo.add(sample)
+                            }
+                            profile7SiloBatch.removeAll(keepingCapacity: true)
+                        }
+
+                        vtRef?.value.attachFrameSilo(silo)
+
+                        do {
+                            var dualWriterWroteFullPass = false
+                            while true {
+                                let isFinal = !actualMultiPass
+                                    || passIndex + 1 >= maxPasses
+                                if actualMultiPass {
+                                    print("[VT] Compression pass \(passIndex + 1)\(isFinal ? " (final)" : "")...")
+                                }
+                                let passRanges: [CMTimeRange]?
+                                if isFinal, profile7EncoderRef != nil {
+                                    passRanges = nil
+                                } else {
+                                    passRanges = ranges
+                                }
+                                let coversFullTimeline = passRanges == nil
+                                    || vtRangesCoverFullTimeline(
+                                        passRanges ?? [],
+                                        frameCount: estimatedFrameCount,
+                                        fps: fi
+                                    )
+                                // Write BL/EL during an already-open pass that covers the
+                                // whole timeline. Starting a third BeginPass after EndPass
+                                // returns kVTParameterErr (-12902) on the hardware encoder.
+                                let writeProfile7Raw = profile7DualWriterRef != nil
+                                    && coversFullTimeline
+                                    && (passIndex > 0 || isFinal || !actualMultiPass)
+                                if writeProfile7Raw {
+                                    print("[VT] Writing Profile 7.6 BL/EL elementary streams during compression pass \(passIndex + 1)...")
+                                    try profile7DualWriterRef?.value.resetForRewrite()
+                                }
+                                let passFrameCount = vtPassFrameCount(
+                                    ranges: passRanges,
+                                    estimatedFrames: estimatedFrameCount,
+                                    fps: fi
+                                )
+                                vtRef?.value.setSourceFrameCount(passFrameCount)
+                                profile7EncoderRef?.value.setSourceFrameCount(passFrameCount)
+                                try vtRef?.value.beginCompressionPass(isFinal: isFinal)
+                                try profile7EncoderRef?.value.beginCompressionPass(isFinal: isFinal)
+                                let (encoded, lastPTS) = await encodeDetachedPass(
+                                    into: silo,
+                                    ranges: passRanges,
+                                    writeProfile7Raw: writeProfile7Raw
+                                )
+                                _ = lastPTS
+                                guard encoded else {
+                                    compressedChannel.finish()
+                                    return
+                                }
+                                if writeProfile7Raw {
+                                    dualWriterWroteFullPass = true
+                                }
+                                if !actualMultiPass || isFinal {
+                                    _ = try vtRef?.value.endCompressionPass(evaluateFurtherPasses: false)
+                                    _ = try profile7EncoderRef?.value.endCompressionPass(
+                                        evaluateFurtherPasses: false
+                                    )
+                                    if let encoder = profile7EncoderRef?.value {
+                                        try appendProfile7FinishPending(
+                                            encoder: encoder,
+                                            writeRaw: writeProfile7Raw
+                                        )
+                                    }
+                                    try commitProfile7SiloBatch(to: silo)
+                                    break
+                                }
+                                let vtWantsMore = try vtRef?.value.endCompressionPass() ?? false
+                                let p7WantsMore = try profile7EncoderRef?.value.endCompressionPass() ?? false
+                                if let encoder = profile7EncoderRef?.value {
+                                    try appendProfile7FinishPending(
+                                        encoder: encoder,
+                                        writeRaw: writeProfile7Raw
+                                    )
+                                }
+                                if !(vtWantsMore || p7WantsMore) {
+                                    try commitProfile7SiloBatch(to: silo)
+                                    if profile7DualWriterRef != nil, !dualWriterWroteFullPass {
+                                        print("[VT] Writing Profile 7.6 BL/EL elementary streams from the muxed timeline...")
+                                        try profile7DualWriterRef?.value.resetForRewrite()
+                                        let (rewritten, rewritePTS) = await encodeDetachedPass(
+                                            into: silo,
+                                            ranges: nil,
+                                            writeProfile7Raw: true
+                                        )
+                                        guard rewritten else {
+                                            compressedChannel.finish()
+                                            return
+                                        }
+                                        _ = rewritePTS
+                                    }
+                                    break
+                                }
+                                profile7SiloBatch.removeAll(keepingCapacity: true)
+                                var nextRanges: [CMTimeRange] = []
+                                if vtWantsMore {
+                                    nextRanges.append(contentsOf: try vtRef?.value.timeRangesForNextPass() ?? [])
+                                }
+                                if p7WantsMore {
+                                    nextRanges.append(contentsOf: try profile7EncoderRef?.value.timeRangesForNextPass() ?? [])
+                                }
+                                nextRanges = mergedVTTimeRanges(nextRanges, [])
+                                if nextRanges.isEmpty { break }
+                                let extraFrames = vtFrameCount(in: nextRanges, fps: fi)
+                                let coverage = nextRanges
+                                    .map { vtTimeRangeDescription($0, fps: fi) }
+                                    .joined(separator: ", ")
+                                print("[VT] Encoder requested \(nextRanges.count) extra time range(s) covering \(extraFrames) frame(s): \(coverage).")
+                                if profile7EncoderRef == nil {
+                                    try silo.setTimeRangesForNextPass(nextRanges)
+                                }
+                                ranges = nextRanges
+                                passIndex += 1
+                            }
+                            profile7EncoderRef?.value.finish()
+                            try silo.forEachSample { sample in
+                                compressedChannel.send(SendableSampleBuffer(buf: sample))
+                            }
+                        } catch {
+                            failureBox.store(error)
+                        }
+                        try? profile7DualWriterRef?.value.finish()
+                        compressedChannel.finish()
+                    }
+                } else {
                 // Stage 1 — Reader
                 group.addTask(priority: .userInitiated) {
                     let vOut = videoOutRef.value
@@ -6504,20 +7073,22 @@ func encodeMOV(
                                     pts: pts
                                 ) ?? spb.buf
                                 let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
-                                let encodedFrame = try encoder.encode(
+                                let encodedFrames = try encoder.encode(
                                     sourcePixelBuffer: pixelBuffer,
                                     pts: pts,
                                     duration: duration,
                                     rpuNALUnit: rpu,
                                     hdr10Metadata: hdr10MetadataRef?.value
                                 )
-                                try profile7DualWriterRef?.value.write(
-                                    frame: encodedFrame,
-                                    hdr10Metadata: hdr10MetadataRef?.value
-                                )
-                                await compressedChannel.sendAsync(
-                                    SendableSampleBuffer(buf: encodedFrame.muxedSample)
-                                )
+                                for encodedFrame in encodedFrames {
+                                    try profile7DualWriterRef?.value.write(
+                                        frame: encodedFrame,
+                                        hdr10Metadata: hdr10MetadataRef?.value
+                                    )
+                                    await compressedChannel.sendAsync(
+                                        SendableSampleBuffer(buf: encodedFrame.muxedSample)
+                                    )
+                                }
                             } catch {
                                 failureBox.store(error)
                                 pixelChannel.finish()
@@ -6527,6 +7098,17 @@ func encodeMOV(
                                 return
                             }
                             frameIndex += 1
+                        }
+                        if let pending = try? encoder.finishPending(flushEncoders: true) {
+                            for encodedFrame in pending {
+                                try? profile7DualWriterRef?.value.write(
+                                    frame: encodedFrame,
+                                    hdr10Metadata: hdr10MetadataRef?.value
+                                )
+                                await compressedChannel.sendAsync(
+                                    SendableSampleBuffer(buf: encodedFrame.muxedSample)
+                                )
+                            }
                         }
                         try? profile7DualWriterRef?.value.finish()
                         encoder.finish()
@@ -6594,6 +7176,7 @@ func encodeMOV(
                     pixelChannel.finish()
                     compressedChannel.finish()
                 }
+                }
 
                 // Stage 3 — Writer
                 group.addTask(priority: .userInitiated) {
@@ -6605,7 +7188,12 @@ func encodeMOV(
                             sampleToAppend = wrapped.buf
                         } else if let rpuProvider = rpuProviderRef?.value {
                             do {
-                                let rpu = try await rpuProvider.rpu(forFrame: frameIndex)
+                                let rpu = try await rpuProvider.rpu(
+                                    forFrame: presentationFrameIndex(
+                                        for: wrapped.buf,
+                                        fps: fpsInfoRef.value.fps
+                                    )
+                                )
                                 sampleToAppend = try sampleBufferByInjectingHEVCRPU(
                                     wrapped.buf,
                                     rpuNALUnit: rpu,
@@ -6841,12 +7429,20 @@ func encodeMOV(
                 )
                 try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)
             }
-            let sampleEntry = try normalizeCompressedVideoSampleEntry(
-                in: outputURL,
-                codec: .hevc,
-                useDolbyVisionCodecTag: useDolbyVisionCodecTag,
-                profile: hevcOptions?.dvProfile
-            )
+            let sampleEntry: String
+            if isPassthrough {
+                sampleEntry = try videoSampleEntry(
+                    in: outputURL,
+                    acceptedTypes: DolbyVisionCompressedCodec.hevc.acceptedSampleEntryTypes
+                )?.type ?? "unknown"
+            } else {
+                sampleEntry = try normalizeCompressedVideoSampleEntry(
+                    in: outputURL,
+                    codec: .hevc,
+                    useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                    profile: hevcOptions?.dvProfile
+                )
+            }
             print(
                 "[Codec ID] HEVC RPU \(hasRPU ? "present" : "absent"), " +
                 "DV flag \(useDolbyVisionCodecTag ? "on" : "off") -> \(sampleEntry)."
@@ -6879,12 +7475,20 @@ func encodeMOV(
                 )
                 try removeAV1StaticHDRSampleEntryBoxes(in: outputURL)
             }
-            let sampleEntry = try normalizeCompressedVideoSampleEntry(
-                in: outputURL,
-                codec: .av1,
-                useDolbyVisionCodecTag: useDolbyVisionCodecTag,
-                profile: av1Options?.dvProfile
-            )
+            let sampleEntry: String
+            if isPassthrough {
+                sampleEntry = try videoSampleEntry(
+                    in: outputURL,
+                    acceptedTypes: DolbyVisionCompressedCodec.av1.acceptedSampleEntryTypes
+                )?.type ?? "unknown"
+            } else {
+                sampleEntry = try normalizeCompressedVideoSampleEntry(
+                    in: outputURL,
+                    codec: .av1,
+                    useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                    profile: av1Options?.dvProfile
+                )
+            }
             print(
                 "[Codec ID] AV1 RPU \(hasRPU ? "present" : "absent"), " +
                 "DV flag \(useDolbyVisionCodecTag ? "on" : "off") -> \(sampleEntry)."

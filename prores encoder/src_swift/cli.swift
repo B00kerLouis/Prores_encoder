@@ -7,7 +7,7 @@ import Metal
 
 #if PRORES_ENCODER_CLI
 
-private let proResEncoderCLIVersion = "1.2.3"
+private let proResEncoderCLIVersion = "1.2.5"
 
 // MARK: - CLI Config (Sendable, passed by value)
 
@@ -102,6 +102,11 @@ enum ProResEncoderCLI {
         var cmuInclude = false
         var dvFlag = false
         var outputVideoRaw = false
+        var allIntra = false
+        var bFramesOverride: Bool? = nil
+        var bitrateMode: VideoBitrateMode = .vbr
+        var bitrateModeWasSet = false
+        var multiPassOverride: Bool? = nil
 
         let args = CommandLine.arguments
         var idx = 1
@@ -217,6 +222,40 @@ enum ProResEncoderCLI {
                 dvFlag = true
             case "--outupt-video-raw", "-ovr":
                 outputVideoRaw = true
+            case "--all-intra":
+                allIntra = true
+            case "--b-frames":
+                let raw = requireValue(for: args[idx]).lowercased()
+                switch raw {
+                case "on":
+                    bFramesOverride = true
+                case "off":
+                    bFramesOverride = false
+                default:
+                    print("[Error] --b-frames accepts only on or off.")
+                    exit(1)
+                }
+            case "--max-b-frames":
+                print("[Error] --max-b-frames has been replaced by --b-frames on|off.")
+                exit(1)
+            case "--muti-pass", "--multi-pass":
+                let raw = requireValue(for: args[idx]).lowercased()
+                switch raw {
+                case "on":
+                    multiPassOverride = true
+                case "off":
+                    multiPassOverride = false
+                default:
+                    print("[Error] --muti-pass accepts only on or off.")
+                    exit(1)
+                }
+            case "--cbr", "--vbr":
+                guard !bitrateModeWasSet else {
+                    print("[Error] --cbr and --vbr are mutually exclusive.")
+                    exit(1)
+                }
+                bitrateMode = args[idx] == "--cbr" ? .cbr : .vbr
+                bitrateModeWasSet = true
             default:
                 print("[Error] Unknown argument: \(args[idx])")
                 printUsage()
@@ -314,6 +353,10 @@ enum ProResEncoderCLI {
                 print("[Error] --dv-flag / -df is available only while encoding HEVC or AV1 media.")
                 exit(1)
             }
+            if allIntra || bFramesOverride != nil || bitrateModeWasSet || multiPassOverride != nil {
+                print("[Error] --all-intra, --b-frames, --cbr, --vbr, and --muti-pass are available only while encoding H.264 or HEVC.")
+                exit(1)
+            }
             if outputVideoRaw {
                 print("[Error] --outupt-video-raw / -ovr is available only while encoding media.")
                 exit(1)
@@ -393,8 +436,9 @@ enum ProResEncoderCLI {
             exit(1)
         }
         let wantsHEVC = isHEVCQuality(quality)
+        let wantsH264 = isH264Quality(quality)
         let wantsAV1 = isAV1Quality(quality)
-        let wantsCompressedHDR = wantsHEVC || wantsAV1
+        let wantsVideoBitrateOptions = wantsH264 || wantsHEVC || wantsAV1
         let hasDolbyVisionMetadataSource = !dolbyVisionXMLPath.isEmpty || cmuInclude
         if let profile = dolbyVisionProfile,
            profile.usesHLGBaseLayer,
@@ -408,7 +452,7 @@ enum ProResEncoderCLI {
             print("[Error] -dp \(profile.rawValue) requires a PQ base layer; use -dp 84 for HEVC HLG or -dp 104 for AV1 HLG.")
             exit(1)
         }
-        if wantsCompressedHDR {
+        if wantsVideoBitrateOptions {
             guard exportFormat == "mov" || exportFormat == "mp4" else {
                 print("[Error] -q \(quality) is supported only with MOV or MP4 output.")
                 exit(1)
@@ -420,6 +464,14 @@ enum ProResEncoderCLI {
             guard let bitrate = videoBitrateMbps,
                   encodedVideoBitrateIsRepresentable(bitrate, usesAV1: wantsAV1) else {
                 print("[Error] -q \(quality) requires a finite, representable --bitrate / -b value in Mb/s.")
+                exit(1)
+            }
+            if wantsH264 && hasDolbyVisionMetadataSource {
+                print("[Error] Dolby Vision metadata requires -q hevc or -q av1; H.264 has no supported Dolby Vision bitstream profile.")
+                exit(1)
+            }
+            if wantsH264 && dolbyVisionProfile != nil {
+                print("[Error] --dv-profile is not supported with -q h264.")
                 exit(1)
             }
             if dolbyVisionProfile != nil && !hasDolbyVisionMetadataSource {
@@ -457,8 +509,16 @@ enum ProResEncoderCLI {
                 exit(1)
             }
         }
-        if exportFormat == "mp4" && !wantsCompressedHDR {
-            print("[Error] MP4 output supports only -q hevc or -q av1.")
+        if (allIntra || bFramesOverride != nil || bitrateModeWasSet || multiPassOverride != nil) && !(wantsH264 || wantsHEVC) {
+            print("[Error] --all-intra, --b-frames, --cbr, --vbr, and --muti-pass are available only with -q h264 or -q hevc.")
+            exit(1)
+        }
+        if allIntra, bFramesOverride == true {
+            print("[Error] --b-frames on is mutually exclusive with --all-intra.")
+            exit(1)
+        }
+        if exportFormat == "mp4" && !wantsVideoBitrateOptions && quality != "pass" {
+            print("[Error] MP4 output supports only -q h264, -q hevc, -q av1, or -q pass.")
             exit(1)
         }
         if (exportFormat == "mov" || exportFormat == "mp4") && aafMode != .none {
@@ -491,9 +551,13 @@ enum ProResEncoderCLI {
             dolbyVisionXMLURL = nil
         }
 
-        let hevcOptions = wantsHEVC ? HEVCEncodeOptions(
+        let hevcOptions = (wantsHEVC || wantsH264) ? HEVCEncodeOptions(
             bitrateMbps: videoBitrateMbps ?? 0,
-            dvProfile: dolbyVisionProfile
+            dvProfile: dolbyVisionProfile,
+            allIntra: allIntra,
+            bFrames: bFramesOverride,
+            bitrateMode: bitrateMode,
+            multiPass: multiPassOverride
         ) : nil
         let av1Options = wantsAV1 ? AV1EncodeOptions(
             bitrateMbps: videoBitrateMbps ?? 0,
@@ -675,8 +739,12 @@ private func processSingleVideo(
         status = "-> Lossless remux (pass-through)"
     } else if isHEVCQuality(config.quality), let hevcOptions = config.hevcOptions {
         let dvSuffix = hevcOptions.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
-        let colorLabel = config.colorTransform == nil ? "HDR10 HEVC" : "HEVC Main10"
-        status = "-> Encoding \(colorLabel) \(String(format: "%.2f", hevcOptions.bitrateMbps)) Mb/s\(dvSuffix)"
+        let colorLabel = config.colorTransform == nil ? "HEVC" : "HEVC Main10"
+        let passLabel = hevcOptions.multiPass ? " multi-pass" : ""
+        status = "-> Encoding \(colorLabel) \(String(format: "%.2f", hevcOptions.bitrateMbps)) Mb/s\(dvSuffix)\(passLabel)"
+    } else if isH264Quality(config.quality), let h264Options = config.hevcOptions {
+        let passLabel = h264Options.multiPass ? " multi-pass" : ""
+        status = "-> Encoding H.264 \(String(format: "%.2f", h264Options.bitrateMbps)) Mb/s\(passLabel)"
     } else if isAV1Quality(config.quality), let av1Options = config.av1Options {
         let dvSuffix = av1Options.dvProfile.map { " + Dolby Vision Profile \($0.displayName)" } ?? ""
         let colorLabel = config.colorTransform == nil ? "HDR10 AV1" : "AV1 Main10"
@@ -1221,17 +1289,22 @@ private func printUsage() {
     Output format:
       -ef, --export-format <format>   Export format (default: mov)
         mov             MOV container (default)
-        mp4             MP4 container (HEVC and AV1 only; also inferred from a .mp4 -o path)
+        mp4             MP4 container (H.264, HEVC, AV1, or -q pass; also inferred from a .mp4 -o path)
         op1a            MXF OP-1a (direct VT→MXF)
         opatom          MXF OP-Atom (direct VT→MXF)
 
     Options:
       -v, --version                    Print version and exit
-      -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|hevc|av1>  Output codec/quality (default: 422hq)
-      -b, --bitrate <Mb/s>           HEVC/AV1 bitrate in Mb/s (required with -q hevc or -q av1)
+      -q, --quality <proxy|422lt|422|422hq|4444|4444xq|pass|h264|hevc|av1>  Output codec/quality (default: 422hq)
+      -b, --bitrate <Mb/s>           H.264/HEVC/AV1 bitrate in Mb/s (required with compressed output)
+      --all-intra                    H.264/HEVC only; encode every frame as an I-frame
+      --b-frames <on|off>            H.264/HEVC GOP only; B-frame reordering (default on). Optional; mutually exclusive with --all-intra. Profile 7.6 ignores this and stays I/P
+      --muti-pass <on|off>           H.264/HEVC only; VideoToolbox multi-pass (default on for GOP, off for --all-intra)
+      --cbr                          H.264/HEVC only; constant bitrate mode
+      --vbr                          H.264/HEVC only; variable bitrate mode (default)
       -dp, --dv-profile <5|76|81|84|10|101|104> Dolby Vision profile: HEVC 5/7.6/8.1/8.4 or AV1 10/10.1/10.4
-      -df, --dv-flag                  Use the reserved player-compatibility dvh1/dav1 sample entry; default output keeps hvc1/av01 for verifier compatibility
-      --outupt-video-raw,-ovr         Also write the encoded ProRes, HEVC, or AV1 elementary stream; with -q hevc -dp 76 writes Profile 7.6 BL/EL .hevc streams
+      -df, --dv-flag                  Use dvh1/dav1 for cross-compatible HEVC/AV1 profiles; Profile 5 already uses dvh1 and Profile 7.6 already uses dvhe so dvesverifier Test 100 can pass without this flag
+      --outupt-video-raw,-ovr         Also write the encoded ProRes, H.264, HEVC, or AV1 elementary stream; with -q hevc -dp 76 writes Profile 7.6 BL/EL .hevc streams
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio

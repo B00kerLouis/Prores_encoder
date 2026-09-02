@@ -11,6 +11,38 @@
 		C9F100022FE0000100000001 /* libSvtAv1Enc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXAggregateTarget section */
+		C9A110012FE1000100000001 /* Build All */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = C9A110082FE1000100000001 /* Build configuration list for PBXAggregateTarget "Build All" */;
+			buildPhases = (
+			);
+			dependencies = (
+				C9A110052FE1000100000001 /* PBXTargetDependency */,
+				C9A110072FE1000100000001 /* PBXTargetDependency */,
+			);
+			name = "Build All";
+			productName = "Build All";
+		};
+/* End PBXAggregateTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		C9A110042FE1000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C96311C62F73E1A4005C254E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C96311CD2F73E1A4005C254E;
+			remoteInfo = "prores encoder";
+		};
+		C9A110062FE1000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C96311C62F73E1A4005C254E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C9F100052FE0000100000001;
+			remoteInfo = ProResEncoderFramework;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		C9169E4B2FC6F7A1008FA3E8 /* EbConfigMacros.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbConfigMacros.h; sourceTree = "<group>"; };
 		C9169E4C2FC6F7A1008FA3E8 /* EbDebugMacros.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EbDebugMacros.h; sourceTree = "<group>"; };
@@ -176,6 +208,9 @@
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					C9A110012FE1000100000001 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 					C96311CD2F73E1A4005C254E = {
 						CreatedOnToolsVersion = 26.3;
 					};
@@ -198,11 +233,25 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				C9A110012FE1000100000001 /* Build All */,
 				C96311CD2F73E1A4005C254E /* prores encoder */,
 				C9F100052FE0000100000001 /* ProResEncoderFramework */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXTargetDependency section */
+		C9A110052FE1000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C96311CD2F73E1A4005C254E /* prores encoder */;
+			targetProxy = C9A110042FE1000100000001 /* PBXContainerItemProxy */;
+		};
+		C9A110072FE1000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C9F100052FE0000100000001 /* ProResEncoderFramework */;
+			targetProxy = C9A110062FE1000100000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXSourcesBuildPhase section */
 		C96311CA2F73E1A4005C254E /* Sources */ = {
@@ -222,6 +271,18 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		C9A110022FE1000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		C9A110032FE1000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Release;
+		};
 		C96311D32F73E1A4005C254E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -366,7 +427,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -411,7 +472,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -468,7 +529,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -526,7 +587,7 @@
 					"$(PROJECT_DIR)/ThirdParty/SVT-AV1/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.2.4;
+				MARKETING_VERSION = 1.2.5;
 				OBJROOT = "$(SRCROOT)/Build/Intermediates.noindex";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -553,6 +614,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		C9A110082FE1000100000001 /* Build configuration list for PBXAggregateTarget "Build All" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9A110022FE1000100000001 /* Debug */,
+				C9A110032FE1000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		C96311C92F73E1A4005C254E /* Build configuration list for PBXProject "prores encoder" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -100,7 +100,7 @@ private func hevcParameterSets(from sampleBuffer: CMSampleBuffer) -> [Data] {
 }
 
 /// Returns whether sample attachments mark the frame as independently decodable.
-private func sampleBufferIsSync(_ sampleBuffer: CMSampleBuffer) -> Bool {
+func sampleBufferIsSync(_ sampleBuffer: CMSampleBuffer) -> Bool {
     guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
         sampleBuffer,
         createIfNecessary: false
@@ -239,7 +239,18 @@ func sampleBufferByInjectingHEVCRPU(
     output.append(lengthPrefixData(rpuNALUnit.count, byteCount: lengthSize))
     output.append(rpuNALUnit)
 
-    return try compressedSampleBuffer(output, using: sampleBuffer)
+    guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+        throw NSError(
+            domain: "DolbyVisionRPU",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Could not read compressed sample format."]
+        )
+    }
+    return try compressedSampleBuffer(
+        output,
+        using: sampleBuffer,
+        formatDescription: formatDescription
+    )
 }
 
 /// Combines base, enhancement, metadata, and required parameter sets into one sample.
@@ -247,11 +258,15 @@ func sampleBufferByMuxingDolbyVisionProfile7(
     baseLayerSample: CMSampleBuffer,
     enhancementLayerSample: CMSampleBuffer,
     rpuNALUnit: Data,
-    hdr10Metadata: HEVCHDR10Metadata? = nil
+    hdr10Metadata: HEVCHDR10Metadata? = nil,
+    fpsInfo: FramerateInfo,
+    baseLayerBitrateBitsPerSecond: Int,
+    enhancementLayerBitrateBitsPerSecond: Int,
+    framesSinceBufferingPeriod: UInt64,
+    concatenationFlag: Bool,
+    existingFormatDescription: CMFormatDescription? = nil
 ) throws -> CMSampleBuffer {
-    guard CMSampleBufferGetFormatDescription(baseLayerSample) != nil,
-          let baseLayerData = compressedData(from: baseLayerSample),
-          let enhancementLayerData = compressedData(from: enhancementLayerSample) else {
+    guard let templateFormat = CMSampleBufferGetFormatDescription(baseLayerSample) else {
         throw NSError(
             domain: "DolbyVisionRPU",
             code: 2,
@@ -259,106 +274,77 @@ func sampleBufferByMuxingDolbyVisionProfile7(
         )
     }
 
+    let isSync = sampleBufferIsSync(baseLayerSample)
     let outputLengthSize = hevcNALUnitLengthSize(from: baseLayerSample)
-    let enhancementLengthSize = hevcNALUnitLengthSize(from: enhancementLayerSample)
-    let hdr10SEINALUnit = makeHEVCPrefixSEINALUnit(metadata: hdr10Metadata)
-    var output = Data()
-    output.reserveCapacity(
-        baseLayerData.count + enhancementLayerData.count +
-        rpuNALUnit.count + (hdr10SEINALUnit?.count ?? 0) + 128
+    let baseLayerNALUnits = try profile7PatchedLayerNALUnits(
+        from: baseLayerSample,
+        fpsInfo: fpsInfo,
+        bitrateBitsPerSecond: baseLayerBitrateBitsPerSecond,
+        hdr10Metadata: hdr10Metadata,
+        rpuNALUnit: nil,
+        isSync: isSync,
+        framesSinceBufferingPeriod: framesSinceBufferingPeriod,
+        concatenationFlag: concatenationFlag
+    )
+    let enhancementLayerNALUnits = try profile7PatchedLayerNALUnits(
+        from: enhancementLayerSample,
+        fpsInfo: fpsInfo,
+        bitrateBitsPerSecond: enhancementLayerBitrateBitsPerSecond,
+        hdr10Metadata: profile7EnhancementLayerHDR10Metadata(from: hdr10Metadata),
+        rpuNALUnit: nil,
+        isSync: isSync,
+        framesSinceBufferingPeriod: framesSinceBufferingPeriod,
+        concatenationFlag: concatenationFlag
     )
 
-    var baseCursor = 0
-    var insertedHDR10SEI = hdr10SEINALUnit == nil
-    while baseCursor + outputLengthSize <= baseLayerData.count {
-        let nalLength = readLengthPrefix(
-            baseLayerData,
-            at: baseCursor,
-            byteCount: outputLengthSize
-        )
-        baseCursor += outputLengthSize
-        guard nalLength > 0, baseCursor + nalLength <= baseLayerData.count else {
-            throw NSError(
-                domain: "DolbyVisionRPU",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid Profile 7 base-layer NAL unit."]
-            )
-        }
-        let nalu = Data(baseLayerData[baseCursor..<(baseCursor + nalLength)])
-        baseCursor += nalLength
-        guard let nalType = hevcNALType(nalu), nalType != 62, nalType != 63 else {
-            continue
-        }
-        if !insertedHDR10SEI, nalType <= 31, let hdr10SEINALUnit {
-            output.append(lengthPrefixData(hdr10SEINALUnit.count, byteCount: outputLengthSize))
-            output.append(hdr10SEINALUnit)
-            insertedHDR10SEI = true
-        }
+    var output = Data()
+    output.reserveCapacity(
+        baseLayerNALUnits.reduce(0) { $0 + $1.count } +
+        enhancementLayerNALUnits.reduce(0) { $0 + $1.count } +
+        rpuNALUnit.count + 256
+    )
+    for nalu in baseLayerNALUnits {
         output.append(lengthPrefixData(nalu.count, byteCount: outputLengthSize))
         output.append(nalu)
     }
-
-    if !insertedHDR10SEI, let hdr10SEINALUnit {
-        output.append(lengthPrefixData(hdr10SEINALUnit.count, byteCount: outputLengthSize))
-        output.append(hdr10SEINALUnit)
-    }
-
-    // Each enhancement-layer NAL except metadata is nested behind an UNSPEC63
-    // (0x7e01) header while preserving the complete original NAL.
-    if sampleBufferIsSync(enhancementLayerSample) {
-        for parameterSet in hevcParameterSets(from: enhancementLayerSample) {
-            var wrappedNALUnit = Data([0x7e, 0x01])
-            wrappedNALUnit.append(parameterSet)
-            output.append(lengthPrefixData(wrappedNALUnit.count, byteCount: outputLengthSize))
-            output.append(wrappedNALUnit)
-        }
-    }
-
-    var enhancementCursor = 0
-    while enhancementCursor + enhancementLengthSize <= enhancementLayerData.count {
-        let nalLength = readLengthPrefix(
-            enhancementLayerData,
-            at: enhancementCursor,
-            byteCount: enhancementLengthSize
-        )
-        enhancementCursor += enhancementLengthSize
-        guard nalLength > 0, enhancementCursor + nalLength <= enhancementLayerData.count else {
-            throw NSError(
-                domain: "DolbyVisionRPU",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid Profile 7 enhancement-layer NAL unit."]
-            )
-        }
-        let nalu = Data(
-            enhancementLayerData[enhancementCursor..<(enhancementCursor + nalLength)]
-        )
-        enhancementCursor += nalLength
-        if let nalType = hevcNALType(nalu), nalType == 62 || nalType == 63 {
-            continue
-        }
-        var wrappedNALUnit = Data([0x7e, 0x01])
-        wrappedNALUnit.append(nalu)
+    for nalu in enhancementLayerNALUnits {
+        let wrappedNALUnit = profile7EnhancementLayerWrappedNALUnit(nalu)
         output.append(lengthPrefixData(wrappedNALUnit.count, byteCount: outputLengthSize))
         output.append(wrappedNALUnit)
     }
-
     output.append(lengthPrefixData(rpuNALUnit.count, byteCount: outputLengthSize))
     output.append(rpuNALUnit)
-    return try compressedSampleBuffer(output, using: baseLayerSample)
+
+    let formatDescription: CMFormatDescription
+    if isSync {
+        let patchedParameterSets = try profile7PatchedParameterSets(
+            from: baseLayerSample,
+            fpsInfo: fpsInfo,
+            bitrateBitsPerSecond: baseLayerBitrateBitsPerSecond
+        )
+        formatDescription = try hevcFormatDescription(
+            from: templateFormat,
+            parameterSets: patchedParameterSets,
+            nalUnitHeaderLength: Int32(outputLengthSize)
+        )
+    } else if let existingFormatDescription {
+        formatDescription = existingFormatDescription
+    } else {
+        formatDescription = templateFormat
+    }
+    return try compressedSampleBuffer(
+        output,
+        using: baseLayerSample,
+        formatDescription: formatDescription
+    )
 }
 
 /// Rebuilds a compressed sample while preserving timing and attachments.
 private func compressedSampleBuffer(
     _ output: Data,
-    using templateSampleBuffer: CMSampleBuffer
+    using templateSampleBuffer: CMSampleBuffer,
+    formatDescription: CMFormatDescription
 ) throws -> CMSampleBuffer {
-    guard let formatDescription = CMSampleBufferGetFormatDescription(templateSampleBuffer) else {
-        throw NSError(
-            domain: "DolbyVisionRPU",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Could not read compressed sample format."]
-        )
-    }
     var blockBuffer: CMBlockBuffer?
     let blockStatus = output.withUnsafeBytes { raw -> OSStatus in
         guard let base = raw.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
@@ -1144,6 +1130,145 @@ private func appendAnnexBNALUnit(_ nalu: Data, to output: inout Data) {
     output.append(nalu)
 }
 
+/// Patches VPS/SPS from a layer sample's format description.
+private func profile7PatchedParameterSets(
+    from sample: CMSampleBuffer,
+    fpsInfo: FramerateInfo,
+    bitrateBitsPerSecond: Int
+) throws -> [Data] {
+    let parameterSets = hevcParameterSets(from: sample)
+    guard !parameterSets.isEmpty else {
+        throw HEVCBitstreamError.invalidData("HEVC keyframe is missing parameter sets.")
+    }
+    return try parameterSets.map { parameterSet in
+        guard let nalType = hevcNALType(parameterSet) else { return parameterSet }
+        switch nalType {
+        case 32:
+            return try hevcNALByPatchingProfile7VPS(parameterSet, fpsInfo: fpsInfo)
+        case 33:
+            return try hevcNALByPatchingProfile7SPS(
+                parameterSet,
+                fpsInfo: fpsInfo,
+                bitrateBitsPerSecond: bitrateBitsPerSecond
+            )
+        default:
+            return parameterSet
+        }
+    }
+}
+
+/// Builds one layer access unit with the same AUD, VUI/HRD, and timing SEI as DualWriter.
+private func profile7PatchedLayerNALUnits(
+    from sample: CMSampleBuffer,
+    fpsInfo: FramerateInfo,
+    bitrateBitsPerSecond: Int,
+    hdr10Metadata: HEVCHDR10Metadata?,
+    rpuNALUnit: Data?,
+    isSync: Bool,
+    framesSinceBufferingPeriod: UInt64,
+    concatenationFlag: Bool
+) throws -> [Data] {
+    var nalUnits: [Data] = [hevcProfile7AUDNALUnit(isSync: isSync)]
+    if isSync {
+        nalUnits.append(contentsOf: try profile7PatchedParameterSets(
+            from: sample,
+            fpsInfo: fpsInfo,
+            bitrateBitsPerSecond: bitrateBitsPerSecond
+        ))
+        nalUnits.append(
+            hevcProfile7BufferingPeriodSEINALUnit(concatenationFlag: concatenationFlag)
+        )
+    }
+    nalUnits.append(
+        hevcProfile7PictureTimingSEINALUnit(
+            framesSinceBufferingPeriod: framesSinceBufferingPeriod
+        )
+    )
+    if let hdr10SEINALUnit = makeHEVCPrefixSEINALUnit(metadata: hdr10Metadata) {
+        nalUnits.append(hdr10SEINALUnit)
+    }
+    for nalu in try hevcLengthPrefixedNALUnits(from: sample) {
+        guard let nalType = hevcNALType(nalu) else { continue }
+        switch nalType {
+        case 32, 33, 34, 35, 39, 40, 62, 63:
+            continue
+        default:
+            nalUnits.append(nalu)
+        }
+    }
+    if let rpuNALUnit {
+        nalUnits.append(rpuNALUnit)
+    }
+    return nalUnits
+}
+
+/// Nests one enhancement-layer NAL behind the Profile 7 UNSPEC63 header.
+private func profile7EnhancementLayerWrappedNALUnit(_ nalu: Data) -> Data {
+    var wrappedNALUnit = Data([0x7e, 0x01])
+    wrappedNALUnit.append(nalu)
+    return wrappedNALUnit
+}
+
+/// Recreates an HEVC format description so `hvcC` carries patched VPS/SPS.
+private func hevcFormatDescription(
+    from template: CMFormatDescription,
+    parameterSets: [Data],
+    nalUnitHeaderLength: Int32
+) throws -> CMFormatDescription {
+    guard !parameterSets.isEmpty else {
+        throw HEVCBitstreamError.invalidData("Cannot rebuild HEVC format description without parameter sets.")
+    }
+    return try withHEVCParameterSetBuffers(parameterSets) { pointers, sizes in
+        var formatDescription: CMFormatDescription?
+        let status = pointers.withUnsafeBufferPointer { pointerBuffer in
+            sizes.withUnsafeBufferPointer { sizeBuffer in
+                guard let pointerBase = pointerBuffer.baseAddress,
+                      let sizeBase = sizeBuffer.baseAddress else {
+                    return kCMFormatDescriptionError_InvalidParameter
+                }
+                return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    allocator: kCFAllocatorDefault,
+                    parameterSetCount: parameterSets.count,
+                    parameterSetPointers: pointerBase,
+                    parameterSetSizes: sizeBase,
+                    nalUnitHeaderLength: nalUnitHeaderLength,
+                    extensions: CMFormatDescriptionGetExtensions(template),
+                    formatDescriptionOut: &formatDescription
+                )
+            }
+        }
+        guard status == noErr, let formatDescription else {
+            throw HEVCBitstreamError.invalidData(
+                "Could not rebuild HEVC format description with patched parameter sets (\(status))."
+            )
+        }
+        return formatDescription
+    }
+}
+
+/// Keeps `Data` bytes alive while Core Media reads HEVC parameter-set pointers.
+private func withHEVCParameterSetBuffers<T>(
+    _ parameterSets: [Data],
+    _ body: ([UnsafePointer<UInt8>], [Int]) throws -> T
+) throws -> T {
+    func rec(
+        _ index: Int,
+        _ pointers: [UnsafePointer<UInt8>],
+        _ sizes: [Int]
+    ) throws -> T {
+        if index == parameterSets.count {
+            return try body(pointers, sizes)
+        }
+        return try parameterSets[index].withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else {
+                throw HEVCBitstreamError.invalidData("HEVC parameter set buffer is empty.")
+            }
+            return try rec(index + 1, pointers + [base], sizes + [parameterSets[index].count])
+        }
+    }
+    return try rec(0, [], [])
+}
+
 /// Writes synchronized base-layer and enhancement-layer Annex B elementary streams.
 final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
     let baseLayerURL: URL
@@ -1205,31 +1330,53 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         try? finish()
     }
 
+    /// Truncates both elementary streams so a later full pass can replace an earlier one.
+    func resetForRewrite() throws {
+        guard !isClosed else {
+            throw HEVCBitstreamError.invalidData(
+                "Profile 7.6 BL/EL elementary-stream files are already closed."
+            )
+        }
+        guard frameIndex > 0 else { return }
+        try baseLayerHandle.truncate(atOffset: 0)
+        try enhancementLayerHandle.truncate(atOffset: 0)
+        try baseLayerHandle.seek(toOffset: 0)
+        try enhancementLayerHandle.seek(toOffset: 0)
+        frameIndex = 0
+        framesSinceBufferingPeriod = 0
+    }
+
     /// Writes one synchronized access unit to each elementary stream.
     func write(frame: DolbyVisionProfile7EncodedFrame, hdr10Metadata: HEVCHDR10Metadata?) throws {
         let isSync = sampleBufferIsSync(frame.baseLayerSample)
         let framesSinceBPForPicture = isSync ? 0 : framesSinceBufferingPeriod + 1
         let concatenationFlag = isSync && frameIndex > 0
 
-        let baseAccessUnit = try makeAccessUnit(
-            sample: frame.baseLayerSample,
-            isSync: isSync,
-            framesSinceBufferingPeriod: framesSinceBPForPicture,
-            concatenationFlag: concatenationFlag,
-            bitrateBitsPerSecond: baseLayerBitrateBitsPerSecond,
-            hdr10Metadata: hdr10Metadata,
-            rpuNALUnit: nil
+        let baseAccessUnit = annexBAccessUnit(
+            from: try profile7PatchedLayerNALUnits(
+                from: frame.baseLayerSample,
+                fpsInfo: fpsInfo,
+                bitrateBitsPerSecond: baseLayerBitrateBitsPerSecond,
+                hdr10Metadata: hdr10Metadata,
+                rpuNALUnit: nil,
+                isSync: isSync,
+                framesSinceBufferingPeriod: framesSinceBPForPicture,
+                concatenationFlag: concatenationFlag
+            )
         )
         baseLayerHandle.write(baseAccessUnit)
 
-        let enhancementAccessUnit = try makeAccessUnit(
-            sample: frame.enhancementLayerSample,
-            isSync: isSync,
-            framesSinceBufferingPeriod: framesSinceBPForPicture,
-            concatenationFlag: concatenationFlag,
-            bitrateBitsPerSecond: enhancementLayerBitrateBitsPerSecond,
-            hdr10Metadata: profile7EnhancementLayerHDR10Metadata(from: hdr10Metadata),
-            rpuNALUnit: frame.rpuNALUnit
+        let enhancementAccessUnit = annexBAccessUnit(
+            from: try profile7PatchedLayerNALUnits(
+                from: frame.enhancementLayerSample,
+                fpsInfo: fpsInfo,
+                bitrateBitsPerSecond: enhancementLayerBitrateBitsPerSecond,
+                hdr10Metadata: profile7EnhancementLayerHDR10Metadata(from: hdr10Metadata),
+                rpuNALUnit: frame.rpuNALUnit,
+                isSync: isSync,
+                framesSinceBufferingPeriod: framesSinceBPForPicture,
+                concatenationFlag: concatenationFlag
+            )
         )
         enhancementLayerHandle.write(enhancementAccessUnit)
 
@@ -1251,74 +1398,11 @@ final class DolbyVisionProfile7DualWriter: @unchecked Sendable {
         enhancementLayerHandle.closeFile()
     }
 
-    /// Builds one Annex B access unit with patched headers and timing SEI messages.
-    private func makeAccessUnit(
-        sample: CMSampleBuffer,
-        isSync: Bool,
-        framesSinceBufferingPeriod: UInt64,
-        concatenationFlag: Bool,
-        bitrateBitsPerSecond: Int,
-        hdr10Metadata: HEVCHDR10Metadata?,
-        rpuNALUnit: Data?
-    ) throws -> Data {
+    /// Serializes one layer access unit as Annex B.
+    private func annexBAccessUnit(from nalUnits: [Data]) -> Data {
         var output = Data()
-        appendAnnexBNALUnit(hevcProfile7AUDNALUnit(isSync: isSync), to: &output)
-
-        if isSync {
-            let parameterSets = hevcParameterSets(from: sample)
-            guard !parameterSets.isEmpty else {
-                throw HEVCBitstreamError.invalidData("HEVC keyframe is missing parameter sets.")
-            }
-            for parameterSet in parameterSets {
-                guard let nalType = hevcNALType(parameterSet) else { continue }
-                let patchedParameterSet: Data
-                switch nalType {
-                case 32:
-                    patchedParameterSet = try hevcNALByPatchingProfile7VPS(
-                        parameterSet,
-                        fpsInfo: fpsInfo
-                    )
-                case 33:
-                    patchedParameterSet = try hevcNALByPatchingProfile7SPS(
-                        parameterSet,
-                        fpsInfo: fpsInfo,
-                        bitrateBitsPerSecond: bitrateBitsPerSecond
-                    )
-                default:
-                    patchedParameterSet = parameterSet
-                }
-                appendAnnexBNALUnit(patchedParameterSet, to: &output)
-            }
-            appendAnnexBNALUnit(
-                hevcProfile7BufferingPeriodSEINALUnit(
-                    concatenationFlag: concatenationFlag
-                ),
-                to: &output
-            )
-        }
-
-        appendAnnexBNALUnit(
-            hevcProfile7PictureTimingSEINALUnit(
-                framesSinceBufferingPeriod: framesSinceBufferingPeriod
-            ),
-            to: &output
-        )
-        if let hdr10SEINALUnit = makeHEVCPrefixSEINALUnit(metadata: hdr10Metadata) {
-            appendAnnexBNALUnit(hdr10SEINALUnit, to: &output)
-        }
-
-        for nalu in try hevcLengthPrefixedNALUnits(from: sample) {
-            guard let nalType = hevcNALType(nalu) else { continue }
-            switch nalType {
-            case 32, 33, 34, 35, 39, 40, 62, 63:
-                continue
-            default:
-                appendAnnexBNALUnit(nalu, to: &output)
-            }
-        }
-
-        if let rpuNALUnit {
-            appendAnnexBNALUnit(rpuNALUnit, to: &output)
+        for nalu in nalUnits {
+            appendAnnexBNALUnit(nalu, to: &output)
         }
         return output
     }
