@@ -8,7 +8,8 @@ import Foundation
 /// original output after the writer succeeds.
 func includeGeneratedCMUXMLInProResMOV(
     outputURL: URL,
-    xmlURL: URL
+    xmlURL: URL,
+    progress: ProgressBar? = nil
 ) async -> Bool {
     let fileManager = FileManager.default
     let temporaryURL = outputURL.deletingLastPathComponent().appendingPathComponent(
@@ -20,6 +21,7 @@ func includeGeneratedCMUXMLInProResMOV(
         url: outputURL,
         options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
     )
+    progress?.prepareForLog()
     print("[CMU] Including generated XML as ProRes PHDR metadata without re-encoding video.")
     let success = await encodeMOV(
         asset: encodedAsset,
@@ -34,7 +36,8 @@ func includeGeneratedCMUXMLInProResMOV(
         av1Options: nil,
         colorSpace: nil,
         fpsInfo: await framerateInfo(from: encodedAsset),
-        colorTransform: nil
+        colorTransform: nil,
+        progress: progress?.phase(.metadata)
     )
     guard success else {
         print("[Failed] Could not include generated CMU XML in \(outputURL.lastPathComponent).")
@@ -48,6 +51,7 @@ func includeGeneratedCMUXMLInProResMOV(
             backupItemName: nil,
             options: []
         )
+        progress?.completePhase(.metadata)
         print("[CMU] Included XML -> \(outputURL.path)")
         return true
     } catch {

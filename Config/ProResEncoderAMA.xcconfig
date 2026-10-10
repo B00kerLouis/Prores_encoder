@@ -1,0 +1,13 @@
+// Search paths for the ProResEncoderAMA bundle. SDK files live inside the project.
+HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/prores\ encoder/include $(SRCROOT)/prores\ encoder/avid_plugin $(SRCROOT)/ThirdParty/AvidSDK/amasdk/include $(SRCROOT)/ThirdParty/AvidSDK/acfsdk/inc $(SRCROOT)/ThirdParty/AvidSDK/acfsdk/utils $(SRCROOT)/ThirdParty/AvidSDK/aafsdk/include
+LIBRARY_SEARCH_PATHS = $(inherited) $(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/release $(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/debug
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(BUILT_PRODUCTS_DIR) $(PROJECT_DIR)/Frameworks
+CLANG_ENABLE_MODULES = NO
+CLANG_ENABLE_OBJC_ARC = NO
+WRAPPER_EXTENSION = avx
+PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.ama
+ARCHS = arm64
+SKIP_INSTALL = YES
+
+// AMA-only HDR frame processing; no CLI/Framework linker changes.
+OTHER_LDFLAGS = $(inherited) -framework Metal

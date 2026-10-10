@@ -75,6 +75,7 @@ enum ProResEncoderCLI {
         var inputFolderPath = ""
         var inputXMLPath    = ""
         var inputAAFPath    = ""
+        var recoveryMoviePath = ""
         var outputPath      = ""
         var quality         = "422hq"
         var extraAudioPath  = ""
@@ -138,6 +139,8 @@ enum ProResEncoderCLI {
                 inputXMLPath = requireValue(for: args[idx])
             case "--input-aaf", "-ia", "-aaf":
                 inputAAFPath = requireValue(for: args[idx])
+            case "--resume-recovery":
+                recoveryMoviePath = requireValue(for: args[idx])
             case "-o", "--output":
                 outputPath = requireValue(for: args[idx])
             case "-q", "-quality", "--quality":
@@ -521,6 +524,10 @@ enum ProResEncoderCLI {
             print("[Error] MP4 output supports only -q h264, -q hevc, -q av1, or -q pass.")
             exit(1)
         }
+        if quality == "pass" && (exportFormat == "op1a" || exportFormat == "opatom") {
+            print("[Error] MXF output does not support -q pass; choose a ProRes quality to write valid RDD-36 essence.")
+            exit(1)
+        }
         if (exportFormat == "mov" || exportFormat == "mp4") && aafMode != .none {
             print("[Error] AAF (-ea / -ea-all) is only available with MXF output formats (op1a / opatom)."); exit(1)
         }
@@ -580,7 +587,6 @@ enum ProResEncoderCLI {
         let fm = FileManager.default
         let outputURL = URL(fileURLWithPath: outputPath)
         let isOutFile = !outputURL.pathExtension.isEmpty
-        let validExts: Set<String> = ["mp4", "mov", "m4v", "mxf", "avi", "mkv"]
 
         var extraAudioURL: URL? = nil
         if !extraAudioPath.isEmpty {
@@ -652,29 +658,74 @@ enum ProResEncoderCLI {
             guard fm.fileExists(atPath: inputURL.path) else {
                 print("[Error] Input file not found: \(inputFilePath)"); exit(1)
             }
-            guard validExts.contains(inputURL.pathExtension.lowercased()) else {
-                print("[Error] Unsupported format: .\(inputURL.pathExtension)."); exit(1)
-            }
-            let asset = AVURLAsset(url: inputURL)
+            let decodableSource = await makeDecodableSource(for: inputURL)
+            let asset = decodableSource.asset
             let baseName = inputURL.deletingPathExtension().lastPathComponent
-        let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+            let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+            if !recoveryMoviePath.isEmpty {
+                guard config.exportFormat == "mov" || config.exportFormat == "mp4" else {
+                    print("[Error] --resume-recovery supports MOV or MP4 output only.")
+                    exit(1)
+                }
+                guard extraAudioURL == nil,
+                      !config.audioReplace,
+                      !config.deleteSourceAudio,
+                      config.dolbyVisionXMLURL == nil,
+                      config.cmuMasteringNits == nil,
+                      !config.outputVideoRaw,
+                      config.hevcOptions?.dvProfile == nil,
+                      config.av1Options?.dvProfile == nil else {
+                    print("[Error] --resume-recovery currently requires no replacement audio, CMU, raw video, or Dolby Vision metadata.")
+                    exit(1)
+                }
+                let recoveryURL = URL(fileURLWithPath: recoveryMoviePath)
+                guard fm.fileExists(atPath: recoveryURL.path) else {
+                    print("[Error] Recovery movie not found: \(recoveryMoviePath)")
+                    exit(1)
+                }
+                let finalOut = isOutFile
+                    ? outputURL.deletingPathExtension().appendingPathExtension(movieExtension)
+                    : outputURL.appendingPathComponent("\(baseName).\(movieExtension)")
+                let sourceColorSpace: SourceColorSpace?
+                if config.quality != "pass",
+                   let track = try? await asset.loadTracks(withMediaType: .video).first {
+                    sourceColorSpace = await detectColorSpace(from: track)
+                } else {
+                    sourceColorSpace = nil
+                }
+                let success = await resumeMOVFromRecoveryFile(
+                    sourceURL: decodableSource.url,
+                    recoveryMovieURL: recoveryURL,
+                    outputURL: finalOut,
+                    quality: config.quality,
+                    forcedOutputStartTimecode: config.forcedOutputStartTimecode,
+                    hevcOptions: config.hevcOptions,
+                    av1Options: config.av1Options,
+                    colorSpace: sourceColorSpace,
+                    fpsInfo: await framerateInfo(from: asset),
+                    colorTransform: config.colorTransform,
+                    useDolbyVisionCodecTag: config.dvFlag,
+                    container: config.exportFormat == "mp4" ? .mp4 : .mov
+                )
+                exit(success && fileHasContent(finalOut) ? 0 : 1)
+            }
             if isOutFile {
                 let finalOut = outputURL
                     .deletingPathExtension()
                     .appendingPathExtension(movieExtension)
-                _ = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
+                let result = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
                                              extraAudioURL: extraAudioURL, assetName: baseName,
                                              config: config)
-                exit(encodingOutputExists(for: finalOut, config: config) ? 0 : 1)
+                exit(result.success ? 0 : 1)
             } else {
                 try? fm.createDirectory(at: outputURL, withIntermediateDirectories: true)
                 let finalOut = outputURL.appendingPathComponent(
                     "\(baseName).\(movieExtension)"
                 )
-                _ = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
+                let result = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
                                              extraAudioURL: extraAudioURL, assetName: baseName,
                                              config: config)
-                exit(encodingOutputExists(for: finalOut, config: config) ? 0 : 1)
+                exit(result.success ? 0 : 1)
             }
         }
 
@@ -688,10 +739,57 @@ enum ProResEncoderCLI {
             guard !isOutFile else {
                 print("[Error] Cannot batch-encode multiple files to a single output file."); exit(1)
             }
+            if (config.exportFormat == "op1a" || config.exportFormat == "opatom"),
+               folderURL.standardizedFileURL.resolvingSymlinksInPath()
+                    == outputURL.standardizedFileURL.resolvingSymlinksInPath() {
+                print("[Error] MXF batch output must use a different directory from its input folder to prevent source-media replacement.")
+                exit(1)
+            }
             try? fm.createDirectory(at: outputURL, withIntermediateDirectories: true)
-            let files = (try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
-            let videos = files.filter { validExts.contains($0.pathExtension.lowercased()) }
+            let files = (try? fm.contentsOfDirectory(
+                at: folderURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            var videos: [URL] = []
+            for file in files {
+                guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                    continue
+                }
+                let candidate = AVURLAsset(url: file)
+                if ((try? await candidate.loadTracks(withMediaType: .video)) ?? []).isEmpty == false {
+                    videos.append(file)
+                }
+            }
+            videos.sort { $0.lastPathComponent < $1.lastPathComponent }
             guard !videos.isEmpty else { print("[Info] No supported video files found."); exit(0) }
+            let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+            let destinations = videos.map {
+                outputURL.appendingPathComponent($0.deletingPathExtension().lastPathComponent)
+                    .appendingPathExtension(movieExtension).standardizedFileURL.resolvingSymlinksInPath()
+            }
+            guard Set(destinations).count == destinations.count,
+                  Set(destinations).isDisjoint(with: videos.map {
+                      $0.standardizedFileURL.resolvingSymlinksInPath()
+                  }) else {
+                print("[Error] Batch output names collide with each other or an input file.")
+                exit(1)
+            }
+            var batchUnits = 1 // Reserve sequence AAF/final job completion.
+            for file in videos {
+                let units = encodePipelineProgressUnits(
+                    frames: await estimateFrameCount(asset: AVURLAsset(url: file)),
+                    quality: config.quality, cmuMasteringNits: config.cmuMasteringNits,
+                    includeGeneratedCMU: config.cmuInclude,
+                    hasExternalDolbyVisionXML: config.dolbyVisionXMLURL != nil,
+                    exportFormat: config.exportFormat,
+                    multiPass: config.hevcOptions?.multiPass == true
+                )
+                let sum = batchUnits.addingReportingOverflow(units)
+                batchUnits = sum.overflow ? Int.max : sum.partialValue
+            }
+            let batchProgress = ProgressBar(total: batchUnits)
+            var batchSucceeded = true
             var sequencedAAFClips: [AAFClipInfo] = []
             for file in videos {
                 let baseName = file.deletingPathExtension().lastPathComponent
@@ -699,13 +797,16 @@ enum ProResEncoderCLI {
                 let finalOut = outputURL.appendingPathComponent(
                     "\(baseName).\(movieExtension)"
                 )
-                let asset    = AVURLAsset(url: file)
-                if let clip = await processSingleVideo(inputAsset: asset, outputURL: finalOut,
-                                                       extraAudioURL: nil, assetName: baseName,
+                let decodableSource = await makeDecodableSource(for: file)
+                defer { decodableSource.cleanup() }
+                let result = await processSingleVideo(inputAsset: decodableSource.asset,
+                                                       outputURL: finalOut,
+                                                       extraAudioURL: extraAudioURL, assetName: baseName,
                                                        config: config,
-                                                       deferSequenceAAF: config.aafMode == .sequence) {
-                    sequencedAAFClips.append(clip)
-                }
+                                                       deferSequenceAAF: config.aafMode == .sequence,
+                                                       parentProgress: batchProgress)
+                batchSucceeded = batchSucceeded && result.success
+                if let clip = result.clip { sequencedAAFClips.append(clip) }
             }
             if config.aafMode == .sequence, !sequencedAAFClips.isEmpty {
                 let sequenceName = folderURL.lastPathComponent.isEmpty ? "ProRes Sequence" : folderURL.lastPathComponent
@@ -713,14 +814,22 @@ enum ProResEncoderCLI {
                 print("[AAF] Generating sequence AAF...")
                 if !generateAAFWithSwiftAAF(clips: sequencedAAFClips, outputPath: aafPath, sequenceName: sequenceName) {
                     print("[Failed] AAF generation failed.")
+                    batchSucceeded = false
                 }
             }
-            exit(0)
+            if batchSucceeded { batchProgress.finish() } else { batchProgress.endLine() }
+            exit(batchSucceeded ? 0 : 1)
         }
     }
 }
 
 // MARK: - Single Video Processor
+
+private struct SingleVideoResult {
+    let success: Bool
+    let clip: AAFClipInfo?
+    static let failure = SingleVideoResult(success: false, clip: nil)
+}
 
 private func processSingleVideo(
     inputAsset:    AVAsset,
@@ -728,12 +837,34 @@ private func processSingleVideo(
     extraAudioURL: URL?,
     assetName:     String,
     config:        CLIConfig,
-    deferSequenceAAF: Bool = false
-) async -> AAFClipInfo? {
+    deferSequenceAAF: Bool = false,
+    parentProgress: ProgressBar? = nil
+) async -> SingleVideoResult {
     let fm = FileManager.default
-    print("\n[Processing]: \(assetName)")
+    let isMXF = config.exportFormat == "op1a" || config.exportFormat == "opatom"
+    let outputDir = outputURL.deletingLastPathComponent()
+    try? fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-    let isMXF  = (config.exportFormat == "op1a" || config.exportFormat == "opatom")
+    let estimatedFrames = await estimateFrameCount(asset: inputAsset)
+    let progress = makeEncodePipelineProgressBar(
+        frames: estimatedFrames,
+        quality: config.quality,
+        cmuMasteringNits: config.cmuMasteringNits,
+        includeGeneratedCMU: config.cmuInclude,
+        hasExternalDolbyVisionXML: config.dolbyVisionXMLURL != nil,
+        exportFormat: config.exportFormat,
+        multiPass: config.hevcOptions?.multiPass == true,
+        parent: parentProgress
+    )
+    var pipelineSucceeded = false
+    defer {
+        if !pipelineSucceeded {
+            progress?.endLine()
+        }
+    }
+
+    print("[Processing]: \(assetName)")
+
     let status: String
     if config.quality == "pass" {
         status = "-> Lossless remux (pass-through)"
@@ -764,9 +895,6 @@ private func processSingleVideo(
     }
     print(status + audioStatus + "...")
 
-    let outputDir = outputURL.deletingLastPathComponent()
-    try? fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
-
     if let masteringPeakNits = config.cmuMasteringNits {
         do {
             try await cmuPreflight(
@@ -778,7 +906,7 @@ private func processSingleVideo(
             )
         } catch {
             print("[Failed] CMU preflight: \(error.localizedDescription)")
-            return nil
+            return .failure
         }
     }
 
@@ -786,7 +914,7 @@ private func processSingleVideo(
     if isMXF {
         let basename = outputURL.deletingPathExtension().lastPathComponent
         guard let urlAsset = inputAsset as? AVURLAsset else {
-            print("[Failed] MXF encode requires a file-based asset."); return nil
+            print("[Failed] MXF encode requires a file-based asset."); return .failure
         }
 
         let stale = outputDir.appendingPathComponent(basename + ".mxf")
@@ -808,17 +936,10 @@ private func processSingleVideo(
             audioOverrideURL: (config.audioReplace || config.deleteSourceAudio) ? extraAudioURL : nil,
             deleteSourceAudio: config.deleteSourceAudio,
             colorTransform: config.colorTransform,
-            outputVideoRaw: config.outputVideoRaw)
+            outputVideoRaw: config.outputVideoRaw,
+            progress: progress)
 
         if result.success {
-            print("[MXF] Encoded \(result.framesEncoded) frames at " +
-                  "\(String(format: "%.1f", result.fps)) fps")
-            print("[Success] MXF written for '\(assetName)'.")
-            if config.outputVideoRaw,
-               let rawPath = result.paths.first(where: { $0.hasSuffix("_raw.prores") }) {
-                print("[Raw] Video elementary stream written: \(rawPath)")
-            }
-
             if let masteringPeakNits = config.cmuMasteringNits,
                let videoPath = result.paths.first(where: { $0.hasSuffix("_v.mxf") })
                     ?? result.paths.first(where: { $0.hasSuffix(".mxf") }) {
@@ -829,12 +950,21 @@ private func processSingleVideo(
                         sidecarBaseURL: outputDir.appendingPathComponent(basename),
                         quality: config.quality,
                         masteringPeakNits: masteringPeakNits,
-                        forcedStartTimecode: config.forcedOutputStartTimecode
+                        forcedStartTimecode: config.forcedOutputStartTimecode,
+                        progress: progress
                     )
                 } catch {
                     print("[Failed] CMU analysis: \(error.localizedDescription)")
-                    return nil
+                    return .failure
                 }
+            }
+
+            print("[MXF] Encoded \(result.framesEncoded) frames at " +
+                  "\(String(format: "%.1f", result.fps)) fps")
+            print("[Success] MXF written for '\(assetName)'.")
+            if config.outputVideoRaw,
+               let rawPath = result.paths.first(where: { $0.hasSuffix("_raw.prores") }) {
+                print("[Raw] Video elementary stream written: \(rawPath)")
             }
 
             if config.aafMode != .none && !result.paths.isEmpty {
@@ -849,15 +979,18 @@ private func processSingleVideo(
                 let audioTrackCount: Int
                 let audioChannelCounts: [Int]
                 if isOPAtom {
-                    videoMXF  = result.paths.first { $0.hasSuffix("_v.mxf") } ?? result.paths[0]
-                    audioMXFs = result.paths.filter { $0.hasSuffix(".mxf") && !$0.hasSuffix("_v.mxf") }.sorted()
+                    videoMXF = result.paths.first { $0.hasSuffix("_v.mxf") }
+                        ?? result.paths[0]
+                    audioMXFs = result.paths
+                        .filter { $0.hasSuffix(".mxf") && !$0.hasSuffix("_v.mxf") }
+                        .sorted()
                     audioTrackCount = audioMXFs.count
                     audioChannelCounts = audioChannelCountsForOPAtom(
                         sourceChannels: result.sourceAudioChannels,
                         channelsPerFile: config.audioCHperFile,
                         fileCount: audioTrackCount)
                 } else {
-                    videoMXF  = result.paths[0]
+                    videoMXF = result.paths[0]
                     audioMXFs = []  // OP-1a: audio is inside the video MXF
                     let ch = result.sourceAudioChannels
                     audioTrackCount = ch > 0 ? 1 : 0
@@ -892,20 +1025,30 @@ private func processSingleVideo(
                     totalAudioSamples: totalAudioSamples)
 
                 if deferSequenceAAF {
-                    return clip
+                    progress?.finish()
+                    pipelineSucceeded = true
+                    return SingleVideoResult(success: true, clip: clip)
                 }
 
                 print("[AAF] Generating AAF...")
                 let aafPath = outputDir.appendingPathComponent(basename + ".aaf").path
                 let ok = generateAAFWithSwiftAAF(clips: [clip], outputPath: aafPath, sequenceName: basename)
-                if !ok { print("[Failed] AAF generation failed.") }
-                return clip
+                guard ok else {
+                    print("[Failed] AAF generation failed.")
+                    return .failure
+                }
+                progress?.finish()
+                pipelineSucceeded = true
+                return SingleVideoResult(success: true, clip: clip)
             }
+            progress?.finish()
+            pipelineSucceeded = true
+            return SingleVideoResult(success: true, clip: nil)
         } else {
             print("[Failed] MXF encode failed: \(result.error ?? "unknown")")
         }
 
-        return nil
+        return .failure
     }
 
     let cs: SourceColorSpace?
@@ -941,14 +1084,14 @@ private func processSingleVideo(
                 colorTransform: config.colorTransform,
                 dolbyVisionProfile: config.hevcOptions?.dvProfile ?? config.av1Options?.dvProfile,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: config.forcedOutputStartTimecode
+                forcedStartTimecode: config.forcedOutputStartTimecode,
+                progress: progress
             )
             generatedCMUArtifacts = artifacts
             dolbyVisionXMLURL = artifacts.xmlURL
         } catch {
             print("[Failed] CMU analysis: \(error.localizedDescription)")
-            try? fm.removeItem(at: outputURL)
-            return nil
+            return .failure
         }
     }
 
@@ -966,12 +1109,12 @@ private func processSingleVideo(
             colorTransform: config.colorTransform,
             useDolbyVisionCodecTag: config.dvFlag,
         container: config.exportFormat == "mp4" ? .mp4 : .mov,
-        outputVideoRaw: config.outputVideoRaw)
+        outputVideoRaw: config.outputVideoRaw,
+        progress: progress)
 
     guard success else {
         print("[Failed] \(assetName)")
-        try? fm.removeItem(at: outputURL)
-        return nil
+        return .failure
     }
     if let masteringPeakNits = config.cmuMasteringNits,
        generatedCMUArtifacts == nil {
@@ -982,13 +1125,13 @@ private func processSingleVideo(
                 sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: config.quality,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: config.forcedOutputStartTimecode
+                forcedStartTimecode: config.forcedOutputStartTimecode,
+                progress: progress
             )
             generatedCMUArtifacts = artifacts
         } catch {
             print("[Failed] CMU analysis: \(error.localizedDescription)")
-            try? fm.removeItem(at: outputURL)
-            return nil
+            return .failure
         }
     }
     if config.cmuInclude,
@@ -997,14 +1140,16 @@ private func processSingleVideo(
        let xmlURL = generatedCMUArtifacts?.xmlURL {
         guard await includeGeneratedCMUXMLInProResMOV(
             outputURL: outputURL,
-            xmlURL: xmlURL
+            xmlURL: xmlURL,
+            progress: progress
         ) else {
-            try? fm.removeItem(at: outputURL)
-            return nil
+            return .failure
         }
     }
     print("[Success] -> \(outputURL.path)")
-    return nil
+    progress?.finish()
+    pipelineSucceeded = true
+    return SingleVideoResult(success: true, clip: nil)
 }
 
 // MARK: - Helpers
@@ -1220,8 +1365,6 @@ private func processTimelineComposition(
     config: CLIConfig
 ) async -> Bool {
     let fm = FileManager.default
-    print("\n[Timeline Bounce]: \(assetName)")
-
     guard config.exportFormat == "mov" else {
         print("[Failed] Timeline bounce currently supports MOV output only.")
         return false
@@ -1230,6 +1373,22 @@ private func processTimelineComposition(
     let outputDir = outputURL.deletingLastPathComponent()
     try? fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
+    let progress = makeEncodePipelineProgressBar(
+        frames: Int64(max(timelineFrameCount(from: descriptor), 1)),
+        quality: config.quality,
+        cmuMasteringNits: config.cmuMasteringNits,
+        includeGeneratedCMU: config.cmuInclude,
+        hasExternalDolbyVisionXML: false,
+        exportFormat: config.exportFormat
+    )
+    var pipelineSucceeded = false
+    defer {
+        if !pipelineSucceeded {
+            progress?.endLine()
+        }
+    }
+    print("[Timeline Bounce]: \(assetName)")
+
     let success = await encodeTimelineMOV(
         composition: composition,
         descriptor: descriptor,
@@ -1237,10 +1396,10 @@ private func processTimelineComposition(
         quality: config.quality,
         forcedOutputStartTimecode: config.forcedOutputStartTimecode,
         deleteSourceAudio: config.deleteSourceAudio,
-        colorTransform: config.colorTransform)
+        colorTransform: config.colorTransform,
+        progress: progress)
 
     guard success else {
-        try? fm.removeItem(at: outputURL)
         print("[Failed] \(assetName)")
         return false
     }
@@ -1250,7 +1409,8 @@ private func processTimelineComposition(
             generatedCMUArtifacts = try await runCMUAnalysisOnOutput(
                 outputURL: outputURL,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: config.forcedOutputStartTimecode
+                forcedStartTimecode: config.forcedOutputStartTimecode,
+                progress: progress
             )
         } catch {
             print("[Failed] CMU analysis: \(error.localizedDescription)")
@@ -1261,12 +1421,15 @@ private func processTimelineComposition(
        let xmlURL = generatedCMUArtifacts?.xmlURL {
         guard await includeGeneratedCMUXMLInProResMOV(
             outputURL: outputURL,
-            xmlURL: xmlURL
+            xmlURL: xmlURL,
+            progress: progress
         ) else {
             return false
         }
     }
     print("[Success] -> \(outputURL.path)")
+    progress?.finish()
+    pipelineSucceeded = true
     return true
 }
 
@@ -1281,6 +1444,8 @@ private func printUsage() {
       -if <folder>        Batch folder
       -xml <file>         XML timeline
       -aaf <file>           AAF timeline, parsed natively then bounced to MOV
+      --resume-recovery <partial.mov|partial.mp4>
+                          Reuse scanner-verified completed fragments after an interruption
 
     Transform mode:
       --transform-timeline,-tt  AAF|XML                 Convert timeline with native Swift parser/writers
@@ -1303,8 +1468,9 @@ private func printUsage() {
       --cbr                          H.264/HEVC only; constant bitrate mode
       --vbr                          H.264/HEVC only; variable bitrate mode (default)
       -dp, --dv-profile <5|76|81|84|10|101|104> Dolby Vision profile: HEVC 5/7.6/8.1/8.4 or AV1 10/10.1/10.4
-      -df, --dv-flag                  Use dvh1/dav1 for cross-compatible HEVC/AV1 profiles; Profile 5 already uses dvh1 and Profile 7.6 already uses dvhe so dvesverifier Test 100 can pass without this flag
+      -df, --dv-flag                  Use dav1 for valid AV1 Profile 10/10.4 delivery; Profile 5/7.6 use dvh1/dvhe, while Profile 8.1/8.4/10.1 retain hvc1/av01 for dvesverifier Test 100 conformance
       --outupt-video-raw,-ovr         Also write the encoded ProRes, H.264, HEVC, or AV1 elementary stream; with -q hevc -dp 76 writes Profile 7.6 BL/EL .hevc streams
+      --resume-recovery <file>         Resume eligible MOV/MP4 recovery media with -i and -o; cannot be combined with CMU, Dolby Vision, raw video, or replacement audio
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio

@@ -554,7 +554,7 @@ private struct NativeDolbyVisionRPUBuilder {
                     anchorPower: level4.anchorPower
                 )))
                 let rpu = try buildFrameRPU(
-                    sceneRefresh: !profile.isProfile76 || frameOffset == 0,
+                    sceneRefresh: frameOffset == 0,
                     shotBlocks: shot.blocks,
                     frameBlocks: frameBlocks
                 )

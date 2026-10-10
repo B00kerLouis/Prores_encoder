@@ -216,7 +216,8 @@ final class CMUMetalAnalyzer {
         source: CMUAnalysisSource,
         masteringPeakNits: Float,
         timecode: CMUTimecodeReference,
-        colorTransform: ResolvedColorTransform? = nil
+        colorTransform: ResolvedColorTransform? = nil,
+        progress: ProgressBar? = nil
     ) async throws -> CMUAnalysisDocument {
         let asset = AVURLAsset(
             url: url,
@@ -336,6 +337,7 @@ final class CMUMetalAnalyzer {
                 )
             )
             decodedFrameIndex += 1
+            progress?.phase(.analysis).increment()
         }
 
         for completed in pending {
@@ -362,6 +364,7 @@ final class CMUMetalAnalyzer {
         let maxFALL = Int((frameStats.map(\.avgLumaNits).max() ?? 0).rounded())
         let frameCount = Int64(frameStats.count)
 
+        progress?.completePhase(.analysis)
         return CMUAnalysisDocument(
             schemaVersion: "5.1.0",
             generatedAtUTC: ISO8601DateFormatter().string(from: Date()),

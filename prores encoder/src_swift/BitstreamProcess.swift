@@ -9,30 +9,31 @@ import VideoToolbox
 private let kCMVideoCodecType_AppleProRes4444XQ: CMVideoCodecType = 0x61703478 // 'ap4x'
 
 // MARK: - MXF Color UL Constants (SMPTE 377-1)
-// Values mirror the identifiers declared by the MXF encoder interface.
+// These are the color-value ULs carried by Generic Picture Essence Descriptors.
+// They must not be confused with the local-set primer ULs for descriptor keys.
 
 enum MXFColorUL {
     static let primariesBT709:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x06,
                                               0x04,0x01,0x01,0x01,0x03,0x03,0x00,0x00])
     static let primariesBT2020: Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
-                                              0x04,0x01,0x01,0x01,0x03,0x03,0x00,0x00])
+                                              0x04,0x01,0x01,0x01,0x03,0x04,0x00,0x00])
     static let primariesP3D65:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
                                               0x04,0x01,0x01,0x01,0x03,0x06,0x00,0x00])
     static let transferBT709:   Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x01,
                                               0x04,0x01,0x01,0x01,0x01,0x02,0x00,0x00])
     static let transferST2084:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
-                                              0x04,0x01,0x01,0x01,0x01,0x08,0x00,0x00])
+                                              0x04,0x01,0x01,0x01,0x01,0x0a,0x00,0x00])
     static let transferHLG:     Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
-                                              0x04,0x01,0x01,0x01,0x01,0x0e,0x00,0x00])
-    static let transferST428:   Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
                                               0x04,0x01,0x01,0x01,0x01,0x0b,0x00,0x00])
-    static let transferLinear:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
-                                              0x04,0x01,0x01,0x01,0x01,0x09,0x00,0x00])
+    static let transferST428:   Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x08,
+                                              0x04,0x01,0x01,0x01,0x01,0x07,0x00,0x00])
+    static let transferLinear:  Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x06,
+                                              0x04,0x01,0x01,0x01,0x01,0x06,0x00,0x00])
     static let matrixBT709:     Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x01,
                                               0x04,0x01,0x01,0x01,0x02,0x02,0x00,0x00])
     static let matrixBT2020:    Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
                                               0x04,0x01,0x01,0x01,0x02,0x06,0x00,0x00])
-    static let matrixSMPTE240M: Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x0d,
+    static let matrixSMPTE240M: Data = .init([0x06,0x0e,0x2b,0x34,0x04,0x01,0x01,0x06,
                                               0x04,0x01,0x01,0x01,0x02,0x03,0x00,0x00])
 }
 
@@ -593,18 +594,111 @@ func videoPixelBufferOutputSettings(_ pixelFormat: OSType) -> [String: Any] {
 }
 
 /// Selects the decoded pixel layout consumed by the chosen encoder path.
-func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
-    let pixelFormat: OSType
+func proResReaderPixelFormat(_ quality: String) -> OSType {
     if isH264Quality(quality) {
-        pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     } else if isCompressedHDRQuality(quality) {
-        pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     } else if is4444FamilyQuality(quality) {
-        pixelFormat = kCVPixelFormatType_32BGRA
+        return kCVPixelFormatType_32BGRA
     } else {
-        pixelFormat = kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+        return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
     }
-    return videoPixelBufferOutputSettings(pixelFormat)
+}
+
+/// Selects the decoded pixel layout consumed by the chosen encoder path.
+func proResReaderOutputSettings(_ quality: String) -> [String: Any] {
+    videoPixelBufferOutputSettings(proResReaderPixelFormat(quality))
+}
+
+/// A decoded reader configuration proven to produce image buffers for a track.
+struct DecodedVideoOutputPlan {
+    let outputSettings: [String: Any]
+    let pixelFormat: OSType
+    let usedCompatibilityFallback: Bool
+}
+
+/// Probes actual AVAssetReader output instead of assuming every QuickTime-
+/// playable AVC/HEVC/AV1 decoder supports one hard-coded surface layout.
+func negotiateDecodedVideoOutput(
+    asset: AVAsset,
+    videoTrack: AVAssetTrack,
+    pixelFormats: [OSType]
+) throws -> DecodedVideoOutputPlan {
+    var uniqueFormats: [OSType] = []
+    for format in pixelFormats where !uniqueFormats.contains(format) {
+        uniqueFormats.append(format)
+    }
+    guard !uniqueFormats.isEmpty else {
+        throw NSError(
+            domain: "MediaDecode",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "No decoded pixel formats were offered."]
+        )
+    }
+
+    var failures: [String] = []
+    for (formatIndex, pixelFormat) in uniqueFormats.enumerated() {
+        let minimalSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormat)
+        ]
+        var softwareDecodeSettings = minimalSettings
+        softwareDecodeSettings[AVVideoDecompressionPropertiesKey] = [
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String:
+                kCFBooleanFalse as Any
+        ]
+        let candidates = [
+            videoPixelBufferOutputSettings(pixelFormat),
+            minimalSettings,
+            softwareDecodeSettings
+        ]
+        for (settingsIndex, settings) in candidates.enumerated() {
+            do {
+                let reader = try AVAssetReader(asset: asset)
+                defer { reader.cancelReading() }
+                let output = AVAssetReaderTrackOutput(
+                    track: videoTrack,
+                    outputSettings: settings
+                )
+                output.alwaysCopiesSampleData = false
+                guard reader.canAdd(output) else {
+                    failures.append("format \(pixelFormat): reader rejected output settings")
+                    continue
+                }
+                reader.add(output)
+                guard reader.startReading() else {
+                    failures.append(
+                        "format \(pixelFormat): \(reader.error?.localizedDescription ?? "reader failed to start")"
+                    )
+                    continue
+                }
+                guard let sample = output.copyNextSampleBuffer(),
+                      let imageBuffer = CMSampleBufferGetImageBuffer(sample) else {
+                    failures.append(
+                        "format \(pixelFormat): \(reader.error?.localizedDescription ?? "no decoded video sample")"
+                    )
+                    continue
+                }
+                let actualFormat = CVPixelBufferGetPixelFormatType(imageBuffer)
+                return DecodedVideoOutputPlan(
+                    outputSettings: settings,
+                    pixelFormat: actualFormat,
+                    usedCompatibilityFallback: formatIndex > 0 || settingsIndex > 0
+                )
+            } catch {
+                failures.append("format \(pixelFormat): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    throw NSError(
+        domain: "MediaDecode",
+        code: 2,
+        userInfo: [NSLocalizedDescriptionKey:
+            "QuickTime recognizes the video track, but AVAssetReader could not produce a supported decoded pixel buffer. " +
+            failures.prefix(6).joined(separator: "; ")
+        ]
+    )
 }
 
 /// Requests a 16-bit 4:2:2 decode surface for Profile 7 only, preserving
@@ -990,16 +1084,25 @@ final class VTEncodedFrameSilo: @unchecked Sendable {
 
 // MARK: - Source ProRes check
 
-func isSourceProRes(_ track: AVAssetTrack) async -> Bool {
+/// Returns the exact ProRes variant advertised by a readable source track.
+/// Callers use this to decide whether source-specific ProRes processing is safe.
+func sourceProResQuality(_ track: AVAssetTrack) async -> String? {
     guard let fmts = try? await track.load(.formatDescriptions),
-          let fd = fmts.first else { return false }
+          let fd = fmts.first else { return nil }
     let codec = CMFormatDescriptionGetMediaSubType(fd)
-    let proRes: Set<FourCharCode> = [
-        kCMVideoCodecType_AppleProRes422Proxy, kCMVideoCodecType_AppleProRes422LT,
-        kCMVideoCodecType_AppleProRes422,       kCMVideoCodecType_AppleProRes422HQ,
-        kCMVideoCodecType_AppleProRes4444,      kCMVideoCodecType_AppleProRes4444XQ,
-    ]
-    return proRes.contains(codec)
+    switch codec {
+    case kCMVideoCodecType_AppleProRes422Proxy: return "proxy"
+    case kCMVideoCodecType_AppleProRes422LT:    return "422lt"
+    case kCMVideoCodecType_AppleProRes422:      return "422"
+    case kCMVideoCodecType_AppleProRes422HQ:    return "422hq"
+    case kCMVideoCodecType_AppleProRes4444:     return "4444"
+    case kCMVideoCodecType_AppleProRes4444XQ:   return "4444xq"
+    default: return nil
+    }
+}
+
+func isSourceProRes(_ track: AVAssetTrack) async -> Bool {
+    await sourceProResQuality(track) != nil
 }
 
 // MARK: - Frame count estimation
@@ -1009,15 +1112,173 @@ func estimateFrameCount(asset: AVAsset) async -> Int64 {
     let minFD = try? await track.load(.minFrameDuration)
     let dur = try? await asset.load(.duration)
     if let mfd = minFD, CMTIME_IS_VALID(mfd), mfd.value > 0,
-       let d = dur, CMTIME_IS_VALID(d) {
-        let num = Int64(d.value) * Int64(mfd.timescale)
-        let den = Int64(mfd.value) * Int64(d.timescale)
-        return den > 0 ? (num + den / 2) / den : 0
+       let d = dur, CMTIME_IS_VALID(d), d.value >= 0 {
+        // Multiplying two CMTime components can overflow Int64 for long media
+        // with high-resolution timescales. The quotient remains precise enough
+        // for progress and encoder hints while keeping multi-hour assets safe.
+        let durationSeconds = CMTimeGetSeconds(d)
+        let frameSeconds = CMTimeGetSeconds(mfd)
+        let frames = durationSeconds / frameSeconds
+        if frames.isFinite, frames > 0, frames < Double(Int64.max) {
+            return Int64(frames.rounded())
+        }
     }
     if let d = dur, let fps = try? await track.load(.nominalFrameRate), fps > 0 {
-        return Int64(CMTimeGetSeconds(d) * Double(fps) + 0.5)
+        let frames = CMTimeGetSeconds(d) * Double(fps)
+        if frames.isFinite, frames > 0, frames < Double(Int64.max) {
+            return Int64(frames.rounded())
+        }
     }
     return 0
+}
+
+/// Returns an actionable error only for abnormal AVAssetReader termination.
+/// A nil sample while another track is still draining can leave the reader in
+/// `.reading`, so that state is intentionally not treated as a failure here.
+func assetReaderTerminalError(
+    _ reader: AVAssetReader,
+    stage: String
+) -> NSError? {
+    switch reader.status {
+    case .failed:
+        return NSError(
+            domain: "MediaRead",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "\(stage): \(reader.error?.localizedDescription ?? "unknown reader error")"
+            ]
+        )
+    case .cancelled:
+        return NSError(
+            domain: "MediaRead",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "\(stage): reader was cancelled before EOF."]
+        )
+    default:
+        return nil
+    }
+}
+
+// MARK: - Zero-copy output recovery
+
+/// Writes beside the requested destination and commits with same-volume rename.
+/// No media bytes are copied to local storage. The previous final output stays
+/// intact until every newly encoded file has been finalized.
+final class DirectOutputTransaction {
+    let finalURL: URL
+    let workingURL: URL
+    private let token = UUID().uuidString
+    private static let maximumRetryCount = 360
+    private static let retryDelay: TimeInterval = 5
+
+    init(finalURL: URL) {
+        self.finalURL = finalURL.standardizedFileURL
+        let directory = self.finalURL.deletingLastPathComponent()
+        let stem = self.finalURL.deletingPathExtension().lastPathComponent
+        let ext = self.finalURL.pathExtension
+        let filename = ".\(stem).proresencoder-working-\(token)"
+            + (ext.isEmpty ? "" : ".\(ext)")
+        workingURL = directory.appendingPathComponent(filename)
+    }
+
+    /// Same-volume metadata commit; the primary file is committed last so its
+    /// appearance denotes a complete artifact set.
+    func commit(additionalFiles: [(working: URL, final: URL)] = []) throws {
+        for pair in additionalFiles {
+            try Self.installByRename(from: pair.working, to: pair.final)
+        }
+        try Self.installByRename(from: workingURL, to: finalURL)
+    }
+
+    /// Renames a fragmented partial into a visible recovery file without copying.
+    @discardableResult
+    func preserveAfterFailure(additionalWorkingURLs: [URL] = []) -> [URL] {
+        let candidates = [workingURL] + additionalWorkingURLs
+        var recoveredURLs: [URL] = []
+        for (index, source) in candidates.enumerated() {
+            if index > 0,
+               !FileManager.default.fileExists(atPath: source.path) {
+                continue
+            }
+            let ext = source.pathExtension
+            var sourceStem = source.deletingPathExtension().lastPathComponent
+                .replacingOccurrences(of: ".proresencoder-working-\(token)", with: "")
+            if sourceStem.hasPrefix(".") {
+                sourceStem.removeFirst()
+            }
+            let recoveredName = "\(sourceStem).recoverable-\(token.prefix(8))"
+                + (ext.isEmpty ? "" : ".\(ext)")
+            let recoveredURL = finalURL.deletingLastPathComponent()
+                .appendingPathComponent(recoveredName)
+            do {
+                try Self.moveWithReconnect(from: source, to: recoveredURL)
+                print("[Recovery] Preserved completed movie fragments at \(recoveredURL.path)")
+                recoveredURLs.append(recoveredURL)
+            } catch {
+                print(
+                    "[Recovery] Could not rename the partial output after reconnect timeout; " +
+                    "it remains at \(source.path). \(error.localizedDescription)"
+                )
+            }
+        }
+        return recoveredURLs
+    }
+
+    static func installByRename(from source: URL, to destination: URL) throws {
+        var lastError: Error?
+        for attempt in 0..<maximumRetryCount {
+            do {
+                guard FileManager.default.fileExists(atPath: source.path) else {
+                    throw NSError(
+                        domain: "DirectOutputTransaction",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Finalized output is missing at \(source.path)."
+                        ]
+                    )
+                }
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    _ = try FileManager.default.replaceItemAt(destination, withItemAt: source)
+                } else {
+                    try FileManager.default.moveItem(at: source, to: destination)
+                }
+                return
+            } catch {
+                lastError = error
+                logRetry(destination: destination, attempt: attempt, error: error)
+                Thread.sleep(forTimeInterval: retryDelay)
+            }
+        }
+        throw lastError ?? NSError(domain: "DirectOutputTransaction", code: 2)
+    }
+
+    static func moveWithReconnect(from source: URL, to destination: URL) throws {
+        var lastError: Error?
+        for attempt in 0..<maximumRetryCount {
+            do {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    return
+                }
+                try FileManager.default.moveItem(at: source, to: destination)
+                return
+            } catch {
+                lastError = error
+                logRetry(destination: destination, attempt: attempt, error: error)
+                Thread.sleep(forTimeInterval: retryDelay)
+            }
+        }
+        throw lastError ?? NSError(domain: "DirectOutputTransaction", code: 3)
+    }
+
+    private static func logRetry(destination: URL, attempt: Int, error: Error) {
+        if attempt == 0 || (attempt + 1).isMultiple(of: 12) {
+            print(
+                "[Recovery] Destination unavailable (\(error.localizedDescription)); " +
+                "waiting for reconnect, attempt \(attempt + 1)/\(maximumRetryCount): " +
+                destination.path
+            )
+        }
+    }
 }
 
 /// Maps a compressed sample's presentation timestamp back to a zero-based frame index.
@@ -1179,9 +1440,13 @@ extension AsyncChannel: AsyncSequence {
 /// Refcon for the VT C callback: routes to async channel or sync box.
 private final class VTCallbackRefcon: @unchecked Sendable {
     var sample: CMSampleBuffer?
+    let failure = PipelineFailureBox()
     let syncLock = NSLock()
     var asyncChannel: AsyncChannel<SendableSampleBuffer>?
     var frameSilo: VTEncodedFrameSilo?
+    // Configured before submission. AMA uses a bounded serial mux queue rather
+    // than creating a Swift task for every codec callback.
+    var encodedSampleHandler: (@Sendable (SendableSampleBuffer) -> Void)?
     private let asyncStateLock = NSLock()
     private var asyncSubmittedCount: Int64 = 0
     private var asyncCompletedCount: Int64 = 0
@@ -1367,12 +1632,25 @@ private func vtOutputCallback(
 ) {
     guard let refcon else { return }
     let rc = Unmanaged<VTCallbackRefcon>.fromOpaque(refcon).takeUnretainedValue()
+    if status != noErr {
+        rc.failure.store(NSError(domain: "ProResSession", code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "VideoToolbox output callback failed: \(status)"]))
+    }
+    if let handler = rc.encodedSampleHandler {
+        if status == noErr, let sampleBuffer {
+            handler(SendableSampleBuffer(buf: sampleBuffer))
+        } else if status == noErr {
+            rc.failure.store(NSError(domain: "ProResSession", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "VideoToolbox dropped a requested host frame."]))
+        }
+        return
+    }
     if rc.frameSilo != nil {
         if status == noErr, let sampleBuffer {
             do {
                 try rc.frameSilo?.add(sampleBuffer)
             } catch {
-                // Keep encoding; the MOV pipeline reports the silo error after the pass.
+                rc.failure.store(error)
             }
         }
         return
@@ -1676,6 +1954,13 @@ final class ProResSession: @unchecked Sendable {
         rc.configureAsyncChannel(ch)
     }
 
+    /// Streams callbacks to a caller-owned bounded queue. The handler must
+    /// enqueue quickly and be configured before the first submit.
+    func setEncodedSampleHandler(_ handler: @escaping @Sendable (SendableSampleBuffer) -> Void) {
+        outputChannel = nil
+        rc.encodedSampleHandler = handler
+    }
+
     /// Routes codec callbacks into `silo` on the VideoToolbox thread (no extra copies).
     func attachFrameSilo(_ silo: VTEncodedFrameSilo) {
         outputChannel = nil
@@ -1745,6 +2030,9 @@ final class ProResSession: @unchecked Sendable {
 
     /// Ends the current pass and reports whether the encoder wants another scan.
     func endCompressionPass(evaluateFurtherPasses: Bool = true) throws -> Bool {
+        // CompleteFrames is the API that guarantees pending output callbacks
+        // have returned before the silo is replaced or drained.
+        try completeFramesChecked()
         guard isMultiPassEnabled else { return false }
         var further: DarwinBoolean = false
         var reserved: UInt32 = 0
@@ -1789,6 +2077,7 @@ final class ProResSession: @unchecked Sendable {
                 ]
             )
         }
+        if let error = rc.failure.error { throw error }
         return evaluateFurtherPasses && further.boolValue
     }
 
@@ -1857,6 +2146,17 @@ final class ProResSession: @unchecked Sendable {
             rc.noteEncodedSubmit()
         }
         return st == noErr
+    }
+
+    var callbackError: Error? { rc.failure.error }
+
+    func completeFramesChecked() throws {
+        let status = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        guard status == noErr else {
+            throw NSError(domain: "ProResSession", code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Completing encoded frames failed: \(status)"])
+        }
+        if let error = rc.failure.error { throw error }
     }
 
     /// Flush remaining frames, then close the outputChannel.
@@ -1997,15 +2297,51 @@ final class MXFAudioContext: @unchecked Sendable {
                 AVLinearPCMIsNonInterleaved: false,
             ])
         output.alwaysCopiesSampleData = false
-        reader.add(output); reader.startReading()
+        guard reader.canAdd(output) else {
+            throw NSError(
+                domain: "encodeMXF",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "MXF audio reader cannot create the requested PCM output."
+                ]
+            )
+        }
+        reader.add(output)
+        guard reader.startReading() else {
+            throw assetReaderTerminalError(
+                reader,
+                stage: "MXF audio reader failed to start"
+            ) ?? NSError(
+                domain: "encodeMXF",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "MXF audio reader failed to start."]
+            )
+        }
     }
 
     /// Returns PCM data for `sampleCount` samples (24-bit/16-bit, interleaved, little-endian for MXF).
-    func consumeFrame(sampleCount: Int) -> Data {
+    func consumeFrame(sampleCount: Int) throws -> Data {
         // Refill
         while !exhausted && ring.count < sampleCount * sourceCh {
-            guard let sb = output.copyNextSampleBuffer(),
-                  let bb = CMSampleBufferGetDataBuffer(sb) else { exhausted = true; break }
+            guard let sb = output.copyNextSampleBuffer() else {
+                if let error = assetReaderTerminalError(
+                    reader,
+                    stage: "MXF audio read failed"
+                ) {
+                    throw error
+                }
+                exhausted = true
+                break
+            }
+            guard let bb = CMSampleBufferGetDataBuffer(sb) else {
+                throw NSError(
+                    domain: "encodeMXF",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "MXF audio decoder returned a sample without PCM data."
+                    ]
+                )
+            }
             let len = CMBlockBufferGetDataLength(bb)
             let floatCount = len / MemoryLayout<Float>.size
             let prev = ring.count
@@ -2119,7 +2455,7 @@ struct MXFEncodeResult: Sendable {
 func encodeMXF(
     asset: AVAsset,
     sourceURL: URL,
-    outputDir: String,
+    outputDir finalOutputDirectoryPath: String,
     basename: String,
     quality: String,
     exportFormat: String,
@@ -2127,7 +2463,8 @@ func encodeMXF(
     audioOverrideURL: URL?,
     deleteSourceAudio: Bool,
     colorTransform: ColorTransformRequest?,
-    outputVideoRaw: Bool = false
+    outputVideoRaw: Bool = false,
+    progress: ProgressBar? = nil
 ) async -> MXFEncodeResult {
 
     let emptyUMID = Data(repeating: 0, count: 32)
@@ -2169,6 +2506,16 @@ func encodeMXF(
     let totalFrames = await estimateFrameCount(asset: asset)
     let timecode    = await readTimecodeString(from: asset)
     let passthrough = (normalizedProResQuality(quality) == "pass")
+    if passthrough {
+        // AVAssetReader exposes decoded pixel buffers here, not an MXF-ready
+        // compressed RDD-36 essence stream. Re-wrapping it as though it were
+        // ProRes would create a corrupt MXF, so reject the unsupported mode.
+        return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                               error: "MXF output does not support -q pass. Choose a ProRes " +
+                                   "quality to encode valid RDD-36 video essence.",
+                               sourceAudioChannels: 0,
+                               videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+    }
 
     // Audio channel count from source
     var sourceAudioCh = 0
@@ -2215,6 +2562,57 @@ func encodeMXF(
         }
     } else { cfg.audioChannelCounts = [] }
 
+    // Write into a same-volume checkpoint directory. Final publication is a
+    // metadata-only rename, so no local storage or media copy is introduced.
+    let finalOutputDirectoryURL = URL(
+        fileURLWithPath: finalOutputDirectoryPath,
+        isDirectory: true
+    )
+    let finalVideoURL = finalOutputDirectoryURL.appendingPathComponent(
+        exportFormat == "opatom" ? "\(basename)_v.mxf" : "\(basename).mxf"
+    ).standardizedFileURL.resolvingSymlinksInPath()
+    if finalVideoURL == sourceURL.standardizedFileURL.resolvingSymlinksInPath() {
+        return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                               error: "MXF output would replace its source video. Choose a different output name or directory.",
+                               sourceAudioChannels: 0,
+                               videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+    }
+    let transactionToken = UUID().uuidString
+    let workingOutputDirectoryURL = finalOutputDirectoryURL.appendingPathComponent(
+        ".\(basename).proresencoder-working-\(transactionToken)",
+        isDirectory: true
+    )
+    do {
+        try FileManager.default.createDirectory(
+            at: workingOutputDirectoryURL,
+            withIntermediateDirectories: true
+        )
+    } catch {
+        return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                               error: error.localizedDescription, sourceAudioChannels: 0,
+                               videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+    }
+    var outputTransactionSucceeded = false
+    defer {
+        if !outputTransactionSucceeded,
+           FileManager.default.fileExists(atPath: workingOutputDirectoryURL.path) {
+            let recoveryURL = finalOutputDirectoryURL.appendingPathComponent(
+                "\(basename).recoverable-\(transactionToken.prefix(8))",
+                isDirectory: true
+            )
+            do {
+                try DirectOutputTransaction.moveWithReconnect(
+                    from: workingOutputDirectoryURL,
+                    to: recoveryURL
+                )
+                print("[Recovery] Preserved partial MXF artifacts at \(recoveryURL.path)")
+            } catch {
+                print("[Recovery] Partial MXF artifacts remain at \(workingOutputDirectoryURL.path)")
+            }
+        }
+    }
+    let outputDir = workingOutputDirectoryURL.path
+
     // Output path
     let outPath: String
     if isOP1a { outPath = outputDir + "/" + basename + ".mxf" }
@@ -2245,14 +2643,49 @@ func encodeMXF(
     }
 
     // Progress bar (matches MOV style)
-    let progress = totalFrames > 0 ? ProgressBar(total: Int(totalFrames)) : nil
+    let ownedProgress = progress == nil ? makeEncodePipelineProgressBar(
+        frames: totalFrames, quality: quality, cmuMasteringNits: nil,
+        includeGeneratedCMU: false, hasExternalDolbyVisionXML: false,
+        exportFormat: exportFormat
+    ) : nil
+    defer { ownedProgress?.endLine() }
+    let pipelineProgress = progress ?? ownedProgress
 
     // Setup video reader
     do {
         let reader = try AVAssetReader(asset: asset)
-        let vidSettings: [String: Any]? = passthrough ? nil : proResReaderOutputSettings(quality)
+        let decodedVideoPlan: DecodedVideoOutputPlan?
+        if passthrough {
+            decodedVideoPlan = nil
+        } else {
+            var candidates = [proResReaderPixelFormat(quality)]
+            candidates.append(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
+            if resolvedColorTransform == nil {
+                candidates.append(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            }
+            candidates.append(kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange)
+            candidates.append(kCVPixelFormatType_32BGRA)
+            decodedVideoPlan = try negotiateDecodedVideoOutput(
+                asset: asset,
+                videoTrack: videoTrack,
+                pixelFormats: candidates
+            )
+            if decodedVideoPlan?.usedCompatibilityFallback == true {
+                print(
+                    "[Decode] MXF compatibility fallback selected pixel format " +
+                    "\(decodedVideoPlan!.pixelFormat)."
+                )
+            }
+        }
+        let vidSettings: [String: Any]? = decodedVideoPlan?.outputSettings
         let vidOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: vidSettings)
         vidOutput.alwaysCopiesSampleData = false
+        guard reader.canAdd(vidOutput) else {
+            return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                                   error: "Video reader cannot create the requested decoded output",
+                                   sourceAudioChannels: audioChannels,
+                                   videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+        }
         reader.add(vidOutput)
 
         // VT session
@@ -2262,14 +2695,16 @@ func encodeMXF(
                 width: width, height: height,
                 codecType: proResCodecType(quality),
                 fpsHint: Int(fpsInfo.fps.rounded()),
-                colorSpace: outputColorSpace)
+                colorSpace: outputColorSpace,
+                sourcePixelFormat: decodedVideoPlan?.pixelFormat)
         }
         let metalColorPipeline = try resolvedColorTransform.map {
             try MetalColorPipeline(
                 transform: $0,
                 width: width,
                 height: height,
-                pixelFormat: colorPipelinePixelFormat(for: quality)
+                pixelFormat: decodedVideoPlan?.pixelFormat
+                    ?? colorPipelinePixelFormat(for: quality)
             )
         }
         let metalColorPipelineRef = metalColorPipeline.map(SendableRef.init)
@@ -2290,7 +2725,21 @@ func encodeMXF(
             }
         }
 
-        reader.startReading()
+        guard reader.startReading() else {
+            return MXFEncodeResult(
+                success: false,
+                paths: [],
+                framesEncoded: 0,
+                fps: 0,
+                error: assetReaderTerminalError(
+                    reader,
+                    stage: "MXF video reader failed to start"
+                )?.localizedDescription ?? "MXF video reader failed to start",
+                sourceAudioChannels: audioChannels,
+                videoMXFUMID: emptyUMID,
+                audioMXFUMIDs: []
+            )
+        }
 
         // ── 3-Stage async pipeline ──────────────────────────────────────────
         //
@@ -2311,40 +2760,70 @@ func encodeMXF(
             vtRef?.value.enableAsyncMode(channelCapacity: channelCapacity)
         }
 
+        let failureBox = PipelineFailureBox()
+        let readerRef = SendableRef(reader)
+        let videoOutputRef = SendableRef(vidOutput)
+        let audioContexts = audioCtxs
+        @Sendable func failPipeline(_ error: Error) {
+            failureBox.store(error)
+            pixelChannel.finish()
+            audioChannel.finish()
+            compressedChannel.finish()
+            vtRef?.value.outputChannel?.finish()
+            readerRef.value.cancelReading()
+        }
+
         // Stage 1 — read
         let readerTask = Task<Void, Error> {
-            if passthrough {
-                var frameIndex: Int64 = 0
-                while true {
-                    guard let sample: SendableSampleBuffer = autoreleasepool(invoking: {
-                        guard let sample = vidOutput.copyNextSampleBuffer() else { return nil }
-                        return SendableSampleBuffer(buf: sample)
-                    }) else { break }
-                    var chunks: [Data] = []
-                    for context in audioCtxs {
-                        let sampleCount = mxf_samples_for_frame(
-                            frameIndex,
-                            Int32(fpsInfo.numerator),
-                            Int32(fpsInfo.denominator),
-                            48_000
-                        )
-                        chunks.append(context.consumeFrame(sampleCount: Int(sampleCount)))
+            do {
+                if passthrough {
+                    defer { compressedChannel.finish() }
+                    var frameIndex: Int64 = 0
+                    while failureBox.error == nil {
+                        guard let sample: SendableSampleBuffer = autoreleasepool(invoking: {
+                            guard let sample = videoOutputRef.value.copyNextSampleBuffer() else { return nil }
+                            return SendableSampleBuffer(buf: sample)
+                        }) else { break }
+                        var chunks: [Data] = []
+                        for context in audioContexts {
+                            let sampleCount = mxf_samples_for_frame(
+                                frameIndex,
+                                Int32(fpsInfo.numerator),
+                                Int32(fpsInfo.denominator),
+                                48_000
+                            )
+                            chunks.append(try context.consumeFrame(sampleCount: Int(sampleCount)))
+                        }
+                        await compressedChannel.sendAsync((sample, chunks))
+                        frameIndex += 1
                     }
-                    await compressedChannel.sendAsync((sample, chunks))
-                    frameIndex += 1
-                }
-                compressedChannel.finish()
-            } else {
-                while true {
-                    let wrapped: SendablePixelBuffer? = autoreleasepool {
-                        guard let sample = vidOutput.copyNextSampleBuffer(),
-                              let pb = CMSampleBufferGetImageBuffer(sample) else { return nil }
-                        return SendablePixelBuffer(buf: pb)
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "MXF source video read failed before EOF"
+                    ) {
+                        throw error
                     }
-                    guard let wrapped else { break }
-                    await pixelChannel.sendAsync(wrapped)
+                } else {
+                    defer { pixelChannel.finish() }
+                    while failureBox.error == nil {
+                        let wrapped: SendablePixelBuffer? = autoreleasepool {
+                            guard let sample = videoOutputRef.value.copyNextSampleBuffer(),
+                                  let pb = CMSampleBufferGetImageBuffer(sample) else { return nil }
+                            return SendablePixelBuffer(buf: pb)
+                        }
+                        guard let wrapped else { break }
+                        await pixelChannel.sendAsync(wrapped)
+                    }
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "MXF source video decode failed before EOF"
+                    ) {
+                        throw error
+                    }
                 }
-                pixelChannel.finish()
+            } catch {
+                failPipeline(error)
+                throw error
             }
         }
 
@@ -2362,81 +2841,94 @@ func encodeMXF(
 
         // Stage 2 — VT encode
         let encoderTask = Task<Void, Error> {
-            guard !passthrough else { return }
+            do {
+                guard !passthrough else { return }
 
-            var frameIdx: Int64 = 0
+                var frameIdx: Int64 = 0
 
-            for await spb in pixelChannel {
-                let pts = CMTime(value: CMTimeValue(frameIdx) * CMTimeValue(fpsInfo.denominator),
-                                 timescale: CMTimeScale(fpsInfo.numerator))
-                let dur = CMTime(value: CMTimeValue(fpsInfo.denominator),
-                                 timescale: CMTimeScale(fpsInfo.numerator))
-                let pb: CVPixelBuffer
-                do {
-                    pb = try metalColorPipelineRef?.value.process(spb.buf, pts: pts) ?? spb.buf
-                } catch {
-                    pixelChannel.finish()
-                    audioChannel.finish()
-                    compressedChannel.finish()
-                    vtRef?.value.flushAsync()
-                    throw error
-                }
-                guard vtRef?.value.submit(pixelBuffer: pb, pts: pts, duration: dur) == true else {
-                    pixelChannel.finish()
-                    audioChannel.finish()
-                    compressedChannel.finish()
-                    vtRef?.value.flushAsync()
-                    throw NSError(
-                        domain: "encodeMXF",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "VT submit failed"]
-                    )
+                for await spb in pixelChannel {
+                    if failureBox.error != nil { break }
+                    let pts = CMTime(value: CMTimeValue(frameIdx) * CMTimeValue(fpsInfo.denominator),
+                                     timescale: CMTimeScale(fpsInfo.numerator))
+                    let dur = CMTime(value: CMTimeValue(fpsInfo.denominator),
+                                     timescale: CMTimeScale(fpsInfo.numerator))
+                    let pb: CVPixelBuffer
+                    do {
+                        pb = try metalColorPipelineRef?.value.process(spb.buf, pts: pts) ?? spb.buf
+                    } catch {
+                        throw error
+                    }
+                    guard vtRef?.value.submit(pixelBuffer: pb, pts: pts, duration: dur) == true else {
+                        throw NSError(
+                            domain: "encodeMXF",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "VT submit failed"]
+                        )
+                    }
+
+                    var chunks: [Data] = []
+                    for ctx in audioContexts {
+                        let n = mxf_samples_for_frame(frameIdx, Int32(fpsInfo.numerator),
+                                                      Int32(fpsInfo.denominator), 48000)
+                        chunks.append(try ctx.consumeFrame(sampleCount: Int(n)))
+                    }
+                    await audioChannel.sendAsync(chunks)
+                    frameIdx += 1
                 }
 
-                var chunks: [Data] = []
-                for ctx in audioCtxs {
-                    let n = mxf_samples_for_frame(frameIdx, Int32(fpsInfo.numerator),
-                                                  Int32(fpsInfo.denominator), 48000)
-                    chunks.append(ctx.consumeFrame(sampleCount: Int(n)))
-                }
-                await audioChannel.sendAsync(chunks)
-                frameIdx += 1
+                audioChannel.finish()
+                vtRef?.value.flushAsync()
+            } catch {
+                failPipeline(error)
+                throw error
             }
-
-            audioChannel.finish()
-            vtRef?.value.flushAsync()
         }
 
         // Stage 3 — write
         let writerTask = Task<(Int64, Double), Error> {
-            let t0 = CFAbsoluteTimeGetCurrent()
-            var written: Int64 = 0
-            for await (sampleBuffer, audioChunks) in compressedChannel {
-                let ok = bridge.writeFrameSampleBuffer(sampleBuffer.buf, audio: audioChunks)
-                if !ok {
-                    throw NSError(
-                        domain: "encodeMXF",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey:
-                            "Video MXF write failed: \(bridge.lastError ?? "unknown")"]
-                    )
+            do {
+                let t0 = CFAbsoluteTimeGetCurrent()
+                var written: Int64 = 0
+                for await (sampleBuffer, audioChunks) in compressedChannel {
+                    let ok = bridge.writeFrameSampleBuffer(sampleBuffer.buf, audio: audioChunks)
+                    if !ok {
+                        throw NSError(
+                            domain: "encodeMXF",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "Video MXF write failed: \(bridge.lastError ?? "unknown")"]
+                        )
+                    }
+                    try rawVideoWriter?.write(sampleBuffer.buf)
+                    written += 1
+                    pipelineProgress?.phase(.video).increment()
                 }
-                try rawVideoWriter?.write(sampleBuffer.buf)
-                written += 1
-                progress?.increment()
+                let elapsed = CFAbsoluteTimeGetCurrent() - t0
+                return (written, elapsed > 0 ? Double(written) / elapsed : 0)
+            } catch {
+                failPipeline(error)
+                throw error
             }
-            progress?.finish()
-            let elapsed = CFAbsoluteTimeGetCurrent() - t0
-            return (written, elapsed > 0 ? Double(written) / elapsed : 0)
         }
 
-        // Wait for all stages
-        try await readerTask.value
-        try await encoderTask.value
-        try await drainTask.value
+        // Join every stage, including after an error, before closing or moving
+        // files that those stages may still be using.
+        let readerResult = await readerTask.result
+        let encoderResult = await encoderTask.result
+        let drainResult = await drainTask.result
+        let writerResult = await writerTask.result
         vtRef?.value.invalidate()
-        let (written, fps) = try await writerTask.value
-        _ = written
+        if let error = failureBox.error { throw error }
+        if let error = vtRef?.value.callbackError { throw error }
+        try readerResult.get()
+        try encoderResult.get()
+        try drainResult.get()
+        let (written, fps) = try writerResult.get()
+        guard written > 0 else {
+            throw NSError(domain: "encodeMXF", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No video frames were written."])
+        }
+        pipelineProgress?.completePhase(.video)
         try rawVideoWriter?.finish()
 
         guard bridge.close() else {
@@ -2495,7 +2987,7 @@ func encodeMXF(
             for frame in 0..<encoded {
                 let n = mxf_samples_for_frame(frame, Int32(fpsInfo.numerator),
                                               Int32(fpsInfo.denominator), 48000)
-                let audioData = ctx.consumeFrame(sampleCount: Int(n))
+                let audioData = try ctx.consumeFrame(sampleCount: Int(n))
                 let chunks = splitInterleavedPCM(
                     audioData,
                     sourceChannels: contextSourceChannels,
@@ -2510,8 +3002,10 @@ func encodeMXF(
                                                videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
                     }
                 }
+                pipelineProgress?.phase(.audio).increment()
             }
 
+            pipelineProgress?.completePhase(.audio)
             for i in audioBridges.indices {
                 guard audioBridges[i].close() else {
                     return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
@@ -2524,7 +3018,29 @@ func encodeMXF(
             }
         }
 
-        return MXFEncodeResult(success: true, paths: allPaths,
+        var publishedPaths: [String] = []
+        for path in allPaths {
+            let workingURL = URL(fileURLWithPath: path)
+            let finalURL = finalOutputDirectoryURL.appendingPathComponent(
+                workingURL.lastPathComponent
+            )
+            do {
+                try DirectOutputTransaction.installByRename(
+                    from: workingURL,
+                    to: finalURL
+                )
+            } catch {
+                return MXFEncodeResult(success: false, paths: [], framesEncoded: 0, fps: 0,
+                                       error: error.localizedDescription,
+                                       sourceAudioChannels: audioChannels,
+                                       videoMXFUMID: emptyUMID, audioMXFUMIDs: [])
+            }
+            publishedPaths.append(finalURL.path)
+        }
+        try? FileManager.default.removeItem(at: workingOutputDirectoryURL)
+        outputTransactionSucceeded = true
+        ownedProgress?.finish()
+        return MXFEncodeResult(success: true, paths: publishedPaths,
                                framesEncoded: encoded, fps: fps, error: nil,
                                sourceAudioChannels: audioChannels,
                                videoMXFUMID: videoUMID, audioMXFUMIDs: audioUMIDs)

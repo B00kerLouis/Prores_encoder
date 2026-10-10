@@ -93,6 +93,33 @@ jobs:
             -project "$PROJECT" \
             -list
 
+      - name: Verify prebuilt AMA Release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle="build/Release/ProResEncoderAMA.avx"
+          test "$(cat "$bundle/Contents/PkgInfo")" = 'APPL????'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$bundle/Contents/Info.plist")" = APPL
+          for binary in \
+            "$bundle/Contents/MacOS/ProResEncoderAMA" \
+            "$bundle/Contents/MacOS/ProResEncoderAMAWorker" \
+            "$bundle/Contents/Frameworks/ProResEncoderFramework.framework/Versions/A/ProResEncoderFramework"; do
+            test "$(lipo -archs "$binary")" = arm64
+          done
+          codesign --verify --deep --strict "$bundle"
+          if find "$bundle" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.a' -o -name '*.o' \) | grep -q .; then
+            echo '::error::SDK/source files found in the runtime bundle.'
+            exit 1
+          fi
+          if git ls-files ThirdParty/AvidSDK | grep -q .; then
+            echo '::error::Avid SDK files must remain local.'
+            exit 1
+          fi
+          shasum -a 256 -c build/Release/SHA256SUMS.txt
+          ditto "$bundle" "$RUNNER_TEMP/ProResEncoderAMA.avx"
+          echo 'Verified prebuilt bundle. Public CI does not compile the Avid SDK target or test Media Composer exports.'
+
       - name: Remove existing build outputs
         shell: bash
         run: |
@@ -146,6 +173,25 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build \
             | tee xcodebuild-framework.log
+
+      - name: Build and run Avid-free AMA contract checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme ProResEncoderAMAContractTests \
+            -configuration "$CONFIGURATION" \
+            -destination "generic/platform=macOS" \
+            ARCHS="$ARCH" \
+            EXCLUDED_ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build \
+            | tee xcodebuild-contract.log
+          Build/Release/ProResEncoderAMAContractTests
 
       - name: Verify Apple Silicon outputs
         shell: bash
@@ -210,6 +256,7 @@ jobs:
 
           mkdir -p dist/ProResEncoder-CLI
           mkdir -p dist/ProResEncoder-Framework
+          mkdir -p dist/ProResEncoder-AMA
 
           cp "$cli" \
             dist/ProResEncoder-CLI/proresencoder
@@ -227,6 +274,10 @@ jobs:
             "$framework" \
             dist/ProResEncoder-Framework/ProResEncoderFramework.framework
 
+          ditto "$RUNNER_TEMP/ProResEncoderAMA.avx" \
+            dist/ProResEncoder-AMA/ProResEncoderAMA.avx
+          cp README.md LICENSE dist/ProResEncoder-AMA/
+
           ditto \
             -c \
             -k \
@@ -243,9 +294,13 @@ jobs:
             dist/ProResEncoder-Framework/ProResEncoderFramework.framework \
             dist/ProResEncoderFramework-arm64.zip
 
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/ProResEncoder-AMA dist/ProResEncoderAMA-arm64.zip
+
           shasum -a 256 \
             dist/ProResEncoder-CLI-arm64.zip \
             dist/ProResEncoderFramework-arm64.zip \
+            dist/ProResEncoderAMA-arm64.zip \
             > dist/SHA256SUMS.txt
 
           echo "Packaged files:"
@@ -258,8 +313,10 @@ jobs:
           path: |
             dist/ProResEncoder-CLI-arm64.zip
             dist/ProResEncoderFramework-arm64.zip
+            dist/ProResEncoderAMA-arm64.zip
             dist/SHA256SUMS.txt
             xcodebuild-cli.log
             xcodebuild-framework.log
+            xcodebuild-contract.log
           if-no-files-found: error
           retention-days: 14

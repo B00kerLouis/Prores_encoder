@@ -9,6 +9,26 @@
 /* Begin PBXBuildFile section */
 		C9169E582FC6F7A1008FA3E8 /* libSvtAv1Enc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */; };
 		C9F100022FE0000100000001 /* libSvtAv1Enc.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C9169E522FC6F7A1008FA3E8 /* libSvtAv1Enc.a */; };
+		C9B2000C2FE2000100000001 /* ProResEncoderFramework.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C9F100012FE0000100000001 /* ProResEncoderFramework.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		C9B221012FE2000100000002 /* PluginEntry.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221012FE2000100000001 /* PluginEntry.mm */; };
+		C9B221022FE2000100000002 /* MediaContainerWriter.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221022FE2000100000001 /* MediaContainerWriter.mm */; };
+		C9B221032FE2000100000002 /* MediaVolumeWriter.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221032FE2000100000001 /* MediaVolumeWriter.mm */; };
+		C9B221042FE2000100000002 /* SampleConsumer.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221042FE2000100000001 /* SampleConsumer.mm */; };
+		C9B221052FE2000100000002 /* HostExportContext.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221052FE2000100000001 /* HostExportContext.mm */; };
+		C9B221062FE2000100000002 /* HostAudioRouting.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221062FE2000100000001 /* HostAudioRouting.mm */; };
+		C9B221072FE2000100000002 /* ColorPolicy.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221072FE2000100000001 /* ColorPolicy.mm */; };
+		C9B221082FE2000100000002 /* DolbyMetadataTimeline.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221082FE2000100000001 /* DolbyMetadataTimeline.mm */; };
+		C9B221092FE2000100000002 /* EncoderFrameworkAdapter.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221092FE2000100000001 /* EncoderFrameworkAdapter.mm */; };
+		C9B221102FE2000100000002 /* ExportParameters.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221102FE2000100000001 /* ExportParameters.mm */; };
+		C9B221112FE2000100000002 /* ExportSession.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221112FE2000100000001 /* ExportSession.mm */; };
+		C9B223012FE2000100000001 /* ExportSession.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221112FE2000100000001 /* ExportSession.mm */; };
+		C9B223032FE2000100000001 /* ContractTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B223022FE2000100000001 /* ContractTests.mm */; };
+		C9B222022FE2000100000001 /* CACFUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C9B222012FE2000100000001 /* CACFUnknown.cpp */; };
+		C9B222042FE2000100000001 /* CACFClassFactory.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C9B222032FE2000100000001 /* CACFClassFactory.cpp */; };
+		C9B221122FE2000100000002 /* AMAHDRToneMapper.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221122FE2000100000001 /* AMAHDRToneMapper.mm */; };
+		C9B250062FE2000100000001 /* AMAFrameWorkerClient.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B250012FE2000100000001; };
+		C9B250072FE2000100000001 /* AMAFrameWorker.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B250042FE2000100000001; };
+		C9B250082FE2000100000001 /* Worker in Embed */ = {isa = PBXBuildFile; fileRef = C9B250052FE2000100000001; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXAggregateTarget section */
@@ -20,6 +40,8 @@
 			dependencies = (
 				C9A110052FE1000100000001 /* PBXTargetDependency */,
 				C9A110072FE1000100000001 /* PBXTargetDependency */,
+				C9B2000D2FE2000100000001 /* PBXTargetDependency */,
+				C9B210082FE2000100000001 /* PBXTargetDependency */,
 			);
 			name = "Build All";
 			productName = "Build All";
@@ -41,6 +63,28 @@
 			remoteGlobalIDString = C9F100052FE0000100000001;
 			remoteInfo = ProResEncoderFramework;
 		};
+		C9B2000A2FE2000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C96311C62F73E1A4005C254E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C9F100052FE0000100000001;
+			remoteInfo = ProResEncoderFramework;
+		};
+		C9B2000E2FE2000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C96311C62F73E1A4005C254E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C9B200022FE2000100000001;
+			remoteInfo = ProResEncoderAMA;
+		};
+		C9B210092FE2000100000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C96311C62F73E1A4005C254E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C9B210022FE2000100000001;
+			remoteInfo = ProResEncoderAMAContractTests;
+		};
+		C9B250132FE2000100000001 /* Worker proxy */ = {isa = PBXContainerItemProxy; containerPortal = C96311C62F73E1A4005C254E; proxyType = 1; remoteGlobalIDString = C9B250122FE2000100000001; remoteInfo = ProResEncoderAMAWorker; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -56,15 +100,121 @@
 		C96311CE2F73E1A4005C254E /* prores encoder */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "prores encoder"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C9AAF0002F8A000100000001 /* swiftaaf_Framework.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = swiftaaf_Framework.framework; path = Frameworks/swiftaaf_Framework.framework; sourceTree = "<group>"; };
 		C9F100012FE0000100000001 /* ProResEncoderFramework.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = ProResEncoderFramework.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		C9B200012FE2000100000001 /* ProResEncoderAMA.avx */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ProResEncoderAMA.avx; sourceTree = BUILT_PRODUCTS_DIR; };
+		C9B210012FE2000100000001 /* ProResEncoderAMAContractTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = ProResEncoderAMAContractTests; sourceTree = BUILT_PRODUCTS_DIR; };
+		C9B230012FE2000100000001 /* ProResEncoderAMA.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ProResEncoderAMA.xcconfig; sourceTree = "<group>"; };
+		C9B221012FE2000100000001 /* PluginEntry.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/PluginEntry.mm"; sourceTree = "<group>"; };
+		C9B221022FE2000100000001 /* MediaContainerWriter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/MediaContainerWriter.mm"; sourceTree = "<group>"; };
+		C9B221032FE2000100000001 /* MediaVolumeWriter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/MediaVolumeWriter.mm"; sourceTree = "<group>"; };
+		C9B221042FE2000100000001 /* SampleConsumer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/SampleConsumer.mm"; sourceTree = "<group>"; };
+		C9B221052FE2000100000001 /* HostExportContext.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/HostExportContext.mm"; sourceTree = "<group>"; };
+		C9B221062FE2000100000001 /* HostAudioRouting.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/HostAudioRouting.mm"; sourceTree = "<group>"; };
+		C9B221072FE2000100000001 /* ColorPolicy.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/ColorPolicy.mm"; sourceTree = "<group>"; };
+		C9B221082FE2000100000001 /* DolbyMetadataTimeline.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/DolbyMetadataTimeline.mm"; sourceTree = "<group>"; };
+		C9B221092FE2000100000001 /* EncoderFrameworkAdapter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/EncoderFrameworkAdapter.mm"; sourceTree = "<group>"; };
+		C9B221102FE2000100000001 /* ExportParameters.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/ExportParameters.mm"; sourceTree = "<group>"; };
+		C9B221112FE2000100000001 /* ExportSession.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/ExportSession.mm"; sourceTree = "<group>"; };
+		C9B223022FE2000100000001 /* ContractTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ContractTests.mm; sourceTree = "<group>"; };
+		C9B222012FE2000100000001 /* CACFUnknown.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CACFUnknown.cpp; sourceTree = "<group>"; };
+		C9B222032FE2000100000001 /* CACFClassFactory.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = CACFClassFactory.cpp; sourceTree = "<group>"; };
+		C9B221122FE2000100000001 /* AMAHDRToneMapper.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/AMAHDRToneMapper.mm"; sourceTree = SOURCE_ROOT; };
+		C9B221132FE2000100000001 /* AMAHDRToneMapper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "prores encoder/avid_plugin/AMAHDRToneMapper.h"; sourceTree = SOURCE_ROOT; };
+		C9B250012FE2000100000001 /* AMAFrameWorkerClient.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/AMAFrameWorkerClient.mm"; sourceTree = SOURCE_ROOT; };
+		C9B250022FE2000100000001 /* AMAFrameWorkerClient.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "prores encoder/avid_plugin/AMAFrameWorkerClient.h"; sourceTree = SOURCE_ROOT; };
+		C9B250032FE2000100000001 /* AMAWorkerProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "prores encoder/avid_plugin/AMAWorkerProtocol.h"; sourceTree = SOURCE_ROOT; };
+		C9B250042FE2000100000001 /* AMAFrameWorker.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "prores encoder/avid_plugin/AMAFrameWorker.mm"; sourceTree = SOURCE_ROOT; };
+		C9B250052FE2000100000001 /* ProResEncoderAMAWorker */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = ProResEncoderAMAWorker; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		C96311D02F73E1A4005C254E /* prores encoder */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C9B2000F2FE2000100000001 /* Exceptions for "prores encoder" folder in "prores encoder" target */,
+				C9B200102FE2000100000001 /* Exceptions for "prores encoder" folder in "ProResEncoderFramework" target */,
+			);
 			path = "prores encoder";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C9B2000F2FE2000100000001 /* Exceptions for "prores encoder" folder in "prores encoder" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				avid_plugin,
+				avid_plugin/AMAFrameWorker.mm,
+				avid_plugin/AMAWorkerProtocol.h,
+				avid_plugin/AMAFrameWorkerClient.h,
+				avid_plugin/AMAFrameWorkerClient.mm,
+				avid_plugin/AMAHDRToneMapper.h,
+				avid_plugin/AMAHDRToneMapper.mm,
+				src_swift/ProResFrameStreamSession.swift,
+				src_swift/BGRAFrameStreamEncoder.swift,
+				avid_plugin/Resources,
+				avid_plugin/ColorPolicy.mm,
+				avid_plugin/DolbyMetadataTimeline.mm,
+				avid_plugin/EncoderFrameworkAdapter.mm,
+				avid_plugin/ExportParameters.h,
+				avid_plugin/ExportParameters.mm,
+				avid_plugin/ExportSession.hpp,
+				avid_plugin/ExportSession.mm,
+				avid_plugin/HostAudioRouting.h,
+				avid_plugin/HostAudioRouting.mm,
+				avid_plugin/HostExportContext.h,
+				avid_plugin/HostExportContext.mm,
+				avid_plugin/MediaContainerWriter.h,
+				avid_plugin/MediaContainerWriter.mm,
+				avid_plugin/MediaVolumeWriter.h,
+				avid_plugin/MediaVolumeWriter.mm,
+				avid_plugin/PluginEntry.mm,
+				avid_plugin/PluginHooks.h,
+				avid_plugin/ProResEncoderAMAIDs.h,
+				avid_plugin/Resources/Info.plist,
+				avid_plugin/Resources/ProResEncoderAMA.exp,
+				avid_plugin/SampleConsumer.h,
+				avid_plugin/SampleConsumer.mm,
+			);
+			target = C96311CD2F73E1A4005C254E /* prores encoder */;
+		};
+		C9B200102FE2000100000001 /* Exceptions for "prores encoder" folder in "ProResEncoderFramework" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				avid_plugin,
+				avid_plugin/AMAFrameWorker.mm,
+				avid_plugin/AMAWorkerProtocol.h,
+				avid_plugin/AMAFrameWorkerClient.h,
+				avid_plugin/AMAFrameWorkerClient.mm,
+				avid_plugin/AMAHDRToneMapper.h,
+				avid_plugin/AMAHDRToneMapper.mm,
+				avid_plugin/Resources,
+				avid_plugin/ColorPolicy.mm,
+				avid_plugin/DolbyMetadataTimeline.mm,
+				avid_plugin/EncoderFrameworkAdapter.mm,
+				avid_plugin/ExportParameters.h,
+				avid_plugin/ExportParameters.mm,
+				avid_plugin/ExportSession.hpp,
+				avid_plugin/ExportSession.mm,
+				avid_plugin/HostAudioRouting.h,
+				avid_plugin/HostAudioRouting.mm,
+				avid_plugin/HostExportContext.h,
+				avid_plugin/HostExportContext.mm,
+				avid_plugin/MediaContainerWriter.h,
+				avid_plugin/MediaContainerWriter.mm,
+				avid_plugin/MediaVolumeWriter.h,
+				avid_plugin/MediaVolumeWriter.mm,
+				avid_plugin/PluginEntry.mm,
+				avid_plugin/PluginHooks.h,
+				avid_plugin/ProResEncoderAMAIDs.h,
+				avid_plugin/Resources/Info.plist,
+				avid_plugin/Resources/ProResEncoderAMA.exp,
+				avid_plugin/SampleConsumer.h,
+				avid_plugin/SampleConsumer.mm,
+			);
+			target = C9F100052FE0000100000001 /* ProResEncoderFramework */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 
 /* Begin PBXFrameworksBuildPhase section */
 		C96311CB2F73E1A4005C254E /* Frameworks */ = {
@@ -83,6 +233,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C9B200042FE2000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9B210042FE2000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9B250102FE2000100000001 /* Worker Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -130,6 +295,10 @@
 			isa = PBXGroup;
 			children = (
 				C96311D02F73E1A4005C254E /* prores encoder */,
+				C9B221002FE2000100000001 /* ProResEncoderAMA Sources */,
+				C9B223042FE2000100000001 /* ProResEncoderAMAContractTests */,
+				C9B230022FE2000100000001 /* Config */,
+				C9B222052FE2000100000001 /* AvidSDK build */,
 				C9169E572FC6F7A1008FA3E8 /* ThirdParty */,
 				C9AAF0022F8A000100000001 /* Frameworks */,
 				C96311CF2F73E1A4005C254E /* Products */,
@@ -141,6 +310,9 @@
 			children = (
 				C96311CE2F73E1A4005C254E /* prores encoder */,
 				C9F100012FE0000100000001 /* ProResEncoderFramework.framework */,
+				C9B200012FE2000100000001 /* ProResEncoderAMA.avx */,
+				C9B210012FE2000100000001 /* ProResEncoderAMAContractTests */,
+				C9B250052FE2000100000001 /* ProResEncoderAMAWorker */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -153,7 +325,75 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+
+		C9B221002FE2000100000001 /* ProResEncoderAMA Sources */ = {
+			isa = PBXGroup;
+			children = (
+				C9B221012FE2000100000001 /* PluginEntry.mm */,
+				C9B221022FE2000100000001 /* MediaContainerWriter.mm */,
+				C9B221032FE2000100000001 /* MediaVolumeWriter.mm */,
+				C9B221042FE2000100000001 /* SampleConsumer.mm */,
+				C9B221052FE2000100000001 /* HostExportContext.mm */,
+				C9B221062FE2000100000001 /* HostAudioRouting.mm */,
+				C9B221072FE2000100000001 /* ColorPolicy.mm */,
+				C9B221082FE2000100000001 /* DolbyMetadataTimeline.mm */,
+				C9B221092FE2000100000001 /* EncoderFrameworkAdapter.mm */,
+				C9B221102FE2000100000001 /* ExportParameters.mm */,
+				C9B221112FE2000100000001 /* ExportSession.mm */,
+				C9B221122FE2000100000001 /* AMAHDRToneMapper.mm */,
+				C9B221132FE2000100000001 /* AMAHDRToneMapper.h */,
+				C9B250042FE2000100000001 /* AMAFrameWorker.mm */,
+				C9B250032FE2000100000001 /* AMAWorkerProtocol.h */,
+				C9B250022FE2000100000001 /* AMAFrameWorkerClient.h */,
+				C9B250012FE2000100000001 /* AMAFrameWorkerClient.mm */,
+			);
+			name = "ProResEncoderAMA Sources";
+			sourceTree = "<group>";
+		};
+		C9B222052FE2000100000001 /* AvidSDK build */ = {
+			isa = PBXGroup;
+			children = (
+				C9B222012FE2000100000001 /* CACFUnknown.cpp */,
+				C9B222032FE2000100000001 /* CACFClassFactory.cpp */,
+			);
+			name = "AvidSDK build";
+			path = ThirdParty/AvidSDK/acfsdk/utils;
+			sourceTree = "<group>";
+		};
+		C9B223042FE2000100000001 /* ProResEncoderAMAContractTests */ = {
+			isa = PBXGroup;
+			children = (
+				C9B223022FE2000100000001 /* ContractTests.mm */,
+			);
+			name = ProResEncoderAMAContractTests;
+			path = Tests/ProResEncoderAMA;
+			sourceTree = "<group>";
+		};
+		C9B230022FE2000100000001 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				C9B230012FE2000100000001 /* ProResEncoderAMA.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
+
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C9B200052FE2000100000001 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				C9B2000C2FE2000100000001 /* ProResEncoderFramework.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9B250112FE2000100000001 /* Embed AMA Worker */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 6; files = (C9B250082FE2000100000001, ); name = "Embed AMA Worker"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXNativeTarget section */
 		C96311CD2F73E1A4005C254E /* prores encoder */ = {
@@ -198,6 +438,44 @@
 			productReference = C9F100012FE0000100000001 /* ProResEncoderFramework.framework */;
 			productType = "com.apple.product-type.framework";
 		};
+
+		C9B200022FE2000100000001 /* ProResEncoderAMA */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C9B200082FE2000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderAMA" */;
+			buildPhases = (
+				C9B200032FE2000100000001 /* Sources */,
+				C9B200042FE2000100000001 /* Frameworks */,
+				C9B200052FE2000100000001 /* Embed Frameworks */,
+				C9B250112FE2000100000001 /* Embed AMA Worker */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C9B250142FE2000100000001 /* Worker dependency */,
+				C9B200092FE2000100000001 /* PBXTargetDependency */,
+			);
+			name = ProResEncoderAMA;
+			productName = ProResEncoderAMA;
+			productReference = C9B200012FE2000100000001 /* ProResEncoderAMA.avx */;
+			productType = "com.apple.product-type.bundle";
+		};
+		C9B210022FE2000100000001 /* ProResEncoderAMAContractTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C9B210072FE2000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderAMAContractTests" */;
+			buildPhases = (
+				C9B210032FE2000100000001 /* Sources */,
+				C9B210042FE2000100000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ProResEncoderAMAContractTests;
+			productName = ProResEncoderAMAContractTests;
+			productReference = C9B210012FE2000100000001 /* ProResEncoderAMAContractTests */;
+			productType = "com.apple.product-type.tool";
+		};
+		C9B250122FE2000100000001 /* ProResEncoderAMAWorker */ = {isa = PBXNativeTarget; buildConfigurationList = C9B250162FE2000100000001; buildPhases = (C9B250092FE2000100000001, C9B250102FE2000100000001, ); buildRules = (); dependencies = (); name = ProResEncoderAMAWorker; productName = ProResEncoderAMAWorker; productReference = C9B250052FE2000100000001; productType = "com.apple.product-type.tool"; };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -217,6 +495,12 @@
 					C9F100052FE0000100000001 = {
 						CreatedOnToolsVersion = 26.3;
 					};
+					C9B200022FE2000100000001 = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					C9B210022FE2000100000001 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 				};
 			};
 			buildConfigurationList = C96311C92F73E1A4005C254E /* Build configuration list for PBXProject "prores encoder" */;
@@ -233,9 +517,12 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				C9B250122FE2000100000001 /* ProResEncoderAMAWorker */,
 				C9A110012FE1000100000001 /* Build All */,
 				C96311CD2F73E1A4005C254E /* prores encoder */,
 				C9F100052FE0000100000001 /* ProResEncoderFramework */,
+				C9B200022FE2000100000001 /* ProResEncoderAMA */,
+				C9B210022FE2000100000001 /* ProResEncoderAMAContractTests */,
 			);
 		};
 /* End PBXProject section */
@@ -251,6 +538,22 @@
 			target = C9F100052FE0000100000001 /* ProResEncoderFramework */;
 			targetProxy = C9A110062FE1000100000001 /* PBXContainerItemProxy */;
 		};
+		C9B200092FE2000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C9F100052FE0000100000001 /* ProResEncoderFramework */;
+			targetProxy = C9B2000A2FE2000100000001 /* PBXContainerItemProxy */;
+		};
+		C9B2000D2FE2000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C9B200022FE2000100000001 /* ProResEncoderAMA */;
+			targetProxy = C9B2000E2FE2000100000001 /* PBXContainerItemProxy */;
+		};
+		C9B210082FE2000100000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C9B210022FE2000100000001 /* ProResEncoderAMAContractTests */;
+			targetProxy = C9B210092FE2000100000001 /* PBXContainerItemProxy */;
+		};
+		C9B250142FE2000100000001 /* Worker dependency */ = {isa = PBXTargetDependency; target = C9B250122FE2000100000001; targetProxy = C9B250132FE2000100000001; };
 /* End PBXTargetDependency section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -268,6 +571,39 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+
+		C9B200032FE2000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C9B221012FE2000100000002 /* source */,
+				C9B221022FE2000100000002 /* source */,
+				C9B221032FE2000100000002 /* source */,
+				C9B221042FE2000100000002 /* source */,
+				C9B221052FE2000100000002 /* source */,
+				C9B221062FE2000100000002 /* source */,
+				C9B221072FE2000100000002 /* source */,
+				C9B221082FE2000100000002 /* source */,
+				C9B221092FE2000100000002 /* source */,
+				C9B221102FE2000100000002 /* source */,
+				C9B221112FE2000100000002 /* source */,
+				C9B221122FE2000100000002 /* AMAHDRToneMapper.mm */,
+				C9B250062FE2000100000001 /* AMAFrameWorkerClient.mm */,
+				C9B222022FE2000100000001 /* source */,
+				C9B222042FE2000100000001 /* source */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9B210032FE2000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C9B223012FE2000100000001 /* ExportSession.mm in Sources */,
+				C9B223032FE2000100000001 /* ContractTests.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9B250092FE2000100000001 /* Worker Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C9B250072FE2000100000001, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -611,6 +947,168 @@
 			};
 			name = Release;
 		};
+
+		C9B200062FE2000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C9B230012FE2000100000001 /* ProResEncoderAMA.xcconfig */;
+			buildSettings = {
+
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = NO;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXPORTED_SYMBOLS_FILE = "prores encoder/avid_plugin/Resources/ProResEncoderAMA.exp";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				GCC_ENABLE_CPP_RTTI = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				GENERATE_PKGINFO_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/avid_plugin",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/include",
+					"$(SRCROOT)/ThirdParty/AvidSDK/acfsdk/inc",
+					"$(SRCROOT)/ThirdParty/AvidSDK/acfsdk/utils",
+					"$(SRCROOT)/ThirdParty/AvidSDK/aafsdk/include",
+				);
+				INFOPLIST_FILE = "prores encoder/avid_plugin/Resources/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/release",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/debug",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.ama;
+				PRODUCT_NAME = ProResEncoderAMA;
+				SKIP_INSTALL = YES;
+				WRAPPER_EXTENSION = avx;
+
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lamautillib_sd",
+					"-framework",
+					CoreFoundation,
+					"-framework",
+					CoreServices,
+				);
+			};
+			name = Debug;
+		};
+		C9B200072FE2000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C9B230012FE2000100000001 /* ProResEncoderAMA.xcconfig */;
+			buildSettings = {
+
+				ARCHS = arm64;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = NO;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXPORTED_SYMBOLS_FILE = "prores encoder/avid_plugin/Resources/ProResEncoderAMA.exp";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+					"$(PROJECT_DIR)/Frameworks",
+				);
+				GCC_ENABLE_CPP_EXCEPTIONS = YES;
+				GCC_ENABLE_CPP_RTTI = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				GENERATE_PKGINFO_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/include",
+					"$(SRCROOT)/prores\\ encoder/avid_plugin",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/include",
+					"$(SRCROOT)/ThirdParty/AvidSDK/acfsdk/inc",
+					"$(SRCROOT)/ThirdParty/AvidSDK/acfsdk/utils",
+					"$(SRCROOT)/ThirdParty/AvidSDK/aafsdk/include",
+				);
+				INFOPLIST_FILE = "prores encoder/avid_plugin/Resources/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/release",
+					"$(SRCROOT)/ThirdParty/AvidSDK/amasdk/lib/debug",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.proresencoder.ama;
+				PRODUCT_NAME = ProResEncoderAMA;
+				SKIP_INSTALL = YES;
+				WRAPPER_EXTENSION = avx;
+
+				CURRENT_PROJECT_VERSION = 1;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lamautillib_s",
+					"-framework",
+					CoreFoundation,
+					"-framework",
+					CoreServices,
+				);
+			};
+			name = Release;
+		};
+
+		C9B210052FE2000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+
+				ARCHS = arm64;
+				CLANG_ENABLE_OBJC_ARC = NO;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/avid_plugin",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_NAME = ProResEncoderAMAContractTests;
+				SKIP_INSTALL = YES;
+
+			};
+			name = Debug;
+		};
+		C9B210062FE2000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+
+				ARCHS = arm64;
+				CLANG_ENABLE_OBJC_ARC = NO;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/prores\\ encoder/avid_plugin",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_NAME = ProResEncoderAMAContractTests;
+				SKIP_INSTALL = YES;
+
+			};
+			name = Release;
+		};
+		C9B250152FE2000100000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CLANG_ENABLE_OBJC_ARC = NO; CLANG_CXX_LANGUAGE_STANDARD = "c++17"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_NAME = ProResEncoderAMAWorker; SDKROOT = macosx; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Automatic; GCC_OPTIMIZATION_LEVEL = 0; HEADER_SEARCH_PATHS = "$(SRCROOT)/prores encoder/avid_plugin"; OTHER_LDFLAGS = ("-framework", Foundation, ); }; name = Debug; };
+		C9B250152FE2000100000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CLANG_ENABLE_OBJC_ARC = NO; CLANG_CXX_LANGUAGE_STANDARD = "c++17"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_NAME = ProResEncoderAMAWorker; SDKROOT = macosx; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Automatic; GCC_OPTIMIZATION_LEVEL = 3; HEADER_SEARCH_PATHS = "$(SRCROOT)/prores encoder/avid_plugin"; OTHER_LDFLAGS = ("-framework", Foundation, ); }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -650,6 +1148,26 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+
+		C9B200082FE2000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderAMA" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9B200062FE2000100000001 /* Debug */,
+				C9B200072FE2000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C9B210072FE2000100000001 /* Build configuration list for PBXNativeTarget "ProResEncoderAMAContractTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9B210052FE2000100000001 /* Debug */,
+				C9B210062FE2000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C9B250162FE2000100000001 /* Worker configuration list */ = {isa = XCConfigurationList; buildConfigurations = (C9B250152FE2000100000001, C9B250152FE2000100000002, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = C96311C62F73E1A4005C254E /* Project object */;

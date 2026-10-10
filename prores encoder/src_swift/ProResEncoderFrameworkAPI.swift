@@ -335,7 +335,7 @@ public struct ProResEncodeOptions: Sendable {
     }
 
     /// Enforces mutual exclusion between direct conversion and LUT burn-in.
-    fileprivate func makeColorTransformRequest() throws -> ColorTransformRequest? {
+    func makeColorTransformRequest() throws -> ColorTransformRequest? {
         guard colorConversion == nil || lutColorConversion == nil else {
             throw ColorTransformError.conflictingColorModes
         }
@@ -649,6 +649,11 @@ public final class ProResEncoder: Sendable {
                 "MP4 output supports H.264, HEVC, AV1, or pass-through."
             )
         }
+        if (format == .op1a || format == .opatom) && quality == "pass" {
+            throw ProResEncoderError.invalidOption(
+                "MXF output does not support pass-through. Choose a ProRes quality to write valid RDD-36 essence."
+            )
+        }
         if format == .mp4, options.forcedOutputStartTimecode != nil {
             throw ProResEncoderError.invalidOption(
                 "forcedOutputStartTimecode is supported only in MOV."
@@ -848,6 +853,20 @@ public final class ProResEncoder: Sendable {
         )
         defer { try? fileManager.removeItem(at: stagingRoot) }
 
+        let frameEstimate = await estimateFrameCount(asset: AVURLAsset(url: inputURL))
+        let batchUnits = options.formats.reduce(1) { sum, format in
+            let units = encodePipelineProgressUnits(
+                frames: frameEstimate, quality: format.quality, cmuMasteringNits: nil,
+                includeGeneratedCMU: false,
+                hasExternalDolbyVisionXML: format.dolbyVisionProfile != nil,
+                exportFormat: "mov", multiPass: format.quality == "hevc"
+            )
+            let result = sum.addingReportingOverflow(units)
+            return result.overflow ? Int.max : result.partialValue
+        }
+        let batchProgress = ProgressBar(total: batchUnits)
+        defer { batchProgress.endLine() }
+
         var stagedArtifacts: [(
             artifact: ProResElementaryStreamArtifact,
             stagedURL: URL
@@ -905,12 +924,14 @@ public final class ProResEncoder: Sendable {
                 useDolbyVisionCodecTag: format.dolbyVisionProfile != nil,
                 outputVideoRaw: true
             )
-            _ = try await encode(
-                inputURL: inputURL,
-                outputURL: temporaryContainerURL,
-                format: .mov,
-                options: encodeOptions
-            )
+            _ = try await EncodingProgressContext.$parent.withValue(batchProgress) {
+                try await encode(
+                    inputURL: inputURL,
+                    outputURL: temporaryContainerURL,
+                    format: .mov,
+                    options: encodeOptions
+                )
+            }
 
             let internalProfile = format.dolbyVisionProfile.flatMap {
                 DolbyVisionHEVCProfile(argument: $0.rawValue)
@@ -986,6 +1007,7 @@ public final class ProResEncoder: Sendable {
             )
         }
 
+        batchProgress.finish()
         return ProResElementaryStreamResult(
             artifacts: stagedArtifacts.map(\.artifact)
         )
@@ -1011,24 +1033,73 @@ public final class ProResEncoder: Sendable {
                 "Folder encoding does not support extraAudioURL."
             )
         }
+        if (format == .op1a || format == .opatom),
+           inputFolderURL.standardizedFileURL.resolvingSymlinksInPath()
+                == outputDirectoryURL.standardizedFileURL.resolvingSymlinksInPath() {
+            throw ProResEncoderError.invalidOption(
+                "MXF folder output must use a different directory from its input folder to prevent source-media replacement."
+            )
+        }
         try fileManager.createDirectory(
             at: outputDirectoryURL,
             withIntermediateDirectories: true
         )
-        let validExtensions: Set<String> = [
-            "mp4", "mov", "m4v", "mxf", "avi", "mkv"
-        ]
-        let inputs = try fileManager.contentsOfDirectory(
+        let candidates = try fileManager.contentsOfDirectory(
             at: inputFolderURL,
-            includingPropertiesForKeys: nil
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
         )
-        .filter { validExtensions.contains($0.pathExtension.lowercased()) }
-        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var inputs: [URL] = []
+        for candidate in candidates {
+            guard (try? candidate.resourceValues(
+                forKeys: [.isRegularFileKey]
+            ).isRegularFile) == true else {
+                continue
+            }
+            let asset = AVURLAsset(url: candidate)
+            if ((try? await asset.loadTracks(withMediaType: .video)) ?? []).isEmpty == false {
+                inputs.append(candidate)
+            }
+        }
+        inputs.sort { $0.lastPathComponent < $1.lastPathComponent }
         guard !inputs.isEmpty else {
             throw ProResEncoderError.invalidOption(
                 "No supported media files were found in \(inputFolderURL.path)."
             )
         }
+
+        // Resolve all names before writing any output, including MXF basenames.
+        let stems = inputs.map { $0.deletingPathExtension().lastPathComponent }
+        guard Set(stems).count == stems.count else {
+            throw ProResEncoderError.invalidOption("Folder inputs have duplicate output basenames.")
+        }
+        if format == .mov || format == .mp4 {
+            let destinations = stems.map {
+                outputDirectoryURL.appendingPathComponent($0).appendingPathExtension(format.rawValue)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+            }
+            guard Set(destinations).isDisjoint(with: inputs.map {
+                $0.standardizedFileURL.resolvingSymlinksInPath()
+            }) else {
+                throw ProResEncoderError.invalidOption("Folder outputs would overwrite an input file.")
+            }
+        }
+        var batchUnits = 1
+        for input in inputs {
+            let units = encodePipelineProgressUnits(
+                frames: await estimateFrameCount(asset: AVURLAsset(url: input)),
+                quality: normalizedProResQuality(options.quality),
+                cmuMasteringNits: options.cmuMasteringNits,
+                includeGeneratedCMU: options.includeGeneratedDolbyVisionMetadata,
+                hasExternalDolbyVisionXML: options.dolbyVisionXMLURL != nil,
+                exportFormat: format.rawValue,
+                multiPass: options.multiPass ?? true
+            )
+            let sum = batchUnits.addingReportingOverflow(units)
+            batchUnits = sum.overflow ? Int.max : sum.partialValue
+        }
+        let batchProgress = ProgressBar(total: batchUnits)
+        defer { batchProgress.endLine() }
 
         var perClipOptions = options
         if options.aafMode == .sequence {
@@ -1044,12 +1115,15 @@ public final class ProResEncoder: Sendable {
             } else {
                 outputURL = outputDirectoryURL
             }
-            results.append(try await encode(
-                inputURL: inputURL,
-                outputURL: outputURL,
-                format: format,
-                options: perClipOptions
-            ))
+            let clipOptions = perClipOptions
+            results.append(try await EncodingProgressContext.$parent.withValue(batchProgress) {
+                try await encode(
+                    inputURL: inputURL,
+                    outputURL: outputURL,
+                    format: format,
+                    options: clipOptions
+                )
+            })
         }
 
         var sequenceAAFURL: URL?
@@ -1080,6 +1154,7 @@ public final class ProResEncoder: Sendable {
             }
             sequenceAAFURL = candidate
         }
+        batchProgress.finish()
         return ProResBatchEncodeResult(
             clips: results,
             sequenceAAFURL: sequenceAAFURL
@@ -1136,6 +1211,20 @@ public final class ProResEncoder: Sendable {
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+        let progress = makeEncodePipelineProgressBar(
+            frames: Int64(max(timelineFrameCount(from: descriptor), 1)),
+            quality: quality,
+            cmuMasteringNits: options.cmuMasteringNits,
+            includeGeneratedCMU: options.includeGeneratedDolbyVisionMetadata,
+            hasExternalDolbyVisionXML: false,
+            exportFormat: "mov"
+        )
+        var pipelineSucceeded = false
+        defer {
+            if !pipelineSucceeded {
+                progress?.endLine()
+            }
+        }
         guard await encodeTimelineMOV(
             composition: composition,
             descriptor: descriptor,
@@ -1143,7 +1232,8 @@ public final class ProResEncoder: Sendable {
             quality: quality,
             forcedOutputStartTimecode: options.forcedOutputStartTimecode,
             deleteSourceAudio: options.deleteSourceAudio,
-            colorTransform: colorTransform
+            colorTransform: colorTransform,
+            progress: progress
         ) else {
             throw ProResEncoderError.encodingFailed(
                 "Timeline bounce failed for \(inputTimelineURL.lastPathComponent)."
@@ -1155,20 +1245,24 @@ public final class ProResEncoder: Sendable {
             cmuArtifacts = try await runCMUAnalysisOnOutput(
                 outputURL: outputURL,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: options.forcedOutputStartTimecode
+                forcedStartTimecode: options.forcedOutputStartTimecode,
+                progress: progress
             )
         }
         if options.includeGeneratedDolbyVisionMetadata,
            let xmlURL = cmuArtifacts?.xmlURL {
             guard await includeGeneratedCMUXMLInProResMOV(
                 outputURL: outputURL,
-                xmlURL: xmlURL
+                xmlURL: xmlURL,
+                progress: progress
             ) else {
                 throw ProResEncoderError.encodingFailed(
                     "Could not include generated CMU XML in timeline output."
                 )
             }
         }
+        progress?.finish()
+        pipelineSucceeded = true
         return ProResEncodeResult(
             outputURLs: [outputURL],
             cmuXMLURL: cmuArtifacts?.xmlURL
@@ -1256,7 +1350,25 @@ public final class ProResEncoder: Sendable {
             withIntermediateDirectories: true
         )
 
-        let asset = AVURLAsset(url: inputURL)
+        let decodableSource = await makeDecodableSource(for: inputURL)
+        defer { decodableSource.cleanup() }
+        let asset = decodableSource.asset
+        let progress = makeEncodePipelineProgressBar(
+            frames: await estimateFrameCount(asset: asset),
+            quality: quality,
+            cmuMasteringNits: options.cmuMasteringNits,
+            includeGeneratedCMU: options.includeGeneratedDolbyVisionMetadata,
+            hasExternalDolbyVisionXML: options.dolbyVisionXMLURL != nil,
+            exportFormat: outputURL.pathExtension.lowercased() == "mp4" ? "mp4" : "mov",
+            multiPass: (quality == "hevc" || quality == "h264")
+                && resolvedHEVCMultiPass(explicit: options.multiPass, allIntra: false)
+        )
+        var pipelineSucceeded = false
+        defer {
+            if !pipelineSucceeded {
+                progress?.endLine()
+            }
+        }
         if let masteringPeakNits = options.cmuMasteringNits {
             try await cmuPreflight(
                 inputAsset: asset,
@@ -1319,7 +1431,8 @@ public final class ProResEncoder: Sendable {
                 colorTransform: colorTransform,
                 dolbyVisionProfile: internalProfile,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: options.forcedOutputStartTimecode
+                forcedStartTimecode: options.forcedOutputStartTimecode,
+                progress: progress
             )
             dolbyVisionXMLURL = generatedCMUArtifacts?.xmlURL
         }
@@ -1341,7 +1454,8 @@ public final class ProResEncoder: Sendable {
             colorTransform: colorTransform,
             useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
             container: outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov,
-            outputVideoRaw: options.outputVideoRaw
+            outputVideoRaw: options.outputVideoRaw,
+            progress: progress
         )
         guard success else {
             throw ProResEncoderError.encodingFailed(
@@ -1356,7 +1470,8 @@ public final class ProResEncoder: Sendable {
                 sidecarBaseURL: temporaryCMUSidecarBaseURL,
                 quality: quality,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: options.forcedOutputStartTimecode
+                forcedStartTimecode: options.forcedOutputStartTimecode,
+                progress: progress
             )
         }
         if options.includeGeneratedDolbyVisionMetadata,
@@ -1365,7 +1480,8 @@ public final class ProResEncoder: Sendable {
            let xmlURL = generatedCMUArtifacts?.xmlURL {
             guard await includeGeneratedCMUXMLInProResMOV(
                 outputURL: outputURL,
-                xmlURL: xmlURL
+                xmlURL: xmlURL,
+                progress: progress
             ) else {
                 throw ProResEncoderError.encodingFailed(
                     "Could not include generated CMU XML in \(outputURL.lastPathComponent)."
@@ -1380,6 +1496,8 @@ public final class ProResEncoder: Sendable {
                 profile: internalProfile
             ))
         }
+        progress?.finish()
+        pipelineSucceeded = true
         return ProResEncodeResult(
             outputURLs: outputURLs,
             cmuXMLURL: isCompressedOutput ? nil : generatedCMUArtifacts?.xmlURL
@@ -1423,7 +1541,23 @@ public final class ProResEncoder: Sendable {
             at: outputDirectoryURL,
             withIntermediateDirectories: true
         )
-        let asset = AVURLAsset(url: inputURL)
+        let decodableSource = await makeDecodableSource(for: inputURL)
+        defer { decodableSource.cleanup() }
+        let asset = decodableSource.asset
+        let progress = makeEncodePipelineProgressBar(
+            frames: await estimateFrameCount(asset: asset),
+            quality: quality,
+            cmuMasteringNits: options.cmuMasteringNits,
+            includeGeneratedCMU: options.includeGeneratedDolbyVisionMetadata,
+            hasExternalDolbyVisionXML: false,
+            exportFormat: format.rawValue
+        )
+        var pipelineSucceeded = false
+        defer {
+            if !pipelineSucceeded {
+                progress?.endLine()
+            }
+        }
         if let masteringPeakNits = options.cmuMasteringNits {
             try await cmuPreflight(
                 inputAsset: asset,
@@ -1435,7 +1569,7 @@ public final class ProResEncoder: Sendable {
         let basename = inputURL.deletingPathExtension().lastPathComponent
         let result = await encodeMXF(
             asset: asset,
-            sourceURL: inputURL,
+            sourceURL: decodableSource.url,
             outputDir: outputDirectoryURL.path,
             basename: basename,
             quality: quality,
@@ -1446,7 +1580,8 @@ public final class ProResEncoder: Sendable {
                 : nil,
             deleteSourceAudio: options.deleteSourceAudio,
             colorTransform: colorTransform,
-            outputVideoRaw: options.outputVideoRaw
+            outputVideoRaw: options.outputVideoRaw,
+            progress: progress
         )
         guard result.success else {
             throw ProResEncoderError.encodingFailed(
@@ -1464,7 +1599,8 @@ public final class ProResEncoder: Sendable {
                 sidecarBaseURL: outputDirectoryURL.appendingPathComponent(basename),
                 quality: quality,
                 masteringPeakNits: masteringPeakNits,
-                forcedStartTimecode: nil
+                forcedStartTimecode: nil,
+                progress: progress
             ).xmlURL
         }
 
@@ -1489,6 +1625,8 @@ public final class ProResEncoder: Sendable {
             }
             aafURL = candidate
         }
+        progress?.finish()
+        pipelineSucceeded = true
         return ProResEncodeResult(
             outputURLs: result.paths.map(URL.init(fileURLWithPath:)),
             framesEncoded: result.framesEncoded,

@@ -304,6 +304,27 @@ typedef unsigned int swift_uint4  __attribute__((__ext_vector_type__(4)));
 
 #if defined(__OBJC__)
 
+@class NSString;
+@class NSURL;
+@class NSDictionary;
+@class NSData;
+SWIFT_CLASS_NAMED("ProResFrameStreamSession")
+@interface ProResFrameStreamSession : NSObject
+@property (nonatomic, readonly, copy) NSString * _Nonnull lastErrorMessage;
+- (nonnull instancetype)initWithOutputURL:(NSURL * _Nonnull)outputURL width:(NSInteger)width height:(NSInteger)height fpsNumerator:(NSInteger)fpsNumerator fpsDenominator:(NSInteger)fpsDenominator quality:(NSString * _Nonnull)quality containerExtension:(NSString * _Nonnull)containerExtension bitrateMbps:(double)bitrateMbps includeDolbyVision:(BOOL)includeDolbyVision;
+/// Objective-C boundary for the existing public encoder options. Keys are
+/// validated in <code>makeEncodeOptions()</code> before a host export is committed.
+- (nonnull instancetype)initWithOutputURL:(NSURL * _Nonnull)outputURL width:(NSInteger)width height:(NSInteger)height fpsNumerator:(NSInteger)fpsNumerator fpsDenominator:(NSInteger)fpsDenominator quality:(NSString * _Nonnull)quality containerExtension:(NSString * _Nonnull)containerExtension bitrateMbps:(double)bitrateMbps includeDolbyVision:(BOOL)includeDolbyVision advancedOptions:(NSDictionary * _Nonnull)advancedOptions OBJC_DESIGNATED_INITIALIZER;
+- (BOOL)appendBGRAFrame:(NSData * _Nonnull)frame stride:(NSInteger)stride SWIFT_WARN_UNUSED_RESULT;
+/// Media Composer can deliver a rendered sequence as encoded ProRes frames.
+/// Mux those frames without another encode, then use the existing encoder API.
+- (BOOL)appendProResFrame:(NSData * _Nonnull)frame sourceCodec:(NSString * _Nonnull)sourceCodec SWIFT_WARN_UNUSED_RESULT;
+- (BOOL)finish SWIFT_WARN_UNUSED_RESULT;
+- (void)cancel;
+- (nonnull instancetype)init SWIFT_UNAVAILABLE;
++ (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
+@end
+
 SWIFT_CLASS("_TtC22ProResEncoderFramework17XMLTimelineParser")
 @interface XMLTimelineParser : NSObject
 - (nonnull instancetype)init OBJC_DESIGNATED_INITIALIZER;

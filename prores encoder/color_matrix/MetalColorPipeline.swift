@@ -95,6 +95,7 @@ final class MetalColorPipeline: @unchecked Sendable {
     private let width: Int
     private let height: Int
     private let pixelFormat: OSType
+    private let outputPixelFormat: OSType
     private let outputColorSpace: SourceColorSpace
     private var uniforms: MetalColorUniforms
     private let processLock = NSLock()
@@ -104,7 +105,8 @@ final class MetalColorPipeline: @unchecked Sendable {
         transform resolved: ResolvedColorTransform,
         width: Int,
         height: Int,
-        pixelFormat: OSType
+        pixelFormat: OSType,
+        outputPixelFormat: OSType? = nil
     ) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalColorPipelineError.metalUnavailable
@@ -116,6 +118,18 @@ final class MetalColorPipeline: @unchecked Sendable {
             throw MetalColorPipelineError.unsupportedPixelFormat(pixelFormat)
         }
 
+        let destinationFormat = outputPixelFormat ?? pixelFormat
+        guard Self.isSupported(destinationFormat) else {
+            throw MetalColorPipelineError.unsupportedPixelFormat(destinationFormat)
+        }
+        // BGRA is RGB/full range. Packing it into P010 is a separate output
+        // choice, so conversion never quantizes a PQ result back to 8-bit RGB.
+        if destinationFormat != kCVPixelFormatType_32BGRA {
+            guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+                throw MetalColorPipelineError.unsupportedPixelFormat(destinationFormat)
+            }
+        }
+        self.outputPixelFormat = destinationFormat
         self.device = device
         self.commandQueue = commandQueue
         self.width = width
@@ -143,7 +157,7 @@ final class MetalColorPipeline: @unchecked Sendable {
                 kCVPixelBufferPoolMinimumBufferCountKey as String: 6
             ] as CFDictionary,
             [
-                kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormat),
+                kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: destinationFormat),
                 kCVPixelBufferWidthKey as String: NSNumber(value: width),
                 kCVPixelBufferHeightKey as String: NSNumber(value: height),
                 kCVPixelBufferMetalCompatibilityKey as String: kCFBooleanTrue as Any,
@@ -186,7 +200,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         packBGRA = try Self.makePipeline("color_pack_bgra", library: library, device: device)
 
         let verticalSubsampling: UInt32 =
-            pixelFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ? 2 : 1
+            destinationFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ? 2 : 1
         uniforms = MetalColorUniforms(
             matrix0: resolved.matrixColumns.0,
             matrix1: resolved.matrixColumns.1,
@@ -296,7 +310,7 @@ final class MetalColorPipeline: @unchecked Sendable {
 
         try encodeTransform(commandBuffer: commandBuffer)
 
-        if pixelFormat == kCVPixelFormatType_32BGRA {
+        if outputPixelFormat == kCVPixelFormatType_32BGRA {
             let outputTexture = try makeTexture(
                 from: destination,
                 plane: 0,

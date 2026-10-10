@@ -1,5 +1,7 @@
 # ProRes Encoder 1.2.5
 
+Author: [B00kerLouis](https://github.com/B00kerLouis).
+
 Native macOS CLI and Framework for professional video encoding, HDR color
 conversion, dynamic metadata processing, MOV/MP4/MXF mastering, linked timeline
 workflows, batch encoding, and external-audio replacement.
@@ -30,6 +32,35 @@ from project-owned source code.
 
 The project license and any designated commercial-license exception do not
 relicense those bundled dependencies.
+
+## Media Composer AMA
+
+Build All also builds `ProResEncoderAMA.avx`, an AMA writeback bundle. Its
+Objective-C++ sources are not part of the CLI or framework targets. The Avid
+headers it compiles against live only in gitignored `ThirdParty/AvidSDK/` and
+must not be published. The bundle is packaged like the installed Avid AMA
+plug-ins, with `CFBundlePackageType=APPL` and `Contents/PkgInfo=APPL????`.
+Media Composer 26.8 on this machine loaded the signed arm64 bundle at startup.
+The encoder framework is embedded. On the first export picture, the plug-in
+starts its bundled `ProResEncoderAMAWorker`, which loads that framework with
+`NSBundle`. The registration Mach-O has no encoder framework load command.
+The AMA parameter XML maps the existing single-file
+`ProResEncodeOptions` fields, including codec/container, numeric bitrate,
+timecode, audio file replacement, Dolby Vision, color/LUT, raw video, B-frames,
+multi-pass, and AAF. A completed Media Composer export and the Output dialog
+presentation have not yet been verified. H.264 Dolby Vision remains unsupported,
+and unread project color blocks automatic Dolby Vision. Details are in
+`AGENTS.md` and `docs/feature-coverage.md`.
+
+The arm64 Release bundle is checked in at
+[`build/Release/ProResEncoderAMA.avx`](build/Release/ProResEncoderAMA.avx).
+It includes the worker and encoder framework, uses an ad hoc signature, and
+requires macOS 14 or later. Public GitHub Actions build the CLI and framework,
+run the Avid-free contract checks, verify the prebuilt AVX package and its
+checksums, and package it as `ProResEncoderAMA-arm64.zip`. They do not compile
+the AMA target or verify Media Composer exports. Building `Build All` locally
+requires your licensed Avid SDK in `ThirdParty/AvidSDK/`; SDK headers, libraries,
+debug symbols, and local research records are excluded from the release files.
 
 ## Requirements
 
@@ -162,10 +193,10 @@ Final compressed samples are inspected before the file is accepted:
 - HEVC output uses a verifier-oriented sample entry by default, including
   streams carrying dynamic HDR metadata.
 - AV1 output similarly uses a verifier-oriented sample entry by default.
-- Pass `--dv-flag` / `-df` only when an explicit alternate dynamic-HDR sample entry is
-  required. Profile 5 already writes `dvh1` and Profile 7.6 already writes `dvhe`
-  so the Dolby verifier container check can pass without `-df`. Cross-compatible
-  Profile 8.1 / 8.4 keep `hvc1` unless `-df` is set.
+- Profile 5 writes `dvh1` and Profile 7.6 writes `dvhe`. Cross-compatible Profile
+  8.1 / 8.4 retain `hvc1`, and Profile 10.1 retains `av01`; these sample entries
+  are required for Dolby verifier container conformance. `--dv-flag` / `-df` selects
+  `dav1` only for AV1 Profile 10 and 10.4, where that entry is valid.
 - A requested dynamic HDR metadata encode fails instead of returning a file if
   the finalized stream contains no requested metadata.
 
@@ -319,13 +350,13 @@ proresencoder -i hdr.mov -o av1_p101.mov -q av1 -b 50 -dp 101 \
   --cmu 1000 --cmu-include
 ```
 
-Add `--dv-flag` / `-df` only when an explicit alternate dynamic-HDR sample entry is
-required by the target workflow:
+For AV1 Profile 10 or 10.4, add `--dv-flag` / `-df` when the target workflow requires
+the valid `dav1` sample entry:
 
 ```bash
-proresencoder -i hdr.mov -o hevc_metadata.mov -q hevc -b 50 -dp 81 \
-  -dovi metadata.xml --dv-flag
-proresencoder -i hdr.mov -o av1_metadata.mov -q av1 -b 50 -dp 101 \
+proresencoder -i hdr.mov -o av1_native.mov -q av1 -b 50 -dp 10 \
+  -dovi metadata.xml -df
+proresencoder -i hdr.mov -o av1_hlg.mov -q av1 -b 50 -dp 104 \
   -dovi metadata.xml -df
 ```
 
@@ -482,3 +513,35 @@ proresencoder -if input_folder -ef opatom -q 422hq --export-aaf-all -o output_di
 - MOV replacement output should contain only the replacement audio stream plus
   video and timecode/metadata tracks.
 - Generated files and bundled dependency files retain their own notices.
+
+## External Storage and NAS Recovery
+
+The encoder never stages source or delivery media to the system disk. MOV, MP4,
+OP-1a, and OP-Atom jobs write to a hidden working file or directory beside the
+requested destination on the same volume, so Thunderbolt and NAS bandwidth stay
+on the selected storage path. A completed job is published with same-volume
+rename/replace operations; this is metadata-only and does not copy media bytes.
+
+MOV and MP4 output writes a closed movie fragment every 10 seconds. Apple
+recommends intervals of at least 10 seconds for high-performance external media;
+if a write is interrupted, the retained recovery file is playable through the
+last completed fragment. Failed MOV/MP4 and MXF jobs are retained beside the
+delivery as `*.recoverable-*`, while any pre-existing completed delivery remains
+untouched.
+
+For source or destination I/O interruptions, the MOV/MP4 path waits up to 30
+minutes for storage to reconnect and retries the direct-to-volume job up to three
+times. When a failed MOV/MP4 contains scanner-verified complete fragments, the
+encoder preserves that prefix, encodes only the missing source tail, and performs
+a pass-through remux on the same destination volume. This avoids recompressing
+the intact prefix. If track layouts or frame-indexed Dolby Vision/CMU side data
+cannot be safely reconstructed, it falls back to a fresh direct transaction
+instead of emitting a potentially invalid file.
+
+After an application crash or power loss, resume an eligible MOV/MP4 manually:
+
+```bash
+proresencoder -i source.mov -q hevc -b 20 \
+  --resume-recovery output.recoverable-XXXXXXXX.mov \
+  -o output.mov
+```

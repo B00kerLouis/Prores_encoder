@@ -3,6 +3,7 @@
 // structured concurrency.
 
 import Foundation
+import Darwin
 @preconcurrency import AVFoundation
 import AudioToolbox
 import CoreMedia
@@ -620,41 +621,6 @@ final class PipelineFailureBox: @unchecked Sendable {
     }
 }
 
-/// Serializes terminal progress updates from concurrent callers.
-final class ProgressBar: @unchecked Sendable {
-    private let lock = NSLock()
-    private var current = 0
-    private let total: Int
-    private var lastPercent = -1
-
-    /// Creates a progress counter with a nonzero denominator.
-    init(total: Int) { self.total = max(total, 1) }
-
-    /// Advances the counter and redraws when the integer percentage changes.
-    func increment() {
-        lock.lock()
-        current += 1
-        let pct = min(current * 100 / total, 100)
-        if pct != lastPercent {
-            lastPercent = pct
-            let w = 40; let f = pct * w / 100; let e = w - f
-            let bar = String(repeating: "█", count: f) + String(repeating: "░", count: e)
-            print("\r  [\(bar)] \(pct)% (\(current)/\(total))", terminator: "")
-            fflush(stdout)
-        }
-        lock.unlock()
-    }
-
-    /// Draws the final state and terminates the terminal line.
-    func finish() {
-        lock.lock()
-        let bar = String(repeating: "█", count: 40)
-        print("\r  [\(bar)] 100% (\(total)/\(total))")
-        fflush(stdout)
-        lock.unlock()
-    }
-}
-
 /// Converts a writer status value to a stable diagnostic label.
 private func writerStatusName(_ status: AVAssetWriter.Status) -> String {
     switch status {
@@ -686,20 +652,29 @@ private func makeWriterFailure(
     reader: AVAssetReader? = nil
 ) -> NSError {
     var parts = ["\(stage)"]
+    var underlyingError: Error?
     parts.append("writer.status=\(writerStatusName(writer.status))")
     if let error = writer.error?.localizedDescription {
         parts.append("writer.error=\(error)")
+        underlyingError = writer.error
     }
     if let reader {
         parts.append("reader.status=\(readerStatusName(reader.status))")
         if let error = reader.error?.localizedDescription {
             parts.append("reader.error=\(error)")
+            underlyingError = reader.error
         }
+    }
+    var userInfo: [String: Any] = [
+        NSLocalizedDescriptionKey: parts.joined(separator: "; ")
+    ]
+    if let underlyingError {
+        userInfo[NSUnderlyingErrorKey] = underlyingError
     }
     return NSError(
         domain: "encodeMOV",
         code: 1,
-        userInfo: [NSLocalizedDescriptionKey: parts.joined(separator: "; ")]
+        userInfo: userInfo
     )
 }
 
@@ -717,6 +692,134 @@ private func makeMetadataProbeFailure(stage: String, reader: AVAssetReader? = ni
         code: 1,
         userInfo: [NSLocalizedDescriptionKey: parts.joined(separator: "; ")]
     )
+}
+
+/// Enables recoverable movie fragments directly on the destination volume.
+/// Apple's guidance recommends at least ten seconds for best external-storage
+/// write performance; interrupted files remain playable through the last closed
+/// fragment instead of losing the entire multi-hour encode.
+private func configureRecoverableMovieFragments(
+    writer: AVAssetWriter,
+    overallDuration: CMTime?
+) {
+    let interval = CMTime(seconds: 10, preferredTimescale: 600)
+    writer.movieFragmentInterval = interval
+    if #available(macOS 14.0, *) {
+        // Emit an initialization movie before media data so later completed
+        // fragments are independently appendable during recovery. The regular
+        // fragment cadence remains ten seconds for external-storage throughput.
+        writer.initialMovieFragmentInterval = .zero
+    }
+    if let overallDuration,
+       CMTIME_IS_NUMERIC(overallDuration),
+       CMTimeCompare(overallDuration, .zero) >= 0 {
+        writer.overallDurationHint = overallDuration
+    }
+}
+
+/// The number of full direct-to-volume retries allowed after a genuine storage
+/// interruption. Retries happen only after the existing partial has been
+/// preserved on that same volume; normal encodes never take this path.
+private let maximumStorageReconnectRetries = 3
+private let storageReconnectPollNanoseconds: UInt64 = 5_000_000_000
+private let storageReconnectPollCount = 360
+
+/// Automatic in-run recovery attempts after a source drop-out. A long encode on
+/// a NAS or external volume has to finish in the same run, so each attempt waits
+/// for the volume (up to `storageReconnectPollCount` polls) and then reuses the
+/// prefix that is already on the destination volume instead of re-encoding it.
+/// An attempt only counts once the source picture range is readable again, so a
+/// volume that is merely absent is waited out rather than counted down; ten
+/// attempts at `storageReconnectPollCount` polls each absorb a drop-out of up to
+/// roughly five hours before the job stops loudly with the prefix still kept.
+private let maximumAutomaticRecoveryAttempts = 10
+
+/// Backs off between automatic recovery attempts: a volume that needs a moment
+/// to come back is retried rather than given up on, while a job whose source
+/// really is short still terminates instead of looping forever.
+private func automaticRecoveryRetryDelayNanoseconds(attempt: Int) -> UInt64 {
+    let base: UInt64 = 5_000_000_000
+    let cap: UInt64 = 60_000_000_000
+    let shift = UInt64(min(max(attempt - 1, 0), 6))
+    return min(base << shift, cap)
+}
+
+/// Distinguishes read/write transport interruptions from codec, metadata, and
+/// option failures, which must not be retried blindly.
+private func isStorageInterruption(_ error: NSError) -> Bool {
+    if error.domain == "MediaRead" { return true }
+    if error.domain == NSURLErrorDomain {
+        return true
+    }
+    if error.domain == NSPOSIXErrorDomain {
+        switch error.code {
+        case Int(ENXIO), Int(EIO), Int(ENODEV), Int(ESTALE), Int(ETIMEDOUT), Int(ECONNRESET):
+            return true
+        default:
+            break
+        }
+    }
+    if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError,
+       isStorageInterruption(underlying) {
+        return true
+    }
+    let description = error.localizedDescription.lowercased()
+    return description.contains("input/output error")
+        || description.contains("not connected")
+        || description.contains("network connection")
+        || description.contains("stale file")
+        || description.contains("no such file")
+}
+
+/// A writer that rejects an appended video sample while the reader is still
+/// live is the signature of a source volume that dropped out mid-read: the
+/// reader keeps reporting progress but the sample data comes back short, and
+/// AVFoundation reports it as an append failure rather than a read error. That
+/// case is safe to continue from the preserved fragment, so it is classified
+/// with the storage interruptions instead of with codec/option failures.
+private func isRecoverableAppendFailure(_ error: NSError) -> Bool {
+    guard error.domain == "encodeMOV", error.code == 1 else { return false }
+    return error.localizedDescription.lowercased().contains("append failed")
+}
+
+/// Cheapest possible proof that a source volume is genuinely back: the video
+/// track's picture range can be read. A dropped NAS or external volume can
+/// leave the path in place while every read fails, so waiting on the path alone
+/// would spend the retry budget before the volume returns.
+private func sourcePictureRangeIsReadable(at url: URL) async -> Bool {
+    let asset = AVURLAsset(url: url)
+    guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+          let range = try? await track.load(.timeRange),
+          CMTIMERANGE_IS_VALID(range) else {
+        return false
+    }
+    return CMTimeCompare(range.duration, .zero) > 0
+}
+
+/// Waits for an existing file or directory to become usable again without
+/// touching its contents. This is deliberately metadata-only and never stages
+/// media onto the local disk.
+private func waitForStorageReconnect(
+    at url: URL,
+    requireReadablePicture: Bool = false
+) async -> Bool {
+    for _ in 0..<storageReconnectPollCount {
+        if FileManager.default.fileExists(atPath: url.path),
+           (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil {
+            if !requireReadablePicture {
+                return true
+            }
+            if await sourcePictureRangeIsReadable(at: url) {
+                return true
+            }
+        }
+        do {
+            try await Task.sleep(nanoseconds: storageReconnectPollNanoseconds)
+        } catch {
+            return false
+        }
+    }
+    return false
 }
 
 /// Reads the first metadata sample to obtain a writer-compatible format hint.
@@ -914,8 +1017,25 @@ private enum DolbyVisionCompressedCodec {
     func dolbyVisionSampleEntryType(profile: DolbyVisionHEVCProfile?) -> String {
         switch self {
         case .hevc:
-            return profile?.isProfile76 == true ? "dvhe" : "dvh1"
-        case .av1: return "dav1"
+            switch profile {
+            case .profile5:
+                return "dvh1"
+            case .profile76:
+                return "dvhe"
+            case .profile81, .profile84, .none:
+                return "hvc1"
+            case .profile10, .profile101, .profile104:
+                return "hvc1"
+            }
+        case .av1:
+            switch profile {
+            case .profile10, .profile104:
+                return "dav1"
+            case .profile101, .none:
+                return "av01"
+            case .profile5, .profile76, .profile81, .profile84:
+                return "av01"
+            }
         }
     }
 
@@ -2437,6 +2557,772 @@ private func findChildAtom(
     return nil
 }
 
+/// How a preserved partial movie was written. A source volume that drops out
+/// mid-read yields either shape, depending on where the writer was when the
+/// read failed, so both must be resumable.
+private enum RecoveryPrefixStructure {
+    /// `moof`/`mdat` pairs after an initialization `moov`; a trailing partial
+    /// atom may exist and must be trimmed before the prefix is reopened.
+    case fragmented
+    /// A complete `ftyp`+`mdat`+`moov` movie whose picture simply stops short of
+    /// the source range: the writer closed normally, so the sample tables
+    /// already describe the exact usable prefix and nothing has to be trimmed.
+    case finalized
+}
+
+/// The contiguous video range that is fully committed to a preserved partial
+/// movie. `safeByteLength` never extends into an incomplete `moof`/`mdat` pair.
+private struct FragmentResumeCheckpoint {
+    let safeByteLength: UInt64
+    let videoDuration: CMTime
+    let videoFrameDuration: UInt64
+    let completedFragmentCount: Int
+    let nextFragmentSequenceNumber: UInt32
+    let structure: RecoveryPrefixStructure
+}
+
+/// Track timing required to translate fragment sample durations into CMTime.
+private struct FragmentTrackTiming {
+    let trackID: UInt32
+    let handlerType: String
+    let timescale: UInt32
+    let initialDuration: UInt64
+    let fragmentDefaultDuration: UInt32?
+}
+
+/// Reads one 32-bit big-endian field from an atom payload with bounds checking.
+private func fragmentUInt32(_ data: Data, at offset: Int, context: String) throws -> UInt32 {
+    guard offset >= 0, data.count - offset >= 4 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Truncated \(context) atom."]
+        )
+    }
+    return readUInt32BE(from: data, at: offset)
+}
+
+/// Sums `stts` entries, which describe the non-fragmented leading media data.
+private func initialTrackDuration(
+    stts: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> UInt64 {
+    let payloadLength = Int(stts.size - stts.headerSize)
+    let payload = try readExactData(
+        from: handle,
+        at: stts.offset + stts.headerSize,
+        count: payloadLength
+    )
+    let entryCount = Int(try fragmentUInt32(payload, at: 4, context: "stts"))
+    guard payload.count >= 8 + entryCount * 8 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "Truncated stts timing table."]
+        )
+    }
+    var duration: UInt64 = 0
+    for entry in 0..<entryCount {
+        let offset = 8 + entry * 8
+        let count = UInt64(try fragmentUInt32(payload, at: offset, context: "stts"))
+        let delta = UInt64(try fragmentUInt32(payload, at: offset + 4, context: "stts"))
+        let product = count.multipliedReportingOverflow(by: delta)
+        let sum = duration.addingReportingOverflow(product.partialValue)
+        guard !product.overflow, !sum.overflow else {
+            throw NSError(
+                domain: "FragmentRecovery",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "stts duration overflow."]
+            )
+        }
+        duration = sum.partialValue
+    }
+    return duration
+}
+
+/// Returns a fallback fragment duration only when the leading `stts` table is
+/// constant-frame-rate. This is how AVAssetWriter represents default duration
+/// for its QuickTime fragments when no `trex` box is present.
+private func initialTrackDefaultSampleDuration(
+    stts: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> UInt32? {
+    let payload = try readExactData(
+        from: handle,
+        at: stts.offset + stts.headerSize,
+        count: Int(stts.size - stts.headerSize)
+    )
+    let entryCount = Int(try fragmentUInt32(payload, at: 4, context: "stts"))
+    guard entryCount > 0, payload.count >= 8 + entryCount * 8 else { return nil }
+    let first = try fragmentUInt32(payload, at: 12, context: "stts")
+    for entry in 1..<entryCount {
+        let delta = try fragmentUInt32(payload, at: 12 + entry * 8, context: "stts")
+        if delta != first { return nil }
+    }
+    return first
+}
+
+/// Maps QuickTime tracks to IDs, handlers, timescales, and initial sample timing.
+private func fragmentedMovieTrackTimings(
+    moov: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> [FragmentTrackTiming] {
+    var trexDurations: [UInt32: UInt32] = [:]
+    if let mvex = try findChildAtom(named: "mvex", in: moov, handle: handle) {
+        var trexCursor = mvex.offset + mvex.headerSize
+        let trexLimit = mvex.offset + mvex.size
+        while trexCursor < trexLimit {
+            guard let child = try readAtomDescriptor(
+                from: handle,
+                at: trexCursor,
+                limit: trexLimit
+            ) else { break }
+            defer { trexCursor += child.size }
+            guard child.type == "trex" else { continue }
+            let payload = try readExactData(
+                from: handle,
+                at: child.offset + child.headerSize,
+                count: Int(child.size - child.headerSize)
+            )
+            guard payload.count >= 20 else { continue }
+            let trackID = try fragmentUInt32(payload, at: 4, context: "trex")
+            let defaultDuration = try fragmentUInt32(payload, at: 12, context: "trex")
+            trexDurations[trackID] = defaultDuration
+        }
+    }
+    var result: [FragmentTrackTiming] = []
+    var cursor = moov.offset + moov.headerSize
+    let limit = moov.offset + moov.size
+    while cursor < limit {
+        guard let trak = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else { break }
+        defer { cursor += trak.size }
+        guard trak.type == "trak",
+              let tkhd = try findChildAtom(named: "tkhd", in: trak, handle: handle),
+              let mdia = try findChildAtom(named: "mdia", in: trak, handle: handle),
+              let mdhd = try findChildAtom(named: "mdhd", in: mdia, handle: handle),
+              let hdlr = try findChildAtom(named: "hdlr", in: mdia, handle: handle),
+              let minf = try findChildAtom(named: "minf", in: mdia, handle: handle),
+              let stbl = try findChildAtom(named: "stbl", in: minf, handle: handle),
+              let stts = try findChildAtom(named: "stts", in: stbl, handle: handle)
+        else {
+            continue
+        }
+
+        let tkhdPayload = try readExactData(
+            from: handle,
+            at: tkhd.offset + tkhd.headerSize,
+            count: Int(tkhd.size - tkhd.headerSize)
+        )
+        let tkhdVersion = tkhdPayload.first ?? 0
+        let trackIDOffset = tkhdVersion == 1 ? 20 : 12
+        let trackID = try fragmentUInt32(tkhdPayload, at: trackIDOffset, context: "tkhd")
+
+        let mdhdPayload = try readExactData(
+            from: handle,
+            at: mdhd.offset + mdhd.headerSize,
+            count: Int(mdhd.size - mdhd.headerSize)
+        )
+        let mdhdVersion = mdhdPayload.first ?? 0
+        let timescaleOffset = mdhdVersion == 1 ? 20 : 12
+        let timescale = try fragmentUInt32(mdhdPayload, at: timescaleOffset, context: "mdhd")
+        guard timescale > 0 else { continue }
+
+        let hdlrPayload = try readExactData(
+            from: handle,
+            at: hdlr.offset + hdlr.headerSize,
+            count: Int(hdlr.size - hdlr.headerSize)
+        )
+        guard hdlrPayload.count >= 12 else { continue }
+        let handlerType = String(data: hdlrPayload[8..<12], encoding: .isoLatin1) ?? ""
+        let fallbackFragmentDuration = try initialTrackDefaultSampleDuration(
+            stts: stts,
+            handle: handle
+        )
+        result.append(FragmentTrackTiming(
+            trackID: trackID,
+            handlerType: handlerType,
+            timescale: timescale,
+            initialDuration: try initialTrackDuration(stts: stts, handle: handle),
+            fragmentDefaultDuration: trexDurations[trackID] ?? fallbackFragmentDuration
+        ))
+    }
+    return result
+}
+
+/// Reads one `traf` and returns its track ID plus the total duration of all
+/// samples in its `trun` boxes. The encoder emits per-track default durations
+/// in `tfhd`, so both compact and explicit `trun` forms are supported.
+private func fragmentedTrackDuration(
+    traf: MOVAtomDescriptor,
+    handle: FileHandle,
+    trexDefaultDuration: UInt32?
+) throws -> (trackID: UInt32, duration: UInt64)? {
+    guard let tfhd = try findChildAtom(named: "tfhd", in: traf, handle: handle) else {
+        return nil
+    }
+    let tfhdPayload = try readExactData(
+        from: handle,
+        at: tfhd.offset + tfhd.headerSize,
+        count: Int(tfhd.size - tfhd.headerSize)
+    )
+    guard tfhdPayload.count >= 8 else { return nil }
+    let tfhdFlags = try fragmentUInt32(tfhdPayload, at: 0, context: "tfhd") & 0x00ff_ffff
+    let trackID = try fragmentUInt32(tfhdPayload, at: 4, context: "tfhd")
+    var tfhdCursor = 8
+    if tfhdFlags & 0x000001 != 0 { tfhdCursor += 8 } // base-data-offset
+    if tfhdFlags & 0x000002 != 0 { tfhdCursor += 4 } // sample-description-index
+    let defaultDuration: UInt32?
+    if tfhdFlags & 0x000008 != 0 {
+        defaultDuration = try fragmentUInt32(tfhdPayload, at: tfhdCursor, context: "tfhd")
+    } else {
+        defaultDuration = nil
+    }
+
+    var totalDuration: UInt64 = 0
+    var cursor = traf.offset + traf.headerSize
+    let limit = traf.offset + traf.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else { break }
+        defer { cursor += child.size }
+        guard child.type == "trun" else { continue }
+        let payload = try readExactData(
+            from: handle,
+            at: child.offset + child.headerSize,
+            count: Int(child.size - child.headerSize)
+        )
+        guard payload.count >= 8 else {
+            throw NSError(
+                domain: "FragmentRecovery",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Truncated trun atom."]
+            )
+        }
+        let flags = try fragmentUInt32(payload, at: 0, context: "trun") & 0x00ff_ffff
+        let sampleCount = Int(try fragmentUInt32(payload, at: 4, context: "trun"))
+        var sampleCursor = 8
+        if flags & 0x000001 != 0 { sampleCursor += 4 } // data offset
+        if flags & 0x000004 != 0 { sampleCursor += 4 } // first-sample-flags
+        let hasDuration = flags & 0x000100 != 0
+        let hasSize = flags & 0x000200 != 0
+        let hasFlags = flags & 0x000400 != 0
+        let hasCompositionOffset = flags & 0x000800 != 0
+        let fieldsPerSample = (hasDuration ? 4 : 0)
+            + (hasSize ? 4 : 0)
+            + (hasFlags ? 4 : 0)
+            + (hasCompositionOffset ? 4 : 0)
+        guard payload.count >= sampleCursor + sampleCount * fieldsPerSample else {
+            throw NSError(
+                domain: "FragmentRecovery",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "Truncated trun sample table."]
+            )
+        }
+        for _ in 0..<sampleCount {
+            let duration: UInt64
+            if hasDuration {
+                duration = UInt64(try fragmentUInt32(payload, at: sampleCursor, context: "trun"))
+                sampleCursor += 4
+            } else if let defaultDuration {
+                duration = UInt64(defaultDuration)
+            } else if let trexDefaultDuration {
+                duration = UInt64(trexDefaultDuration)
+            } else {
+                throw NSError(
+                    domain: "FragmentRecovery",
+                    code: 6,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Fragment has no explicit or default sample duration."
+                    ]
+                )
+            }
+            let sum = totalDuration.addingReportingOverflow(duration)
+            guard !sum.overflow else {
+                throw NSError(
+                    domain: "FragmentRecovery",
+                    code: 7,
+                    userInfo: [NSLocalizedDescriptionKey: "Fragment duration overflow."]
+                )
+            }
+            totalDuration = sum.partialValue
+            if hasSize { sampleCursor += 4 }
+            if hasFlags { sampleCursor += 4 }
+            if hasCompositionOffset { sampleCursor += 4 }
+        }
+    }
+    return (trackID, totalDuration)
+}
+
+/// Filler atoms that AVAssetWriter interleaves between a `moof` and its media
+/// data. They carry no payload and must not break fragment discovery.
+private let fragmentFillerAtomTypes: Set<String> = ["wide", "free", "skip"]
+
+/// Returns the media-data atom that belongs to the fragment written at
+/// `moofIndex`, tolerating interleaved filler atoms such as the 8-byte `wide`
+/// placeholder AVAssetWriter emits between `moof` and `mdat`.
+private func mediaDataAtom(
+    following moofIndex: Int,
+    in topLevel: [MOVAtomDescriptor]
+) -> MOVAtomDescriptor? {
+    var index = moofIndex + 1
+    while index < topLevel.count {
+        let atom = topLevel[index]
+        if atom.type == "mdat" { return atom }
+        guard fragmentFillerAtomTypes.contains(atom.type) else { return nil }
+        index += 1
+    }
+    return nil
+}
+
+/// Reads the track ID held by a `traf`'s `tfhd` box.
+private func fragmentTrackIdentifier(
+    traf: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> UInt32? {
+    guard let tfhd = try findChildAtom(named: "tfhd", in: traf, handle: handle) else {
+        return nil
+    }
+    let payload = try readExactData(
+        from: handle,
+        at: tfhd.offset + tfhd.headerSize,
+        count: Int(tfhd.size - tfhd.headerSize)
+    )
+    guard payload.count >= 8 else { return nil }
+    return readUInt32BE(from: payload, at: 4)
+}
+
+/// Returns the `tfhd` base-data-offset of a fragment when the writer emitted one.
+private func fragmentBaseDataOffset(
+    traf: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> UInt64? {
+    guard let tfhd = try findChildAtom(named: "tfhd", in: traf, handle: handle) else {
+        return nil
+    }
+    let payload = try readExactData(
+        from: handle,
+        at: tfhd.offset + tfhd.headerSize,
+        count: Int(tfhd.size - tfhd.headerSize)
+    )
+    guard payload.count >= 16 else { return nil }
+    let flags = readUInt32BE(from: payload, at: 0) & 0x00ff_ffff
+    guard flags & 0x0000_0001 != 0 else { return nil }
+    let high = UInt64(readUInt32BE(from: payload, at: 8))
+    let low = UInt64(readUInt32BE(from: payload, at: 12))
+    return (high << 32) | low
+}
+
+/// Finds the `traf` describing a specific track inside a `moof`.
+private func fragmentTrackBox(
+    trackID: UInt32,
+    in moof: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> MOVAtomDescriptor? {
+    var cursor = moof.offset + moof.headerSize
+    let limit = moof.offset + moof.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else {
+            return nil
+        }
+        cursor += child.size
+        guard child.type == "traf" else { continue }
+        if try fragmentTrackIdentifier(traf: child, handle: handle) == trackID {
+            return child
+        }
+    }
+    return nil
+}
+
+/// Default sample sizes declared by the `moov`'s `trex` boxes.
+private func fragmentDefaultSampleSizes(
+    moov: MOVAtomDescriptor,
+    handle: FileHandle
+) throws -> [UInt32: UInt32] {
+    guard let mvex = try findChildAtom(named: "mvex", in: moov, handle: handle) else {
+        return [:]
+    }
+    var sizes: [UInt32: UInt32] = [:]
+    var cursor = mvex.offset + mvex.headerSize
+    let limit = mvex.offset + mvex.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else {
+            break
+        }
+        cursor += child.size
+        guard child.type == "trex" else { continue }
+        let payload = try readExactData(
+            from: handle,
+            at: child.offset + child.headerSize,
+            count: Int(child.size - child.headerSize)
+        )
+        guard payload.count >= 20 else { continue }
+        let trackID = readUInt32BE(from: payload, at: 4)
+        let defaultSampleSize = readUInt32BE(from: payload, at: 16)
+        if defaultSampleSize > 0 { sizes[trackID] = defaultSampleSize }
+    }
+    return sizes
+}
+
+/// Byte extent of the samples described by one `traf`, measured from the
+/// fragment's base data offset. Returns `nil` when the run layout cannot be
+/// resolved, which callers treat as "do not trust this fragment boundary".
+private func fragmentedTrackByteExtent(
+    traf: MOVAtomDescriptor,
+    handle: FileHandle,
+    baseDataOffset: UInt64,
+    defaultSampleSize: UInt32?
+) throws -> UInt64? {
+    var position = baseDataOffset
+    var furthest = baseDataOffset
+    var sawSample = false
+    var cursor = traf.offset + traf.headerSize
+    let limit = traf.offset + traf.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else {
+            return nil
+        }
+        cursor += child.size
+        guard child.type == "trun" else { continue }
+        let payload = try readExactData(
+            from: handle,
+            at: child.offset + child.headerSize,
+            count: Int(child.size - child.headerSize)
+        )
+        guard payload.count >= 8 else { return nil }
+        let flags = readUInt32BE(from: payload, at: 0) & 0x00ff_ffff
+        let sampleCount = Int(readUInt32BE(from: payload, at: 4))
+        var sampleCursor = 8
+        if flags & 0x0000_0001 != 0 {
+            let runOffset = UInt64(readUInt32BE(from: payload, at: sampleCursor))
+            let sum = baseDataOffset.addingReportingOverflow(runOffset)
+            guard !sum.overflow else { return nil }
+            position = sum.partialValue
+            sampleCursor += 4
+        }
+        if flags & 0x0000_0004 != 0 { sampleCursor += 4 }
+        let hasDuration = flags & 0x0001_0000 != 0
+        let hasSize = flags & 0x0002_0000 != 0
+        let hasFlags = flags & 0x0004_0000 != 0
+        let hasCompositionOffset = flags & 0x0008_0000 != 0
+        let fieldsPerSample = (hasDuration ? 4 : 0)
+            + (hasSize ? 4 : 0)
+            + (hasFlags ? 4 : 0)
+            + (hasCompositionOffset ? 4 : 0)
+        guard fieldsPerSample > 0,
+              payload.count >= sampleCursor + sampleCount * fieldsPerSample else {
+            return nil
+        }
+        for _ in 0..<sampleCount {
+            if hasDuration { sampleCursor += 4 }
+            let size: UInt64
+            if hasSize {
+                size = UInt64(readUInt32BE(from: payload, at: sampleCursor))
+                sampleCursor += 4
+            } else if let defaultSampleSize {
+                size = UInt64(defaultSampleSize)
+            } else {
+                return nil
+            }
+            if hasFlags { sampleCursor += 4 }
+            if hasCompositionOffset { sampleCursor += 4 }
+            let sum = position.addingReportingOverflow(size)
+            guard !sum.overflow else { return nil }
+            position = sum.partialValue
+            sawSample = true
+        }
+        if position > furthest { furthest = position }
+    }
+    return sawSample ? furthest : nil
+}
+
+/// Resolves the media-data atom holding a fragment's video payload. The encoder
+/// appends payload bytes first and closes the fragment with its `moof`, so the
+/// owning `mdat` normally sits *before* the `moof`; the `tfhd` base-data-offset
+/// is authoritative when present. A fragment whose payload is not fully
+/// contained in a single media-data atom is treated as incomplete.
+private func fragmentOwningMediaDataAtom(
+    moof: MOVAtomDescriptor,
+    moofIndex: Int,
+    topLevel: [MOVAtomDescriptor],
+    videoTrackID: UInt32,
+    defaultSampleSize: UInt32?,
+    handle: FileHandle
+) throws -> MOVAtomDescriptor? {
+    let mediaDataAtoms = topLevel.filter { $0.type == "mdat" }
+    if let traf = try fragmentTrackBox(trackID: videoTrackID, in: moof, handle: handle),
+       let base = try fragmentBaseDataOffset(traf: traf, handle: handle) {
+        guard let owner = mediaDataAtoms.first(where: {
+            base >= $0.offset + $0.headerSize && base < $0.offset + $0.size
+        }) else {
+            return nil
+        }
+        if let extentEnd = try fragmentedTrackByteExtent(
+            traf: traf,
+            handle: handle,
+            baseDataOffset: base,
+            defaultSampleSize: defaultSampleSize
+        ) {
+            guard extentEnd <= owner.offset + owner.size else { return nil }
+        }
+        return owner
+    }
+    return mediaDataAtom(following: moofIndex, in: topLevel)
+}
+
+/// Byte offsets of the four-byte box type of every `traf` that belongs to a
+/// track which is neither video nor audio.
+///
+/// AVFoundation's fragmented reader stops after the second fragment when a
+/// metadata track (`mebx`) is fragmented as well, which silently truncated the
+/// recoverable prefix. Rewriting only these four bytes to `free` for the
+/// duration of the prefix read leaves every media byte untouched and is fully
+/// reversible, so the partial can still be reopened in place on the destination
+/// volume without copying it.
+private func fragmentMetadataTrafTypeFieldOffsets(
+    in movieURL: URL
+) throws -> [UInt64] {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+    let fileSize = try handle.seekToEnd()
+    var topLevel: [MOVAtomDescriptor] = []
+    var cursor: UInt64 = 0
+    while cursor < fileSize {
+        guard let atom = try? readAtomDescriptor(from: handle, at: cursor, limit: fileSize) else {
+            break
+        }
+        topLevel.append(atom)
+        cursor += atom.size
+    }
+    guard let moov = topLevel.first(where: { $0.type == "moov" }) else { return [] }
+    let mediaTrackIDs = Set(
+        try fragmentedMovieTrackTimings(moov: moov, handle: handle)
+            .filter { $0.handlerType == "vide" || $0.handlerType == "soun" }
+            .map(\.trackID)
+    )
+    var offsets: [UInt64] = []
+    for moof in topLevel where moof.type == "moof" {
+        var trafCursor = moof.offset + moof.headerSize
+        let limit = moof.offset + moof.size
+        while trafCursor < limit {
+            guard let child = try readAtomDescriptor(from: handle, at: trafCursor, limit: limit) else {
+                break
+            }
+            trafCursor += child.size
+            guard child.type == "traf",
+                  let trackID = try fragmentTrackIdentifier(traf: child, handle: handle),
+                  !mediaTrackIDs.contains(trackID) else { continue }
+            offsets.append(child.offset + 4)
+        }
+    }
+    return offsets
+}
+
+/// Overwrites the box type of the given `traf` boxes with a four-character
+/// type. Only the type field is touched; sizes, offsets, and payloads stay put.
+private func writeFragmentTrafBoxType(
+    _ type: String,
+    at offsets: [UInt64],
+    in movieURL: URL
+) throws {
+    guard !offsets.isEmpty else { return }
+    guard let bytes = type.data(using: .isoLatin1), bytes.count == 4 else { return }
+    let handle = try FileHandle(forWritingTo: movieURL)
+    defer { try? handle.close() }
+    for offset in offsets {
+        try handle.seek(toOffset: offset)
+        try handle.write(contentsOf: bytes)
+    }
+    try handle.synchronize()
+}
+
+/// Finds the exact last usable fragment boundary in a partially written MOV.
+/// This parser intentionally accepts only complete top-level atom pairs and
+/// does not infer duration from the asset's optimistic overall-duration hint.
+private func fragmentedMovieResumeCheckpoint(
+    in movieURL: URL
+) throws -> FragmentResumeCheckpoint {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+    let fileSize = try handle.seekToEnd()
+    guard fileSize > 0 else {
+        throw NSError(domain: "FragmentRecovery", code: 8,
+                      userInfo: [NSLocalizedDescriptionKey: "Recovery movie is empty."])
+    }
+
+    var topLevel: [MOVAtomDescriptor] = []
+    var cursor: UInt64 = 0
+    while cursor < fileSize {
+        // A partially flushed trailing atom (killed mid-write) must only end the
+        // scan; the last complete fragment stays usable.
+        guard let atom = try? readAtomDescriptor(from: handle, at: cursor, limit: fileSize) else { break }
+        topLevel.append(atom)
+        cursor += atom.size
+    }
+    guard let moov = topLevel.first(where: { $0.type == "moov" }) else {
+        throw NSError(domain: "FragmentRecovery", code: 9,
+                      userInfo: [NSLocalizedDescriptionKey: "Recovery movie has no initialization moov atom."])
+    }
+    guard let videoTrack = try fragmentedMovieTrackTimings(moov: moov, handle: handle)
+        .first(where: { $0.handlerType == "vide" }) else {
+        throw NSError(domain: "FragmentRecovery", code: 10,
+                      userInfo: [NSLocalizedDescriptionKey: "Recovery movie has no video track timing."])
+    }
+    let defaultSampleSizes = try fragmentDefaultSampleSizes(moov: moov, handle: handle)
+
+    var videoDuration = videoTrack.initialDuration
+    var completedFragments = 0
+    var discoveredMoofCount = 0
+    var matchedVideoTrafCount = 0
+    var nextSequence: UInt32 = 1
+    var safeByteLength = moov.offset + moov.size
+    for index in topLevel.indices where topLevel[index].type == "moof" {
+        discoveredMoofCount += 1
+        let moof = topLevel[index]
+        var trafCursor = moof.offset + moof.headerSize
+        let moofLimit = moof.offset + moof.size
+        var fragmentVideoDuration: UInt64 = 0
+        while trafCursor < moofLimit {
+            guard let child = try readAtomDescriptor(
+                from: handle,
+                at: trafCursor,
+                limit: moofLimit
+            ) else { break }
+            defer { trafCursor += child.size }
+            if child.type == "mfhd" {
+                let payload = try readExactData(
+                    from: handle,
+                    at: child.offset + child.headerSize,
+                    count: Int(child.size - child.headerSize)
+                )
+                if payload.count >= 8 {
+                    nextSequence = (try fragmentUInt32(payload, at: 4, context: "mfhd")) &+ 1
+                }
+            }
+            guard child.type == "traf",
+                  let timing = try fragmentedTrackDuration(
+                      traf: child,
+                      handle: handle,
+                      trexDefaultDuration: videoTrack.fragmentDefaultDuration
+                  ),
+                  timing.trackID == videoTrack.trackID else {
+                continue
+            }
+            matchedVideoTrafCount += 1
+            let sum = fragmentVideoDuration.addingReportingOverflow(timing.duration)
+            guard !sum.overflow else {
+                throw NSError(domain: "FragmentRecovery", code: 11,
+                              userInfo: [NSLocalizedDescriptionKey: "Video fragment duration overflow."])
+            }
+            fragmentVideoDuration = sum.partialValue
+        }
+        guard fragmentVideoDuration > 0 else { continue }
+        // The fragment is only usable when its payload lives inside a complete
+        // media-data atom; a truncated trailing mdat must never extend the
+        // recoverable prefix.
+        guard try fragmentOwningMediaDataAtom(
+            moof: moof,
+            moofIndex: index,
+            topLevel: topLevel,
+            videoTrackID: videoTrack.trackID,
+            defaultSampleSize: defaultSampleSizes[videoTrack.trackID],
+            handle: handle
+        ) != nil else { continue }
+        let sum = videoDuration.addingReportingOverflow(fragmentVideoDuration)
+        guard !sum.overflow else {
+            throw NSError(domain: "FragmentRecovery", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "Recovered video duration overflow."])
+        }
+        videoDuration = sum.partialValue
+        completedFragments += 1
+        safeByteLength = moof.offset + moof.size
+    }
+    guard completedFragments > 0,
+          videoDuration <= UInt64(Int64.max) else {
+        let defaultDurationLabel = videoTrack.fragmentDefaultDuration.map { String($0) } ?? "none"
+        throw NSError(domain: "FragmentRecovery", code: 13,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "Recovery movie has no complete video fragments " +
+                        "(moof=\(discoveredMoofCount), video traf=\(matchedVideoTrafCount), " +
+                        "track=\(videoTrack.trackID), defaultDuration=\(defaultDurationLabel))."
+                      ])
+    }
+    return FragmentResumeCheckpoint(
+        safeByteLength: safeByteLength,
+        videoDuration: CMTime(value: CMTimeValue(videoDuration), timescale: CMTimeScale(videoTrack.timescale)),
+        videoFrameDuration: videoDuration,
+        completedFragmentCount: completedFragments,
+        nextFragmentSequenceNumber: nextSequence,
+        structure: .fragmented
+    )
+}
+
+/// Derives a resume checkpoint from a *finalized* movie that stopped short of
+/// the source's picture range. This is the shape AVAssetWriter leaves behind
+/// when the source volume drops out mid-read and the writer still closes
+/// normally: `ftyp` + one flat `mdat` + `moov`, with no `moof` anywhere.
+///
+/// Unlike a fragmented partial, such a file is self-describing and complete:
+/// the whole file parses as top-level atoms and the video track's sample table
+/// holds exactly the samples that reached the destination volume. The prefix is
+/// therefore reusable byte-for-byte, and nothing may be trimmed.
+private func finalizedMovieResumeCheckpoint(
+    in movieURL: URL
+) throws -> FragmentResumeCheckpoint {
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+    let fileSize = try handle.seekToEnd()
+    guard fileSize > 0 else {
+        throw NSError(domain: "FragmentRecovery", code: 8,
+                      userInfo: [NSLocalizedDescriptionKey: "Recovery movie is empty."])
+    }
+
+    var topLevel: [MOVAtomDescriptor] = []
+    var cursor: UInt64 = 0
+    while cursor < fileSize {
+        // A killed writer can leave a half-flushed trailing atom. A finalized
+        // movie never does: the scan must consume the file exactly.
+        guard let atom = try? readAtomDescriptor(from: handle, at: cursor, limit: fileSize) else { break }
+        topLevel.append(atom)
+        cursor += atom.size
+    }
+    guard cursor == fileSize else {
+        throw NSError(domain: "FragmentRecovery", code: 14,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "Recovery movie has a truncated trailing atom; it is not a finalized movie."])
+    }
+    guard !topLevel.contains(where: { $0.type == "moof" }) else {
+        throw NSError(domain: "FragmentRecovery", code: 15,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "Recovery movie is fragmented, not finalized."])
+    }
+    guard let moov = topLevel.last(where: { $0.type == "moov" }),
+          let mdat = topLevel.last(where: { $0.type == "mdat" }),
+          moov.offset >= mdat.offset + mdat.size,
+          moov.offset + moov.size == fileSize else {
+        throw NSError(domain: "FragmentRecovery", code: 16,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "Recovery movie has no closing moov atom after its media data."])
+    }
+    guard let videoTrack = try fragmentedMovieTrackTimings(moov: moov, handle: handle)
+        .first(where: { $0.handlerType == "vide" }) else {
+        throw NSError(domain: "FragmentRecovery", code: 10,
+                      userInfo: [NSLocalizedDescriptionKey: "Recovery movie has no video track timing."])
+    }
+    let duration = videoTrack.initialDuration
+    guard duration > 0, duration <= UInt64(Int64.max) else {
+        throw NSError(domain: "FragmentRecovery", code: 13,
+                      userInfo: [NSLocalizedDescriptionKey:
+                        "Recovery movie exposes no finished picture in its video sample table."])
+    }
+    return FragmentResumeCheckpoint(
+        safeByteLength: fileSize,
+        videoDuration: CMTime(value: CMTimeValue(duration), timescale: CMTimeScale(videoTrack.timescale)),
+        videoFrameDuration: duration,
+        completedFragmentCount: 0,
+        nextFragmentSequenceNumber: 1,
+        structure: .finalized
+    )
+}
+
 /// Locates metadata tracks and returns their sample-description atoms.
 private func metadataTrackSampleDescriptions(in movieURL: URL) throws -> [MetadataTrackSampleDescription] {
     let handle = try FileHandle(forReadingFrom: movieURL)
@@ -2598,7 +3484,7 @@ private func validateDolbyVisionVideoColorProfile(from track: AVAssetTrack) asyn
 /// Describes the PQ reference pixels produced immediately before Native IPT packing.
 private func nativeDolbyVisionMetadataColorProfile(
     for gamut: VideoGamut
-) -> DolbyVisionVideoColorProfile {
+) throws -> DolbyVisionVideoColorProfile {
     switch gamut {
     case .p3D65:
         return DolbyVisionVideoColorProfile(
@@ -2613,7 +3499,13 @@ private func nativeDolbyVisionMetadataColorProfile(
             signalEncoding: .ycbcrBT2020Video
         )
     case .rec709:
-        preconditionFailure("Native Dolby Vision does not accept Rec.709 output")
+        throw NSError(
+            domain: "DolbyVisionMetadata",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Native Dolby Vision requires Rec.2020 or P3-D65 PQ output; Rec.709 is not valid."
+            ]
+        )
     }
 }
 
@@ -3340,6 +4232,270 @@ private func makeStaticHDRSampleEntryBoxes(
         boxes.append(makeMOVBox(type: "clli", payload: contentLightLevelInfo))
     }
     return boxes
+}
+
+// MARK: - Decoder Sample Entry Compatibility
+
+/// Compressed sample-entry codes VideoToolbox refuses to open on this system
+/// although the equivalent entry is byte-compatible and already carries the
+/// parameter sets the strict code promises. Every pair differs only in how the
+/// decoder is allowed to treat in-band parameter sets, so rewriting the entry
+/// code in place is lossless for these self-contained bitstreams.
+private let retaggableVideoSampleEntryTypes: [String: String] = [
+    "hev1": "hvc1",
+    "avc3": "avc1",
+    "dvhe": "dvh1",
+    "dav1": "av01"
+]
+
+/// Byte offsets of a video sample entry whose code can be rewritten in place.
+struct RetaggableVideoSampleEntry {
+    let currentType: String
+    let acceptedType: String
+    let typeOffset: UInt64
+}
+
+/// Locates a rejected video sample entry whose configuration box is
+/// self-contained, so retagging cannot strand the decoder without parameter
+/// sets. Returns nil whenever the movie is either already decodable or not
+/// safely retaggable.
+func retaggableVideoSampleEntry(inMovieAt movieURL: URL) throws -> RetaggableVideoSampleEntry? {
+    guard let entry = try videoSampleEntry(
+        in: movieURL,
+        acceptedTypes: Set(retaggableVideoSampleEntryTypes.keys)
+    ), let acceptedType = retaggableVideoSampleEntryTypes[entry.type] else {
+        return nil
+    }
+    guard try sampleEntryCarriesParameterSets(
+        entry: entry,
+        movieURL: movieURL,
+        entryType: entry.type
+    ) else {
+        return nil
+    }
+    return RetaggableVideoSampleEntry(
+        currentType: entry.type,
+        acceptedType: acceptedType,
+        typeOffset: entry.offset + 4
+    )
+}
+
+/// Confirms the configuration box inside a sample entry stores the parameter
+/// sets that a strict `hvc1`/`avc1` entry promises. Movies that keep parameter
+/// sets exclusively in-band are left untouched.
+private func sampleEntryCarriesParameterSets(
+    entry: MOVAtomDescriptor,
+    movieURL: URL,
+    entryType: String
+) throws -> Bool {
+    let configType: String
+    let prefixLength: Int
+    switch entryType {
+    case "hev1", "dvhe":
+        configType = "hvcC"
+        prefixLength = 23
+    case "avc3":
+        configType = "avcC"
+        prefixLength = 6
+    default:
+        return false
+    }
+
+    let handle = try FileHandle(forReadingFrom: movieURL)
+    defer { try? handle.close() }
+
+    guard let box = try childAtomInsideSampleEntry(
+        entry: entry,
+        named: configType,
+        handle: handle
+    ) else {
+        return false
+    }
+    let prefix = try readExactData(
+        from: handle,
+        at: box.offset + box.headerSize,
+        count: prefixLength
+    )
+    switch configType {
+    case "hvcC":
+        return prefix[22] > 0
+    default:
+        return prefix[5] > 0
+    }
+}
+
+/// Finds a child box inside a video sample entry. Children start after the
+/// 8-byte entry header, the 8 reserved/data-reference bytes, and the 70 bytes
+/// of fixed video sample entry fields.
+private func childAtomInsideSampleEntry(
+    entry: MOVAtomDescriptor,
+    named type: String,
+    handle: FileHandle
+) throws -> MOVAtomDescriptor? {
+    var cursor = entry.offset + 86
+    let limit = entry.offset + entry.size
+    while cursor < limit {
+        guard let child = try readAtomDescriptor(from: handle, at: cursor, limit: limit) else {
+            return nil
+        }
+        if child.type == type { return child }
+        cursor += child.size
+    }
+    return nil
+}
+
+/// Same-volume retag copies are removed at process exit even when a caller can
+/// no longer run its own cleanup.
+final class RetagCopyRegistry: @unchecked Sendable {
+    static let shared = RetagCopyRegistry()
+
+    private let lock = NSLock()
+    private var urls: [URL] = []
+    private var installedExitHandler = false
+
+    func register(_ url: URL) {
+        lock.lock()
+        let needsHandler = !installedExitHandler
+        installedExitHandler = true
+        urls.append(url)
+        lock.unlock()
+        if needsHandler {
+            atexit({ RetagCopyRegistry.shared.removeAll() })
+        }
+    }
+
+    func remove(_ url: URL) {
+        lock.lock()
+        urls.removeAll { $0 == url }
+        lock.unlock()
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func removeAll() {
+        lock.lock()
+        let pending = urls
+        urls.removeAll()
+        lock.unlock()
+        for url in pending {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+}
+
+/// A source resolved for decoding together with any same-volume retag copy it
+/// depends on.
+struct DecodableSource {
+    let asset: AVURLAsset
+    let url: URL
+    private let retaggedCopyURL: URL?
+
+    init(asset: AVURLAsset, url: URL, retaggedCopyURL: URL?) {
+        self.asset = asset
+        self.url = url
+        self.retaggedCopyURL = retaggedCopyURL
+    }
+
+    /// Removes the retag copy. Safe to call more than once.
+    func cleanup() {
+        guard let retaggedCopyURL else { return }
+        RetagCopyRegistry.shared.remove(retaggedCopyURL)
+    }
+}
+
+/// Pixel formats probed when deciding whether a source movie needs a retag.
+let retagProbePixelFormats: [OSType] = [
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_32BGRA
+]
+
+/// Returns a decodable asset for `sourceURL`. VideoToolbox is probed first; a
+/// movie whose sample entry code is rejected is cloned on its own volume, the
+/// four-byte entry code is rewritten in the copy, and the copy is used only
+/// when it actually decodes. The source material is never modified and no
+/// media is staged on local storage.
+func makeDecodableSource(
+    for sourceURL: URL,
+    pixelFormats: [OSType] = retagProbePixelFormats
+) async -> DecodableSource {
+    let asset = AVURLAsset(url: sourceURL)
+    guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first else {
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+    if (try? negotiateDecodedVideoOutput(
+        asset: asset,
+        videoTrack: videoTrack,
+        pixelFormats: pixelFormats
+    )) != nil {
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+    guard let entry = try? retaggableVideoSampleEntry(inMovieAt: sourceURL) else {
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+
+    print(
+        "[Decode] Video sample entry '\(entry.currentType)' is not decodable on this system; " +
+        "retagging a same-volume copy as '\(entry.acceptedType)'."
+    )
+    guard let copyURL = try? makeRetagSourceCopy(of: sourceURL) else {
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+    do {
+        let handle = try FileHandle(forUpdating: copyURL)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: entry.typeOffset)
+        try handle.write(contentsOf: Data(entry.acceptedType.utf8))
+        try handle.synchronize()
+    } catch {
+        try? FileManager.default.removeItem(at: copyURL)
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+
+    let retaggedAsset = AVURLAsset(url: copyURL)
+    guard let retaggedTrack = try? await retaggedAsset.loadTracks(withMediaType: .video).first,
+          (try? negotiateDecodedVideoOutput(
+              asset: retaggedAsset,
+              videoTrack: retaggedTrack,
+              pixelFormats: pixelFormats
+          )) != nil else {
+        print("[Decode] Retagged copy still does not decode; using the original file.")
+        try? FileManager.default.removeItem(at: copyURL)
+        return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
+    }
+
+    RetagCopyRegistry.shared.register(copyURL)
+    print("[Decode] Decoding from the retagged same-volume copy \(copyURL.lastPathComponent).")
+    return DecodableSource(asset: retaggedAsset, url: copyURL, retaggedCopyURL: copyURL)
+}
+
+/// Creates a same-volume copy of a source movie for a sample-entry retag.
+/// `clonefile(2)` makes the copy free on copy-on-write volumes; volumes without
+/// cloning fall back to a byte copy.
+private func makeRetagSourceCopy(of sourceURL: URL) throws -> URL {
+    let stem = sourceURL.deletingPathExtension().lastPathComponent
+    let ext = sourceURL.pathExtension
+    let token = UUID().uuidString
+    let name = ext.isEmpty
+        ? ".\(stem).proresencoder-retag-\(token)"
+        : ".\(stem).proresencoder-retag-\(token).\(ext)"
+    let copyURL = sourceURL.deletingLastPathComponent().appendingPathComponent(name)
+
+    let cloned = sourceURL.withUnsafeFileSystemRepresentation { source -> Int32 in
+        guard let source else { return -1 }
+        return copyURL.withUnsafeFileSystemRepresentation { destination -> Int32 in
+            guard let destination else { return -1 }
+            return clonefile(source, destination, 0)
+        }
+    }
+    if cloned != 0 {
+        print(
+            "[Decode] Volume does not support copy-on-write cloning for " +
+            "\(sourceURL.lastPathComponent); copying it for the retag instead."
+        )
+        try? FileManager.default.removeItem(at: copyURL)
+        try FileManager.default.copyItem(at: sourceURL, to: copyURL)
+    }
+    return copyURL
 }
 
 /// Returns the video sample entry and its parent atom path for a track ID.
@@ -4503,7 +5659,15 @@ private func startPassthroughPump(
         let pair = pairRef.value
         while pair.input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
-                guard let buf = pair.output.copyNextSampleBuffer() else { return .finished }
+                guard let buf = pair.output.copyNextSampleBuffer() else {
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "\(trackLabel) read failed before EOF"
+                    ) {
+                        return .failed(error)
+                    }
+                    return .finished
+                }
                 guard pair.input.append(buf) else {
                     return .failed(makeWriterFailure(
                         stage: "\(trackLabel) append failed",
@@ -4640,7 +5804,15 @@ private func startTimedMetadataPump(
         let pair = pairRef.value
         while pair.input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
-                guard let group = pair.readerAdaptor.nextTimedMetadataGroup() else { return .finished }
+                guard let group = pair.readerAdaptor.nextTimedMetadataGroup() else {
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "\(trackLabel) read failed before EOF"
+                    ) {
+                        return .failed(error)
+                    }
+                    return .finished
+                }
                 guard pair.writerAdaptor.append(group) else {
                     return .failed(makeWriterFailure(
                         stage: "\(trackLabel) append failed",
@@ -4721,6 +5893,7 @@ private func startVideoSourcePump(
     input: AVAssetWriterInput,
     queueLabel: String,
     writer: AVAssetWriter,
+    reader: AVAssetReader,
     progress: ProgressBar? = nil,
     cont: CheckedContinuation<Void, Error>
 ) {
@@ -4735,12 +5908,21 @@ private func startVideoSourcePump(
     let sourceRef = SendableRef(source)
     let inputRef = SendableRef(input)
     let writerRef = SendableRef(writer)
+    let readerRef = SendableRef(reader)
     inputRef.value.requestMediaDataWhenReady(on: DispatchQueue(label: queueLabel, qos: .userInitiated)) {
         let source = sourceRef.value
         let input = inputRef.value
         while input.isReadyForMoreMediaData {
             let step: PumpStep = autoreleasepool {
-                guard let buf = source.next() else { return .finished }
+                guard let buf = source.next() else {
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "Video read failed before EOF"
+                    ) {
+                        return .failed(error)
+                    }
+                    return .finished
+                }
                 guard input.append(buf) else {
                     return .failed(makeWriterFailure(stage: "Video append failed", writer: writerRef.value))
                 }
@@ -4763,6 +5945,38 @@ private func startVideoSourcePump(
             }
         }
     }
+}
+
+/// Suspends without spinning while a writer applies back-pressure and aborts as
+/// soon as any pipeline task or the writer itself reports a terminal failure.
+private func waitForWriterInput(
+    _ input: AVAssetWriterInput,
+    writer: AVAssetWriter,
+    reader: AVAssetReader,
+    failureBox: PipelineFailureBox,
+    stage: String
+) async -> Bool {
+    while !input.isReadyForMoreMediaData {
+        if failureBox.error != nil { return false }
+        if writer.status == .failed || writer.status == .cancelled {
+            failureBox.store(makeWriterFailure(
+                stage: stage,
+                writer: writer,
+                reader: reader
+            ))
+            return false
+        }
+        if Task.isCancelled {
+            failureBox.store(NSError(
+                domain: "encodeMOV",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "\(stage): task was cancelled."]
+            ))
+            return false
+        }
+        try? await Task.sleep(nanoseconds: 2_000_000)
+    }
+    return failureBox.error == nil
 }
 
 // MARK: - Encoded Container and Elementary Stream Output
@@ -5294,7 +6508,7 @@ private func copyNextDecodedFrame(
 /// Encodes a media asset to MOV or MP4, with optional passthrough.
 func encodeMOV(
     asset: AVAsset,
-    outputURL: URL,
+    outputURL finalOutputURL: URL,
     quality: String,
     extraAudioURL: URL?,
     audioReplace: Bool,
@@ -5309,13 +6523,21 @@ func encodeMOV(
     colorTransform: ColorTransformRequest?,
     useDolbyVisionCodecTag: Bool = false,
     container: EncodedVideoContainer = .mov,
-    outputVideoRaw: Bool = false
+    outputVideoRaw: Bool = false,
+    progress: ProgressBar? = nil,
+    reconnectAttempt: Int = 0,
+    timecodeFrameCountOverride: Int64? = nil
 ) async -> Bool {
 
-    guard outputURL.pathExtension.lowercased() == container.fileExtension else {
+    guard finalOutputURL.pathExtension.lowercased() == container.fileExtension else {
         print("[Error] \(container.fileExtension.uppercased()) encoding requires a .\(container.fileExtension) output path.")
         return false
     }
+
+    // The working file lives beside the destination. Encoding therefore retains
+    // the full bandwidth of the selected volume and commits without copying.
+    let outputTransaction = DirectOutputTransaction(finalURL: finalOutputURL)
+    let outputURL = outputTransaction.workingURL
 
     let isPassthrough = (quality == "pass")
     let isHEVC = isHEVCQuality(quality)
@@ -5325,6 +6547,20 @@ func encodeMOV(
     let isCompressedVideo = isH264 || isCompressedHDR
     var usesDetachedVideoSource = isCompressedVideo && (hevcOptions?.multiPass == true)
     let requestedDVProfile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
+    let workingRawOutputURLs = outputVideoRaw
+        ? EncodedVideoRawOutput.outputURLs(
+            for: outputURL,
+            quality: quality,
+            profile: requestedDVProfile
+        )
+        : []
+    let finalRawOutputURLs = outputVideoRaw
+        ? EncodedVideoRawOutput.outputURLs(
+            for: finalOutputURL,
+            quality: quality,
+            profile: requestedDVProfile
+        )
+        : []
     let usesNativeDolbyVision = requestedDVProfile?.usesNativeIPT == true
     if container == .mp4 && !isCompressedVideo && !isPassthrough {
         print("[Error] MP4 output supports only H.264, HEVC, AV1 encoding, or -q pass remux.")
@@ -5335,6 +6571,7 @@ func encodeMOV(
         return false
     }
     let resolvedColorTransform: ResolvedColorTransform?
+    var outputWriterWasCreated = false
     do {
         if let colorTransform {
             guard let colorSpace else {
@@ -5391,6 +6628,14 @@ func encodeMOV(
         ? ((try? await asset.loadTracks(withMediaType: .metadata)) ?? [])
         : []
     let estimatedFrames = await estimateFrameCount(asset: asset)
+    let ownedProgress = progress == nil ? makeEncodePipelineProgressBar(
+        frames: estimatedFrames, quality: quality, cmuMasteringNits: nil,
+        includeGeneratedCMU: false,
+        hasExternalDolbyVisionXML: dolbyVisionXMLURL != nil,
+        exportFormat: container.fileExtension, multiPass: hevcOptions?.multiPass == true
+    ) : nil
+    defer { ownedProgress?.endLine() }
+    let pipelineProgress = progress ?? ownedProgress
     let sourceIsProRes = isAV1 ? await isSourceProRes(videoTrack) : false
 
     let timecodePlan: MOVTimecodePlan
@@ -5400,7 +6645,12 @@ func encodeMOV(
             ? try await resolveMOVTimecodePlan(
                 asset: asset,
                 fpsInfo: fpsInfo,
-                estimatedFrames: estimatedFrames,
+                // A recovery join is assembled from a picture-valid prefix plus
+                // an audio tail that may legitimately outlast the picture, so
+                // the frame-count estimate can overshoot by a frame. Callers
+                // that know the exact picture length pass it in so the rebuilt
+                // QuickTime TC track ends on the last real frame.
+                estimatedFrames: timecodeFrameCountOverride ?? estimatedFrames,
                 forcedStartTimecode: forcedOutputStartTimecode
             )
             : .none
@@ -5460,7 +6710,7 @@ func encodeMOV(
         if let dolbyVisionXMLURL {
             let metadataColorProfile: DolbyVisionVideoColorProfile
             if usesNativeDolbyVision, let outputGamut = resolvedColorTransform?.outputGamut {
-                metadataColorProfile = nativeDolbyVisionMetadataColorProfile(for: outputGamut)
+                metadataColorProfile = try nativeDolbyVisionMetadataColorProfile(for: outputGamut)
             } else {
                 let videoColorProfile = try await validateDolbyVisionVideoColorProfile(from: videoTrack)
                 metadataColorProfile = videoColorProfile.withSignalEncoding(
@@ -5505,8 +6755,10 @@ func encodeMOV(
                     effectiveLevel4Measurements = try await runDolbyVisionLevel4Analysis(
                         inputAsset: asset,
                         colorTransform: resolvedColorTransform,
-                        profile: requestedDVProfile
+                        profile: requestedDVProfile,
+                        progress: pipelineProgress
                     )
+                    pipelineProgress?.prepareForLog()
                     print("[DoVi] Generated \(effectiveLevel4Measurements?.count ?? 0) Level 4 frame measurements.")
                 }
             } else {
@@ -5589,6 +6841,62 @@ func encodeMOV(
         )
     }
 
+    let sourceIsH264OrHEVC = sourceVideoSubtype.map {
+        $0 == kCMVideoCodecType_H264 || $0 == kCMVideoCodecType_HEVC
+    } == true
+    let requestedDecodePixelFormat: OSType = {
+        if profile7RasterPlan != nil {
+            return kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange
+        }
+        if resolvedColorTransform == nil,
+           sourceIsH264OrHEVC,
+           !isCompressedVideo {
+            return sourceVideoSubtype == kCMVideoCodecType_H264
+                ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        }
+        return proResReaderPixelFormat(quality)
+    }()
+    let av1NativeDecodeReason = (isAV1 && sourceIsProRes)
+        ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
+        : nil
+    let decodedVideoPlan: DecodedVideoOutputPlan?
+    do {
+        if isPassthrough || av1NativeDecodeReason != nil {
+            decodedVideoPlan = nil
+        } else {
+            var candidates = [requestedDecodePixelFormat]
+            if profile7RasterPlan == nil, !usesNativeDolbyVision {
+                candidates.append(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
+                if resolvedColorTransform == nil {
+                    candidates.append(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+                }
+                if !isAV1 {
+                    candidates.append(kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange)
+                    candidates.append(kCVPixelFormatType_32BGRA)
+                }
+            }
+            decodedVideoPlan = try negotiateDecodedVideoOutput(
+                asset: asset,
+                videoTrack: videoTrack,
+                pixelFormats: candidates
+            )
+            if decodedVideoPlan?.usedCompatibilityFallback == true {
+                print(
+                    "[Decode] QuickTime compatibility fallback selected pixel format " +
+                    "\(decodedVideoPlan!.pixelFormat)."
+                )
+            }
+        }
+    } catch {
+        print("[Error] \(error.localizedDescription)")
+        return false
+    }
+    let decodedVideoPixelFormat = decodedVideoPlan?.pixelFormat
+        ?? (av1NativeDecodeReason != nil
+            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            : requestedDecodePixelFormat)
+
     // Dimensions
     let metalColorPipeline: MetalColorPipeline?
     let nativeDolbyVisionColorPipeline: NativeDolbyVisionColorPipeline?
@@ -5598,9 +6906,7 @@ func encodeMOV(
                 transform: $0,
                 width: width,
                 height: height,
-                pixelFormat: profile7RasterPlan == nil
-                    ? colorPipelinePixelFormat(for: quality)
-                    : kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange
+                pixelFormat: decodedVideoPixelFormat
             )
         }
         if let colorTransform {
@@ -5637,9 +6943,6 @@ func encodeMOV(
     }
     let metalColorPipelineRef = metalColorPipeline.map(SendableRef.init)
     let nativeDolbyVisionColorPipelineRef = nativeDolbyVisionColorPipeline.map(SendableRef.init)
-    let av1NativeDecodeReason = (isAV1 && sourceIsProRes)
-        ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
-        : nil
 
     // Extra audio
     var extraAudioReader: AVAssetReader? = nil
@@ -5703,25 +7006,25 @@ func encodeMOV(
         let reader = try AVAssetReader(asset: asset)
         let useAV1NativeDecode = av1NativeDecodeReason != nil
 
-        let sourceIsH264OrHEVC = sourceVideoSubtype.map {
-            $0 == kCMVideoCodecType_H264 || $0 == kCMVideoCodecType_HEVC
-        } == true
-        let sourceDecodePixelFormat: OSType? = sourceIsH264OrHEVC && !isCompressedVideo
-            ? (sourceVideoSubtype == kCMVideoCodecType_H264
-                ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-                : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
-            : nil
         let vidSettings: [String: Any]? = isPassthrough
             ? nil
             : (useAV1NativeDecode
                 ? nil
-                : (profile7RasterPlan == nil
-                    ? (sourceDecodePixelFormat.map { videoPixelBufferOutputSettings($0) }
-                        ?? proResReaderOutputSettings(quality))
-                    : dolbyVisionProfile7ReaderOutputSettings()))
+                : decodedVideoPlan?.outputSettings)
         let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: vidSettings)
         videoOut.alwaysCopiesSampleData = false
-        if !usesDetachedVideoSource, reader.canAdd(videoOut) { reader.add(videoOut) }
+        if !usesDetachedVideoSource {
+            guard reader.canAdd(videoOut) else {
+                throw NSError(
+                    domain: "MediaDecode",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Reader rejected the previously probed video output configuration."
+                    ]
+                )
+            }
+            reader.add(videoOut)
+        }
 
         var audioOut: AVAssetReaderTrackOutput? = nil
         if let aTrack = audioTrack {
@@ -5935,7 +7238,7 @@ func encodeMOV(
                     hevcOptions: hevcOptions,
                     sourcePixelFormat: usesNativeDolbyVision
                         ? NativeDolbyVisionColorPipeline.outputPixelFormat
-                        : sourceDecodePixelFormat,
+                        : decodedVideoPixelFormat,
                     sourceFrameCount: Int(estimatedFrames),
                     sourceTimeRange: CMTimeRange(
                         start: .zero,
@@ -5984,7 +7287,12 @@ func encodeMOV(
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: container.fileType)
+        outputWriterWasCreated = true
         writer.shouldOptimizeForNetworkUse = false
+        configureRecoverableMovieFragments(
+            writer: writer,
+            overallDuration: try? await asset.load(.duration)
+        )
 
         // Video input: nil outputSettings = passthrough of compressed data.
         let vFmtDesc = isPassthrough
@@ -6215,18 +7523,29 @@ func encodeMOV(
 
         // ── Start ──
         guard reader.startReading() else {
-            throw makeWriterFailure(stage: "Reader start failed", writer: writer, reader: reader)
+            throw assetReaderTerminalError(
+                reader,
+                stage: "Source reader failed to start"
+            ) ?? makeWriterFailure(stage: "Reader start failed", writer: writer, reader: reader)
         }
         if let extraAudioReader, !extraAudioReader.startReading() {
-            throw makeWriterFailure(stage: "Extra audio reader start failed", writer: writer, reader: extraAudioReader)
+            throw assetReaderTerminalError(
+                extraAudioReader,
+                stage: "External audio reader failed to start"
+            ) ?? makeWriterFailure(
+                stage: "Extra audio reader start failed",
+                writer: writer,
+                reader: extraAudioReader
+            )
         }
         guard writer.startWriting() else {
             throw makeWriterFailure(stage: "Writer start failed", writer: writer, reader: reader)
         }
         writer.startSession(atSourceTime: .zero)
 
-        let estFrames = estimatedFrames
-        let progress: ProgressBar? = estFrames > 0 ? ProgressBar(total: Int(estFrames)) : nil
+        let progress = pipelineProgress?.phase(.video)
+        let muxProgress = pipelineProgress?.phase(.mux)
+        let countWriteProgress = !usesDetachedVideoSource
 
         // Build pump pairs for passthrough tracks
         let audioPair = audioIn.flatMap { i in audioOut.map { o in MediaPumpPair(input: i, output: o) } }
@@ -6267,6 +7586,7 @@ func encodeMOV(
                             startVideoSourcePump(videoSource!, input: videoInRef.value,
                                                  queueLabel: "enc.videoQ",
                                                  writer: writerRef.value,
+                                                 reader: readerRef.value,
                                                  progress: progress, cont: cont)
                         }
                     } catch {
@@ -6415,7 +7735,7 @@ func encodeMOV(
                         if let decodeSession = av1DecodeSessionRef?.value {
                             do {
                                 var decodedFrames: Int64 = 0
-                                while (estFrames <= 0 || decodedFrames < estFrames),
+                                while (estimatedFrames <= 0 || decodedFrames < estimatedFrames),
                                       let pixelBuffer = try decodeSession.nextPixelBuffer() {
                                     await pixelChannel.sendAsync(SendablePixelBuffer(buf: pixelBuffer))
                                     decodedFrames += 1
@@ -6436,6 +7756,12 @@ func encodeMOV(
                             }
                             guard let wrapped else { break }
                             await pixelChannel.sendAsync(wrapped)
+                        }
+                        if let error = assetReaderTerminalError(
+                            readerRef.value,
+                            stage: "AV1 source video decode failed before EOF"
+                        ) {
+                            failureBox.store(error)
                         }
                         pixelChannel.finish()
                     }
@@ -6548,8 +7874,16 @@ func encodeMOV(
                                 sampleToAppend = wrapped.buf
                             }
 
-                            while !vIn.isReadyForMoreMediaData {
-                                await Task.yield()
+                            guard await waitForWriterInput(
+                                vIn,
+                                writer: writerRef.value,
+                                reader: readerRef.value,
+                                failureBox: failureBox,
+                                stage: "AV1 video writer stopped accepting data"
+                            ) else {
+                                compressedChannel.finish()
+                                vIn.markAsFinished()
+                                return
                             }
                             guard vIn.append(sampleToAppend) else {
                                 failureBox.store(makeWriterFailure(stage: "AV1 video append failed", writer: writerRef.value, reader: readerRef.value))
@@ -6565,7 +7899,9 @@ func encodeMOV(
                                 vIn.markAsFinished()
                                 return
                             }
-                            progress?.increment()
+                            if countWriteProgress {
+                                progress?.increment()
+                            }
                             frameIndex += 1
                         }
                         vIn.markAsFinished()
@@ -6689,6 +8025,9 @@ func encodeMOV(
             let assetRef = SendableRef(asset)
             let videoTrackRef = SendableRef(videoTrack)
             let vidSettingsRef = SendableRef(vidSettings)
+            let videoTrackTimeRangeRef = SendableRef(
+                (try? await videoTrack.load(.timeRange)) ?? .invalid
+            )
             let hdr10Metadata = isHEVC
                 ? HEVCHDR10Metadata(
                     masteringDisplayColorVolume: effectiveColorSpace?.masteringDisplayColorVolume,
@@ -6700,7 +8039,7 @@ func encodeMOV(
                 if usesDetachedVideoSource {
                     group.addTask(priority: .userInitiated) {
                         let fi = fpsInfoRef.value
-                        let trackTimeRange = videoTrackRef.value.timeRange
+                        let trackTimeRange = videoTrackTimeRangeRef.value
                         let estimatedFrameCount = estimatedFrames
                         let silo: VTEncodedFrameSilo
                         do {
@@ -6853,14 +8192,23 @@ func encodeMOV(
                                         }
                                         encodedCount += 1
                                         lastPTS = pts
+                                        progress?.increment()
                                     }
                                     frameIndex += 1
                                     if let endIndex = segment.endIndex, frameIndex >= endIndex {
                                         break
                                     }
                                 }
+                                if let error = assetReaderTerminalError(
+                                    passReader,
+                                    stage: "Multi-pass source video decode failed before EOF"
+                                ) {
+                                    failureBox.store(error)
+                                    return (false, lastPTS)
+                                }
                             }
                             let label = profile7Encoder != nil ? "Profile 7.6 pass" : "Pass"
+                            progress?.prepareForLog()
                             print("[VT] \(label) encoded \(encodedCount) frame(s) from \(decodedCount) decoded.")
                             return (failureBox.error == nil, lastPTS)
                         }
@@ -6906,6 +8254,7 @@ func encodeMOV(
                                 let isFinal = !actualMultiPass
                                     || passIndex + 1 >= maxPasses
                                 if actualMultiPass {
+                                    progress?.prepareForLog()
                                     print("[VT] Compression pass \(passIndex + 1)\(isFinal ? " (final)" : "")...")
                                 }
                                 let passRanges: [CMTimeRange]?
@@ -6927,6 +8276,7 @@ func encodeMOV(
                                     && coversFullTimeline
                                     && (passIndex > 0 || isFinal || !actualMultiPass)
                                 if writeProfile7Raw {
+                                    progress?.prepareForLog()
                                     print("[VT] Writing Profile 7.6 BL/EL elementary streams during compression pass \(passIndex + 1)...")
                                     try profile7DualWriterRef?.value.resetForRewrite()
                                 }
@@ -6935,6 +8285,9 @@ func encodeMOV(
                                     estimatedFrames: estimatedFrameCount,
                                     fps: fi
                                 )
+                                if passIndex > 1 {
+                                    progress?.addUnits(passFrameCount)
+                                }
                                 vtRef?.value.setSourceFrameCount(passFrameCount)
                                 profile7EncoderRef?.value.setSourceFrameCount(passFrameCount)
                                 try vtRef?.value.beginCompressionPass(isFinal: isFinal)
@@ -6977,8 +8330,10 @@ func encodeMOV(
                                 if !(vtWantsMore || p7WantsMore) {
                                     try commitProfile7SiloBatch(to: silo)
                                     if profile7DualWriterRef != nil, !dualWriterWroteFullPass {
+                                        progress?.prepareForLog()
                                         print("[VT] Writing Profile 7.6 BL/EL elementary streams from the muxed timeline...")
                                         try profile7DualWriterRef?.value.resetForRewrite()
+                                        progress?.addUnits(Int(max(estimatedFrameCount, 0)))
                                         let (rewritten, rewritePTS) = await encodeDetachedPass(
                                             into: silo,
                                             ranges: nil,
@@ -7035,6 +8390,12 @@ func encodeMOV(
                         }
                         guard let wrapped else { break }
                         await pixelChannel.sendAsync(wrapped)
+                    }
+                    if let error = assetReaderTerminalError(
+                        readerRef.value,
+                        stage: "Source video decode failed before EOF"
+                    ) {
+                        failureBox.store(error)
                     }
                     pixelChannel.finish()
                 }
@@ -7209,9 +8570,16 @@ func encodeMOV(
                             sampleToAppend = wrapped.buf
                         }
 
-                        // Wait until writer input is ready (spin-yield pattern)
-                        while !vIn.isReadyForMoreMediaData {
-                            await Task.yield()
+                        guard await waitForWriterInput(
+                            vIn,
+                            writer: writerRef.value,
+                            reader: readerRef.value,
+                            failureBox: failureBox,
+                            stage: "Video writer stopped accepting data"
+                        ) else {
+                            compressedChannel.finish()
+                            vIn.markAsFinished()
+                            return
                         }
                         guard vIn.append(sampleToAppend) else {
                             failureBox.store(makeWriterFailure(stage: "Video append failed", writer: writerRef.value, reader: readerRef.value))
@@ -7227,7 +8595,11 @@ func encodeMOV(
                             vIn.markAsFinished()
                             return
                         }
-                        progress?.increment()
+                        if countWriteProgress {
+                            progress?.increment()
+                        } else {
+                            muxProgress?.increment()
+                        }
                         frameIndex += 1
                     }
                     vIn.markAsFinished()
@@ -7345,11 +8717,25 @@ func encodeMOV(
             }
         }
 
-        progress?.finish()
         if let error = failureBox.error {
             throw error
         }
+        if let error = assetReaderTerminalError(
+            reader,
+            stage: "Source media read failed before EOF"
+        ) {
+            throw error
+        }
+        if let extraAudioReader,
+           let error = assetReaderTerminalError(
+               extraAudioReader,
+               stage: "External audio read failed before EOF"
+           ) {
+            throw error
+        }
         try rawVideoWriter?.finish()
+        pipelineProgress?.completePhase(.video)
+        pipelineProgress?.completePhase(.mux)
         await writer.finishWriting()
         if writer.status != .completed {
             throw makeWriterFailure(stage: "Writer finalize failed", writer: writer, reader: reader)
@@ -7367,6 +8753,16 @@ func encodeMOV(
                 ]
             )
         }
+        // A readable source can still stop short of its own last picture when a
+        // network or external volume drops out mid-read without AVFoundation
+        // reporting an error. Refuse to commit that result so the preserved
+        // fragment stays resumable instead of shipping a silently short movie.
+        try await validateEncodedVideoCoverage(
+            outputURL: outputURL,
+            sourceVideoTrack: videoTrack,
+            tolerance: encodedCoverageTolerance(fpsInfo: fpsInfo),
+            label: "Source encode"
+        )
         if container.supportsQuickTimeAncillaryTracks, let dolbyVisionMetadata {
             try patchDolbyVisionMetadataTrackAtoms(
                 in: outputURL,
@@ -7513,9 +8909,16 @@ func encodeMOV(
                 outputURL: outputURL
             )
         }
-        if let rawVideoWriter {
-            print("[Raw] Video elementary stream written: \(rawVideoWriter.outputURL.path)")
+        let additionalFiles = Array(zip(workingRawOutputURLs, finalRawOutputURLs)).map {
+            (working: $0.0, final: $0.1)
         }
+        try outputTransaction.commit(additionalFiles: additionalFiles)
+        if outputVideoRaw {
+            for rawURL in finalRawOutputURLs {
+                print("[Raw] Video elementary stream written: \(rawURL.path)")
+            }
+        }
+        ownedProgress?.finish()
         return true
 
     } catch {
@@ -7524,12 +8927,887 @@ func encodeMOV(
             "[Error] MOV encode error: \(error.localizedDescription) " +
             "[\(nsError.domain) \(nsError.code)]"
         )
+        var recoveryMovieURL: URL?
+        var recoveryCheckpoint: FragmentResumeCheckpoint?
+        if outputWriterWasCreated {
+            recoveryMovieURL = outputTransaction.preserveAfterFailure(
+                additionalWorkingURLs: workingRawOutputURLs
+            ).first
+            if let recoveryMovieURL,
+               let checkpoint = try? fragmentedMovieResumeCheckpoint(in: recoveryMovieURL) {
+                recoveryCheckpoint = checkpoint
+                print(
+                    "[Recovery] Found \(checkpoint.completedFragmentCount) complete video fragment(s), " +
+                    "safe through \(String(format: "%.3f", checkpoint.videoDuration.seconds)) s " +
+                    "at byte \(checkpoint.safeByteLength); next fragment sequence \(checkpoint.nextFragmentSequenceNumber)."
+                )
+            } else if let recoveryMovieURL,
+                      let checkpoint = try? finalizedMovieResumeCheckpoint(in: recoveryMovieURL) {
+                // A write whose reader died can still have closed normally,
+                // leaving a finalized movie that simply stops short. It carries
+                // the same reusable prefix, so it resumes through the same path.
+                recoveryCheckpoint = checkpoint
+                print(
+                    "[Recovery] Preserved output is a finalized movie holding " +
+                    "\(String(format: "%.3f", checkpoint.videoDuration.seconds)) s of closed picture; " +
+                    "it is reusable as the prefix of the resumed encode."
+                )
+            }
+        }
+        // A pass that stopped short of the source's own picture range, or one
+        // whose writer stopped accepting samples while the reader was still
+        // live, is the signature of a source volume that dropped out mid-read.
+        // Both are handled like a storage interruption: wait for the volume and
+        // then encode only the missing tail from the preserved fragment instead
+        // of re-encoding the whole prefix. If the source really is short, stop
+        // loudly with the verified fragment kept rather than restarting.
+        let coverageStoppedShort = isEncodedCoverageFailure(nsError)
+        let appendStoppedShort = isRecoverableAppendFailure(nsError)
+        if (coverageStoppedShort || appendStoppedShort),
+           let sourceURL = (asset as? AVURLAsset)?.url,
+           let recoveryMovieURL,
+           let recoveryCheckpoint {
+            ownedProgress?.endLine()
+            let stoppedShortReason = coverageStoppedShort
+                ? "Source stopped short of the picture range this pass requested."
+                : "Source read dropped out mid-stream while this pass was appending picture."
+            print(
+                "[Recovery] \(stoppedShortReason) " +
+                "Automatic recovery will reuse the \(String(format: "%.3f", recoveryCheckpoint.videoDuration.seconds)) s " +
+                "of already-encoded picture at \(recoveryMovieURL.lastPathComponent) and keep retrying " +
+                "until the missing tail is on the destination volume."
+            )
+            // The job has to finish in one run: keep waiting for the source and
+            // destination volumes and re-attempt the missing tail until it is
+            // complete. Every attempt reuses the prefix that is already on the
+            // destination volume, so no picture is ever encoded twice and no
+            // media is ever staged onto the local disk.
+            for autoRecoveryAttempt in 1...maximumAutomaticRecoveryAttempts {
+                var coverageStorageIsBack = true
+                if !(await waitForStorageReconnect(
+                    at: sourceURL,
+                    requireReadablePicture: true
+                )) {
+                    coverageStorageIsBack = false
+                } else if !(await waitForStorageReconnect(
+                    at: finalOutputURL.deletingLastPathComponent()
+                )) {
+                    coverageStorageIsBack = false
+                }
+                if coverageStorageIsBack {
+                    print(
+                        "[Recovery] Automatic recovery attempt " +
+                        "\(autoRecoveryAttempt)/\(maximumAutomaticRecoveryAttempts): " +
+                        "encoding only the tail after \(String(format: "%.3f", recoveryCheckpoint.videoDuration.seconds)) s."
+                    )
+                    let resumed = await resumeFromFragmentCheckpoint(
+                        sourceURL: sourceURL,
+                        recoveryMovieURL: recoveryMovieURL,
+                        checkpoint: recoveryCheckpoint,
+                        finalOutputURL: finalOutputURL,
+                        quality: quality,
+                        extraAudioURL: extraAudioURL,
+                        audioReplace: audioReplace,
+                        deleteSourceAudio: deleteSourceAudio,
+                        forcedOutputStartTimecode: forcedOutputStartTimecode,
+                        dolbyVisionXMLURL: dolbyVisionXMLURL,
+                        dolbyVisionLevel4Measurements: dolbyVisionLevel4Measurements,
+                        hevcOptions: hevcOptions,
+                        av1Options: av1Options,
+                        colorSpace: colorSpace,
+                        fpsInfo: fpsInfo,
+                        colorTransform: colorTransform,
+                        useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                        container: container,
+                        removeRecoverySourceAfterSuccess: false,
+                        progress: progress
+                    )
+                    if resumed { return true }
+                } else {
+                    print(
+                        "[Recovery] The source picture range or the destination volume is still " +
+                        "unreadable after waiting (attempt \(autoRecoveryAttempt)/" +
+                        "\(maximumAutomaticRecoveryAttempts))."
+                    )
+                }
+                if autoRecoveryAttempt < maximumAutomaticRecoveryAttempts {
+                    let retryDelayNanoseconds = automaticRecoveryRetryDelayNanoseconds(
+                        attempt: autoRecoveryAttempt
+                    )
+                    print(
+                        "[Recovery] Attempt \(autoRecoveryAttempt)/\(maximumAutomaticRecoveryAttempts) " +
+                        "did not finish the encode; retrying in \(retryDelayNanoseconds / 1_000_000_000) s " +
+                        "with the same preserved prefix."
+                    )
+                    try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                }
+            }
+            print(
+                "[Recovery] The source never became readable again after " +
+                "\(maximumAutomaticRecoveryAttempts) automatic attempts, each waiting up to " +
+                "\(storageReconnectPollCount * Int(storageReconnectPollNanoseconds / 1_000_000_000) / 60) min. " +
+                "The verified prefix was kept at \(recoveryMovieURL.path); " +
+                "re-run the same encode once the volume is healthy to reuse it."
+            )
+            return false
+        }
+        if reconnectAttempt < maximumStorageReconnectRetries,
+           isStorageInterruption(nsError),
+           let sourceURL = (asset as? AVURLAsset)?.url {
+            let reconnectURLs = [
+                sourceURL,
+                finalOutputURL.deletingLastPathComponent()
+            ] + (extraAudioURL.map { [$0] } ?? [])
+            print(
+                "[Recovery] Storage interruption detected. Waiting for source/destination reconnect " +
+                "before direct zero-copy retry \(reconnectAttempt + 1)/\(maximumStorageReconnectRetries)..."
+            )
+            var storageIsBack = true
+            for url in reconnectURLs {
+                if !(await waitForStorageReconnect(at: url)) {
+                    storageIsBack = false
+                    break
+                }
+            }
+            if storageIsBack {
+                ownedProgress?.endLine()
+                if let recoveryMovieURL, let recoveryCheckpoint {
+                    print("[Recovery] Storage is available again; attempting fragment-tail continuation.")
+                    let resumed = await resumeFromFragmentCheckpoint(
+                        sourceURL: sourceURL,
+                        recoveryMovieURL: recoveryMovieURL,
+                        checkpoint: recoveryCheckpoint,
+                        finalOutputURL: finalOutputURL,
+                        quality: quality,
+                        extraAudioURL: extraAudioURL,
+                        audioReplace: audioReplace,
+                        deleteSourceAudio: deleteSourceAudio,
+                        forcedOutputStartTimecode: forcedOutputStartTimecode,
+                        dolbyVisionXMLURL: dolbyVisionXMLURL,
+                        dolbyVisionLevel4Measurements: dolbyVisionLevel4Measurements,
+                        hevcOptions: hevcOptions,
+                        av1Options: av1Options,
+                        colorSpace: colorSpace,
+                        fpsInfo: fpsInfo,
+                        colorTransform: colorTransform,
+                        useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                        container: container,
+                        removeRecoverySourceAfterSuccess: false,
+                        progress: progress
+                    )
+                    if resumed { return true }
+                }
+                print("[Recovery] Fragment continuation is not safe for this job; restarting directly on the target volume.")
+                return await encodeMOV(
+                    asset: AVURLAsset(url: sourceURL),
+                    outputURL: finalOutputURL,
+                    quality: quality,
+                    extraAudioURL: extraAudioURL,
+                    audioReplace: audioReplace,
+                    deleteSourceAudio: deleteSourceAudio,
+                    forcedOutputStartTimecode: forcedOutputStartTimecode,
+                    dolbyVisionXMLURL: dolbyVisionXMLURL,
+                    dolbyVisionLevel4Measurements: dolbyVisionLevel4Measurements,
+                    hevcOptions: hevcOptions,
+                    av1Options: av1Options,
+                    colorSpace: colorSpace,
+                    fpsInfo: fpsInfo,
+                    colorTransform: colorTransform,
+                    useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+                    container: container,
+                    outputVideoRaw: outputVideoRaw,
+                    progress: progress,
+                    reconnectAttempt: reconnectAttempt + 1
+                )
+            }
+        }
+        return false
+    }
+}
+
+/// Media tracks retained in a recovery remux. Timecode is deliberately rebuilt
+/// by the final writer so an interrupted one-sample timecode track cannot span
+/// across two independently finalized assets.
+private let resumableCompositionMediaTypes: [AVMediaType] = [
+    .video,
+    .audio,
+    .metadata
+]
+
+/// Makes a zero-based composition for the unencoded tail of a source asset.
+/// The actual media remains on the source volume; AVFoundation only references
+/// and decodes the requested range.
+private func makeRecoveryRangeComposition(
+    asset: AVAsset,
+    timeRange: CMTimeRange
+) async throws -> AVMutableComposition {
+    guard CMTIMERANGE_IS_VALID(timeRange),
+          CMTimeCompare(timeRange.duration, .zero) > 0 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 20,
+            userInfo: [NSLocalizedDescriptionKey: "Recovery tail has no positive duration."]
+        )
+    }
+    let composition = AVMutableComposition()
+    for mediaType in resumableCompositionMediaTypes {
+        let tracks = try await asset.loadTracks(withMediaType: mediaType)
+        for sourceTrack in tracks {
+            guard let insertRange = try await recoveryClampedInsertRange(
+                requested: timeRange,
+                of: sourceTrack
+            ) else { continue }
+            guard let destinationTrack = composition.addMutableTrack(
+                withMediaType: mediaType,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw NSError(
+                    domain: "FragmentRecovery",
+                    code: 21,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Could not create recovery composition track for \(mediaType.rawValue)."
+                    ]
+                )
+            }
+            try destinationTrack.insertTimeRange(insertRange, of: sourceTrack, at: .zero)
+            if mediaType == .video {
+                destinationTrack.preferredTransform = try await sourceTrack.load(.preferredTransform)
+            }
+        }
+    }
+    guard !composition.tracks(withMediaType: .video).isEmpty else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 22,
+            userInfo: [NSLocalizedDescriptionKey: "Recovery composition has no video track."]
+        )
+    }
+    return composition
+}
+
+/// Last presentation time of an asset's picture, ignoring any extra time the
+/// asset's other tracks claim.
+private func recoveryVideoTrackEnd(of asset: AVAsset) async throws -> CMTime? {
+    guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+        return nil
+    }
+    let range = try await track.load(.timeRange)
+    guard CMTIMERANGE_IS_VALID(range),
+          CMTimeCompare(range.duration, .zero) > 0 else { return nil }
+    return CMTimeAdd(range.start, range.duration)
+}
+
+/// Furthest end reached by any track of an asset. A full encode keeps audio and
+/// timed metadata that legitimately outlast the last picture sample, so the
+/// recovered tail has to be requested out to this point; every track is still
+/// clamped to its own real end before being inserted.
+private func recoveryAssetMediaEnd(of asset: AVAsset) async throws -> CMTime? {
+    let tracks = try await asset.load(.tracks)
+    var furthest: CMTime?
+    for track in tracks {
+        let range = try await track.load(.timeRange)
+        guard CMTIMERANGE_IS_VALID(range),
+              CMTimeCompare(range.duration, .zero) > 0 else { continue }
+        let end = CMTimeAdd(range.start, range.duration)
+        if let current = furthest {
+            if CMTimeCompare(end, current) > 0 { furthest = end }
+        } else {
+            furthest = end
+        }
+    }
+    return furthest
+}
+
+/// Trims only the trailing edge of a requested range so it never asks
+/// AVFoundation for media past a track's last real sample. An over-long request
+/// makes the composition extrapolate and hand back a synthesised final frame,
+/// and that phantom frame used to be encoded into every joined recovery.
+private func recoveryClampedInsertRange(
+    requested: CMTimeRange,
+    of track: AVAssetTrack
+) async throws -> CMTimeRange? {
+    guard CMTIMERANGE_IS_VALID(requested),
+          CMTimeCompare(requested.duration, .zero) > 0 else { return nil }
+    let trackRange = try await track.load(.timeRange)
+    guard CMTIMERANGE_IS_VALID(trackRange),
+          CMTimeCompare(trackRange.duration, .zero) > 0 else { return nil }
+    let usableEnd = CMTimeMinimum(
+        CMTimeAdd(requested.start, requested.duration),
+        CMTimeAdd(trackRange.start, trackRange.duration)
+    )
+    guard CMTimeCompare(usableEnd, requested.start) > 0 else { return nil }
+    return CMTimeRange(start: requested.start, end: usableEnd)
+}
+
+private func recoveryDurationTolerance(fpsInfo: FramerateInfo) -> CMTime {
+    let fps = fpsInfo.fps > 0 ? fpsInfo.fps : 24.0
+    // A phantom trailing frame shows up as exactly one frame of extra duration,
+    // so anything below a frame catches it while still tolerating the rounding
+    // of a single CMTime tick on fractional frame rates.
+    return CMTime(seconds: 0.75 / fps, preferredTimescale: 60000)
+}
+
+/// Frame count of a picture duration, used to keep a rebuilt timecode track from
+/// running one frame past the last encoded picture when the source's audio
+/// outlasts the video.
+private func recoveryTimecodeFrameCount(
+    duration: CMTime,
+    fpsInfo: FramerateInfo
+) -> Int64? {
+    let fps = fpsInfo.fps > 0 ? fpsInfo.fps : 24.0
+    guard CMTIME_IS_NUMERIC(duration) else { return nil }
+    let frames = duration.seconds * fps
+    guard frames.isFinite, frames > 0, frames < Double(Int64.max) else { return nil }
+    return Int64(frames.rounded())
+}
+
+/// Measures a finalized recovery output and rejects one that stopped short of
+/// the range it was asked to produce. A partially readable source can make
+/// AVFoundation end a read early without reporting an error, which would
+/// otherwise ship a silently short movie.
+private func validateRecoveryOutputVideo(
+    _ url: URL,
+    expectedDuration: CMTime,
+    tolerance: CMTime,
+    label: String
+) async throws -> CMTime {
+    let asset = AVURLAsset(url: url)
+    guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 28,
+            userInfo: [NSLocalizedDescriptionKey: "Recovery \(label) has no video track."]
+        )
+    }
+    let range = try await track.load(.timeRange)
+    guard CMTIMERANGE_IS_VALID(range), CMTimeCompare(range.duration, .zero) > 0 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 29,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Recovery \(label) has no readable video range."
+            ]
+        )
+    }
+    let measured = range.duration.seconds
+    let expected = expectedDuration.seconds
+    let drift = abs(measured - expected)
+    guard measured.isFinite, expected.isFinite, drift <= tolerance.seconds else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 30,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Recovery \(label) covers \(String(format: "%.3f", measured)) s but " +
+                "\(String(format: "%.3f", expected)) s was expected."
+            ]
+        )
+    }
+    return range.duration
+}
+
+/// Failure domain used when a pass of the main encoder finished cleanly but
+/// covered less picture than the media it was asked to encode.
+private let encodedCoverageErrorDomain = "EncodeCoverage"
+
+private func isEncodedCoverageFailure(_ error: NSError) -> Bool {
+    error.domain == encodedCoverageErrorDomain
+}
+
+/// Second gate for the zero-copy disaster-recovery contract. Media that lives
+/// on a NAS or an external volume can stop handing out samples at a sample
+/// boundary without AVFoundation reporting an error, and an encoder that only
+/// checks "did the writer finish" commits that short result as a success. The
+/// finalized picture range is therefore measured against the range this pass
+/// was asked to produce, so the shortfall surfaces while the working fragment
+/// is still on the destination volume and the missing tail can be resumed.
+private func validateEncodedVideoCoverage(
+    outputURL: URL,
+    sourceVideoTrack: AVAssetTrack,
+    tolerance: CMTime,
+    label: String
+) async throws {
+    let sourceRange = (try? await sourceVideoTrack.load(.timeRange)) ?? .invalid
+    guard CMTIMERANGE_IS_VALID(sourceRange),
+          CMTimeCompare(sourceRange.duration, .zero) > 0 else {
+        // A source without a readable picture range never reaches the reader,
+        // so there is nothing to compare against here.
+        return
+    }
+    let outputAsset = AVURLAsset(url: outputURL)
+    guard let outputTrack = try await outputAsset.loadTracks(withMediaType: .video).first else {
+        throw NSError(
+            domain: encodedCoverageErrorDomain,
+            code: 40,
+            userInfo: [NSLocalizedDescriptionKey:
+                "\(label) completed without a video track."
+            ]
+        )
+    }
+    let outputRange = try await outputTrack.load(.timeRange)
+    guard CMTIMERANGE_IS_VALID(outputRange),
+          CMTimeCompare(outputRange.duration, .zero) > 0 else {
+        throw NSError(
+            domain: encodedCoverageErrorDomain,
+            code: 41,
+            userInfo: [NSLocalizedDescriptionKey:
+                "\(label) completed with no readable picture range."
+            ]
+        )
+    }
+    let missing = CMTimeSubtract(sourceRange.duration, outputRange.duration)
+    guard CMTimeCompare(missing, tolerance) > 0 else { return }
+    throw NSError(
+        domain: encodedCoverageErrorDomain,
+        code: 42,
+        userInfo: [NSLocalizedDescriptionKey:
+            "\(label) encoded \(String(format: "%.3f", outputRange.duration.seconds)) s of " +
+            "picture but the source range is \(String(format: "%.3f", sourceRange.duration.seconds)) s " +
+            "(\(String(format: "%.3f", missing.seconds)) s missing). " +
+            "The source stopped being readable before its last picture."
+        ]
+    )
+}
+
+/// One dropped picture is a real truncation, so the allowance on the main
+/// encode path stays inside a single frame while still absorbing the rounding
+/// of CMTime on fractional frame rates.
+private func encodedCoverageTolerance(fpsInfo: FramerateInfo) -> CMTime {
+    let fps = fpsInfo.fps > 0 ? fpsInfo.fps : 24.0
+    return CMTime(seconds: 1.0 / fps, preferredTimescale: 60000)
+}
+
+/// Concatenates the safe prefix and re-encoded tail without recompressing either
+/// stream. Track-count mismatches are treated as unsafe rather than silently
+/// dropping source audio or timed metadata.
+private func makeRecoveryJoinComposition(
+    prefixAsset: AVAsset,
+    prefixDuration: CMTime,
+    tailAsset: AVAsset,
+    metadataPrefixAsset: AVAsset?
+) async throws -> AVMutableComposition {
+    guard CMTIME_IS_NUMERIC(prefixDuration),
+          CMTimeCompare(prefixDuration, .zero) > 0 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 23,
+            userInfo: [NSLocalizedDescriptionKey: "Recovery prefix has no safe duration."]
+        )
+    }
+    let tailDuration = try await tailAsset.load(.duration)
+    guard CMTIME_IS_NUMERIC(tailDuration),
+          CMTimeCompare(tailDuration, .zero) > 0 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 24,
+            userInfo: [NSLocalizedDescriptionKey: "Recovery tail output has no duration."]
+        )
+    }
+
+    let composition = AVMutableComposition()
+    let prefixRange = CMTimeRange(start: .zero, duration: prefixDuration)
+    let tailRange = CMTimeRange(start: .zero, duration: tailDuration)
+    let joinedDuration = CMTimeAdd(prefixDuration, tailDuration)
+    for mediaType in resumableCompositionMediaTypes {
+        if mediaType == .metadata {
+            // Timed metadata describes the whole timeline, so it is taken from
+            // the source asset across the full joined duration instead of being
+            // spliced at the fragment boundary. A finished encode never exposes
+            // its boxed metadata track through AVFoundation (the writer leaves a
+            // short `mebx` sample entry behind), so counting prefix and tail
+            // metadata tracks would reject every otherwise healthy join.
+            let metadataAsset = metadataPrefixAsset ?? prefixAsset
+            let sourceTracks = try await metadataAsset.loadTracks(withMediaType: .metadata)
+            for sourceTrack in sourceTracks {
+                guard let destinationTrack = composition.addMutableTrack(
+                    withMediaType: .metadata,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    throw NSError(
+                        domain: "FragmentRecovery",
+                        code: 26,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Could not create joined \(mediaType.rawValue) track."
+                        ]
+                    )
+                }
+                let sourceRange = try await sourceTrack.load(.timeRange)
+                let availableEnd = CMTimeAdd(
+                    sourceRange.start,
+                    CMTimeMinimum(sourceRange.duration, joinedDuration)
+                )
+                if CMTimeCompare(availableEnd, sourceRange.start) > 0 {
+                    try destinationTrack.insertTimeRange(
+                        CMTimeRange(start: sourceRange.start, end: availableEnd),
+                        of: sourceTrack,
+                        at: .zero
+                    )
+                }
+            }
+            continue
+        }
+        // Metadata fragments are neutralized while the partial is reopened, so
+        // the prefix metadata is taken from the source asset: the prefix media
+        // is a byte-identical copy of that same source range.
+        let prefixTracks: [AVAssetTrack]
+        if mediaType == .metadata, let metadataPrefixAsset {
+            prefixTracks = try await metadataPrefixAsset.loadTracks(withMediaType: .metadata)
+        } else {
+            prefixTracks = try await prefixAsset.loadTracks(withMediaType: mediaType)
+        }
+        let tailTracks = try await tailAsset.loadTracks(withMediaType: mediaType)
+        guard prefixTracks.count == tailTracks.count else {
+            throw NSError(
+                domain: "FragmentRecovery",
+                code: 25,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Recovery cannot safely join \(mediaType.rawValue): prefix has \(prefixTracks.count) track(s), tail has \(tailTracks.count)."
+                ]
+            )
+        }
+        for index in prefixTracks.indices {
+            guard let destinationTrack = composition.addMutableTrack(
+                withMediaType: mediaType,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw NSError(
+                    domain: "FragmentRecovery",
+                    code: 26,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Could not create joined \(mediaType.rawValue) track."
+                    ]
+                )
+            }
+            try destinationTrack.insertTimeRange(prefixRange, of: prefixTracks[index], at: .zero)
+            try destinationTrack.insertTimeRange(tailRange, of: tailTracks[index], at: prefixDuration)
+            if mediaType == .video {
+                destinationTrack.preferredTransform = try await prefixTracks[index].load(.preferredTransform)
+            }
+        }
+    }
+    return composition
+}
+
+/// Removes a trailing partial atom before the recoverable prefix is reopened.
+/// This is a same-volume truncate operation; it never copies media data.
+private func trimRecoveryMovie(
+    _ movieURL: URL,
+    to safeByteLength: UInt64
+) throws {
+    let handle = try FileHandle(forWritingTo: movieURL)
+    defer { try? handle.close() }
+    try handle.truncate(atOffset: safeByteLength)
+    try handle.synchronize()
+}
+
+/// Confirms that a partial really exposes the video range the scanner
+/// checkpointed. A fragmented writer can finalize a movie whose `mvhd` claims
+/// the full duration while its video track stops after a fraction of it, so the
+/// readable range — never the header hint — decides whether the prefix may be
+/// joined.
+private func validateRecoveryPrefix(
+    prefixAsset: AVAsset,
+    expectedDuration: CMTime
+) async throws {
+    let expected = expectedDuration.seconds
+    guard let track = try await prefixAsset.loadTracks(withMediaType: .video).first,
+          let timeRange = try? await track.load(.timeRange),
+          CMTIME_IS_NUMERIC(timeRange.duration) else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 28,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Recovery prefix exposes no readable video track."
+            ]
+        )
+    }
+    let actual = timeRange.duration.seconds
+    guard actual >= expected - 1.0 else {
+        throw NSError(
+            domain: "FragmentRecovery",
+            code: 29,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Recovery prefix exposes \(String(format: "%.3f", actual)) s of video but " +
+                "\(String(format: "%.3f", expected)) s were checkpointed; refusing to join " +
+                "a truncated prefix."
+            ]
+        )
+    }
+}
+
+/// Reuses all closed fragments by re-encoding only the missing source tail, then
+/// pass-through remuxing the saved prefix and new tail on the destination volume.
+/// Dolby Vision/CMU/raw side-stream jobs currently fall back to a full direct
+/// retry because their frame-indexed side data cannot be safely reconstructed
+/// from a generic AVMutableComposition.
+private func resumeFromFragmentCheckpoint(
+    sourceURL: URL,
+    recoveryMovieURL: URL,
+    checkpoint: FragmentResumeCheckpoint,
+    finalOutputURL: URL,
+    quality: String,
+    extraAudioURL: URL?,
+    audioReplace: Bool,
+    deleteSourceAudio: Bool,
+    forcedOutputStartTimecode: String?,
+    dolbyVisionXMLURL: URL?,
+    dolbyVisionLevel4Measurements: [DolbyVisionLevel4Measurement]?,
+    hevcOptions: HEVCEncodeOptions?,
+    av1Options: AV1EncodeOptions?,
+    colorSpace: SourceColorSpace?,
+    fpsInfo: FramerateInfo,
+    colorTransform: ColorTransformRequest?,
+    useDolbyVisionCodecTag: Bool,
+    container: EncodedVideoContainer,
+    removeRecoverySourceAfterSuccess: Bool,
+    progress: ProgressBar?
+) async -> Bool {
+    guard extraAudioURL == nil,
+          !audioReplace,
+          !deleteSourceAudio,
+          dolbyVisionXMLURL == nil,
+          dolbyVisionLevel4Measurements == nil,
+          hevcOptions?.dvProfile == nil,
+          av1Options?.dvProfile == nil else {
+        print("[Recovery] Frame-indexed Dolby Vision, raw, or replacement-audio workflow; using safe full retry.")
+        return false
+    }
+
+    do {
+        // Only a fragmented partial can hold a half-written trailing atom. A
+        // finalized prefix is complete as it stands; truncating it would risk
+        // cutting the closing moov that makes it readable at all.
+        if checkpoint.structure == .fragmented {
+            try trimRecoveryMovie(recoveryMovieURL, to: checkpoint.safeByteLength)
+        }
+        let sourceAsset = AVURLAsset(url: sourceURL)
+        let sourceDuration = try await sourceAsset.load(.duration)
+        // `AVAsset.duration` can outlast the picture: the source's audio track
+        // may run a few frames past the last video sample. Asking a composition
+        // for that extra time makes AVFoundation invent a decoded frame at the
+        // end of the range, which is how a phantom final frame appeared in every
+        // joined recovery. The recoverable tail stops at real picture.
+        let sourceVideoEnd = try await recoveryVideoTrackEnd(of: sourceAsset) ?? sourceDuration
+        let recoverableEnd = CMTimeMinimum(sourceDuration, sourceVideoEnd)
+        guard CMTIME_IS_NUMERIC(recoverableEnd),
+              CMTimeCompare(recoverableEnd, checkpoint.videoDuration) > 0 else {
+            throw NSError(
+                domain: "FragmentRecovery",
+                code: 27,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Recovery checkpoint already reaches the end of the source."
+                ]
+            )
+        }
+        // The soundtrack may legitimately outlast the picture, and a full
+        // encode keeps it. The tail request therefore reaches the asset's
+        // overall media end while the picture is still clamped per track, so the
+        // resumed soundtrack stays exactly as long as an uninterrupted encode's.
+        let sourceMediaEnd = try await recoveryAssetMediaEnd(of: sourceAsset) ?? recoverableEnd
+        let expectedTailVideoDuration = CMTimeSubtract(
+            recoverableEnd,
+            checkpoint.videoDuration
+        )
+        // AVFoundation's fragmented reader stops after the second fragment as
+        // soon as a metadata track (`mebx`) is fragmented too, which silently
+        // truncated the recoverable prefix. Neutralize only the four-byte box
+        // type of those metadata fragment index boxes for the duration of the
+        // prefix read and put the bytes back afterwards: no media byte moves and
+        // nothing is copied off the destination volume.
+        // Metadata `traf` boxes only exist in a fragmented write; a finalized
+        // prefix exposes its metadata track through the ordinary sample tables.
+        let metadataTrafTypeFields = checkpoint.structure == .fragmented
+            ? try fragmentMetadataTrafTypeFieldOffsets(in: recoveryMovieURL)
+            : []
+        var neutralizedMetadataFragments = false
+        defer {
+            if neutralizedMetadataFragments {
+                try? writeFragmentTrafBoxType(
+                    "traf",
+                    at: metadataTrafTypeFields,
+                    in: recoveryMovieURL
+                )
+            }
+        }
+        if !metadataTrafTypeFields.isEmpty {
+            try writeFragmentTrafBoxType(
+                "free",
+                at: metadataTrafTypeFields,
+                in: recoveryMovieURL
+            )
+            neutralizedMetadataFragments = true
+            print(
+                "[Recovery] Neutralized \(metadataTrafTypeFields.count) fragmented metadata " +
+                "traf box(es) so the partial can be read in place."
+            )
+        }
+        let prefixAsset = AVURLAsset(url: recoveryMovieURL)
+        try await validateRecoveryPrefix(
+            prefixAsset: prefixAsset,
+            expectedDuration: checkpoint.videoDuration
+        )
+        let tailRange = CMTimeRange(
+            start: checkpoint.videoDuration,
+            end: CMTimeMaximum(recoverableEnd, sourceMediaEnd)
+        )
+        let tailComposition = try await makeRecoveryRangeComposition(
+            asset: sourceAsset,
+            timeRange: tailRange
+        )
+        let continuationURL = finalOutputURL.deletingLastPathComponent()
+            .appendingPathComponent(
+                ".\(finalOutputURL.deletingPathExtension().lastPathComponent).continuation-\(UUID().uuidString).\(container.fileExtension)"
+            )
+        let tailSuccess = await encodeMOV(
+            asset: tailComposition,
+            outputURL: continuationURL,
+            quality: quality,
+            extraAudioURL: nil,
+            audioReplace: false,
+            deleteSourceAudio: false,
+            forcedOutputStartTimecode: forcedOutputStartTimecode,
+            dolbyVisionXMLURL: nil,
+            dolbyVisionLevel4Measurements: nil,
+            hevcOptions: hevcOptions,
+            av1Options: av1Options,
+            colorSpace: colorSpace,
+            fpsInfo: fpsInfo,
+            colorTransform: colorTransform,
+            useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+            container: container,
+            outputVideoRaw: false,
+            progress: progress,
+            reconnectAttempt: maximumStorageReconnectRetries,
+            timecodeFrameCountOverride: recoveryTimecodeFrameCount(
+                duration: expectedTailVideoDuration,
+                fpsInfo: fpsInfo
+            )
+        )
+        guard tailSuccess else { return false }
+        let tailVideoDuration = try await validateRecoveryOutputVideo(
+            continuationURL,
+            expectedDuration: expectedTailVideoDuration,
+            tolerance: recoveryDurationTolerance(fpsInfo: fpsInfo),
+            label: "tail encode"
+        )
+
+        let joined = try await makeRecoveryJoinComposition(
+            prefixAsset: prefixAsset,
+            prefixDuration: checkpoint.videoDuration,
+            tailAsset: AVURLAsset(url: continuationURL),
+            metadataPrefixAsset: sourceAsset
+        )
+        let joinSuccess = await encodeMOV(
+            asset: joined,
+            outputURL: finalOutputURL,
+            quality: "pass",
+            extraAudioURL: nil,
+            audioReplace: false,
+            deleteSourceAudio: false,
+            forcedOutputStartTimecode: forcedOutputStartTimecode,
+            dolbyVisionXMLURL: nil,
+            dolbyVisionLevel4Measurements: nil,
+            hevcOptions: nil,
+            av1Options: nil,
+            colorSpace: nil,
+            fpsInfo: fpsInfo,
+            colorTransform: nil,
+            useDolbyVisionCodecTag: false,
+            container: container,
+            outputVideoRaw: false,
+            progress: progress,
+            reconnectAttempt: maximumStorageReconnectRetries,
+            timecodeFrameCountOverride: recoveryTimecodeFrameCount(
+                duration: CMTimeAdd(checkpoint.videoDuration, tailVideoDuration),
+                fpsInfo: fpsInfo
+            )
+        )
+        guard joinSuccess else { return false }
+        _ = try await validateRecoveryOutputVideo(
+            finalOutputURL,
+            expectedDuration: CMTimeAdd(checkpoint.videoDuration, tailVideoDuration),
+            tolerance: recoveryDurationTolerance(fpsInfo: fpsInfo),
+            label: "joined output"
+        )
+        try? FileManager.default.removeItem(at: continuationURL)
+        if removeRecoverySourceAfterSuccess {
+            try? FileManager.default.removeItem(at: recoveryMovieURL)
+        }
+        print(
+            "[Recovery] Reused \(String(format: "%.3f", checkpoint.videoDuration.seconds)) s " +
+            "of already-encoded picture; only the remaining tail was encoded."
+        )
+        if !removeRecoverySourceAfterSuccess,
+           FileManager.default.fileExists(atPath: recoveryMovieURL.path) {
+            print("[Recovery] Kept the verified fragment prefix at \(recoveryMovieURL.path)")
+        }
+        return true
+    } catch {
+        print("[Recovery] Fragment continuation could not be safely completed: \(error.localizedDescription)")
+        return false
+    }
+}
+
+/// Public internal entry point used by the CLI after a process crash or power
+/// loss. It resumes only from a scanner-verified fragmented MOV/MP4 prefix.
+func resumeMOVFromRecoveryFile(
+    sourceURL: URL,
+    recoveryMovieURL: URL,
+    outputURL: URL,
+    quality: String,
+    forcedOutputStartTimecode: String?,
+    hevcOptions: HEVCEncodeOptions?,
+    av1Options: AV1EncodeOptions?,
+    colorSpace: SourceColorSpace?,
+    fpsInfo: FramerateInfo,
+    colorTransform: ColorTransformRequest?,
+    useDolbyVisionCodecTag: Bool = false,
+    container: EncodedVideoContainer = .mov,
+    progress: ProgressBar? = nil
+) async -> Bool {
+    do {
+        let checkpoint: FragmentResumeCheckpoint
+        if let fragmented = try? fragmentedMovieResumeCheckpoint(in: recoveryMovieURL) {
+            checkpoint = fragmented
+        } else {
+            checkpoint = try finalizedMovieResumeCheckpoint(in: recoveryMovieURL)
+        }
+        let checkpointShape = checkpoint.structure == .fragmented
+            ? "\(checkpoint.completedFragmentCount) fragment(s)"
+            : "finalized prefix"
+        print(
+            "[Recovery] Resume checkpoint: " +
+            "\(String(format: "%.3f", checkpoint.videoDuration.seconds)) s of video (\(checkpointShape))."
+        )
+        return await resumeFromFragmentCheckpoint(
+            sourceURL: sourceURL,
+            recoveryMovieURL: recoveryMovieURL,
+            checkpoint: checkpoint,
+            finalOutputURL: outputURL,
+            quality: quality,
+            extraAudioURL: nil,
+            audioReplace: false,
+            deleteSourceAudio: false,
+            forcedOutputStartTimecode: forcedOutputStartTimecode,
+            dolbyVisionXMLURL: nil,
+            dolbyVisionLevel4Measurements: nil,
+            hevcOptions: hevcOptions,
+            av1Options: av1Options,
+            colorSpace: colorSpace,
+            fpsInfo: fpsInfo,
+            colorTransform: colorTransform,
+            useDolbyVisionCodecTag: useDolbyVisionCodecTag,
+            container: container,
+            removeRecoverySourceAfterSuccess: false,
+            progress: progress
+        )
+    } catch {
+        print("[Recovery] Cannot open recovery movie: \(error.localizedDescription)")
         return false
     }
 }
 
 /// Returns the furthest timeline clip end in output frame units.
-private func timelineFrameCount(from descriptor: TimelineDescriptor) -> Int {
+func timelineFrameCount(from descriptor: TimelineDescriptor) -> Int {
     let fps = descriptor.frameRate.value != 0
         ? Double(descriptor.frameRate.timescale) / Double(descriptor.frameRate.value)
         : 24.0
@@ -7557,12 +9835,15 @@ private func timelineAudioPCMSettings(channelCount: Int) -> [String: Any] {
 func encodeTimelineMOV(
     composition: AVMutableComposition,
     descriptor: TimelineDescriptor,
-    outputURL: URL,
+    outputURL finalOutputURL: URL,
     quality: String,
     forcedOutputStartTimecode: String?,
     deleteSourceAudio: Bool,
-    colorTransform: ColorTransformRequest?
+    colorTransform: ColorTransformRequest?,
+    progress: ProgressBar? = nil
 ) async -> Bool {
+    let outputTransaction = DirectOutputTransaction(finalURL: finalOutputURL)
+    let outputURL = outputTransaction.workingURL
     let requestedQuality = normalizedProResQuality(quality)
     let effectiveQuality = requestedQuality == "pass" ? "422hq" : requestedQuality
 
@@ -7590,6 +9871,7 @@ func encodeTimelineMOV(
     )
     let totalFrames = max(timelineFrameCount(from: descriptor), 1)
     let resolvedColorTransform: ResolvedColorTransform?
+    var outputWriterWasCreated = false
     do {
         if let colorTransform {
             resolvedColorTransform = try await resolveTimelineColorTransform(
@@ -7653,7 +9935,16 @@ func encodeTimelineMOV(
             videoSettings: proResReaderOutputSettings(effectiveQuality))
         videoOut.alwaysCopiesSampleData = false
         videoOut.videoComposition = videoComposition
-        if reader.canAdd(videoOut) { reader.add(videoOut) }
+        guard reader.canAdd(videoOut) else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Timeline reader cannot create the requested video-composition output."
+                ]
+            )
+        }
+        reader.add(videoOut)
 
         let audioSettings = timelineAudioPCMSettings(channelCount: 2)
         var audioOut: AVAssetReaderAudioMixOutput? = nil
@@ -7668,11 +9959,25 @@ func encodeTimelineMOV(
 
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        outputWriterWasCreated = true
         writer.shouldOptimizeForNetworkUse = false
+        configureRecoverableMovieFragments(
+            writer: writer,
+            overallDuration: try? await composition.load(.duration)
+        )
 
         let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
         videoIn.expectsMediaDataInRealTime = false
-        if writer.canAdd(videoIn) { writer.add(videoIn) }
+        guard writer.canAdd(videoIn) else {
+            throw NSError(
+                domain: "encodeMOV",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Timeline writer cannot add the encoded video track."
+                ]
+            )
+        }
+        writer.add(videoIn)
 
         let tcIn = AVAssetWriterInput(
             mediaType: .timecode,
@@ -7720,7 +10025,13 @@ func encodeTimelineMOV(
         }
         writer.startSession(atSourceTime: .zero)
 
-        let progress = ProgressBar(total: totalFrames)
+        let ownedProgress = progress == nil ? makeEncodePipelineProgressBar(
+            frames: Int64(totalFrames), quality: quality, cmuMasteringNits: nil,
+            includeGeneratedCMU: false, hasExternalDolbyVisionXML: false,
+            exportFormat: "mov"
+        ) : nil
+        defer { ownedProgress?.endLine() }
+        let pipelineProgress = progress ?? ownedProgress
         let failureBox = PipelineFailureBox()
         let pipelineCapacity = proResPipelineChannelCapacity(width: width, height: height, quality: effectiveQuality)
 
@@ -7753,6 +10064,12 @@ func encodeTimelineMOV(
                     }
                     guard let wrapped else { break }
                     await pixelChannel.sendAsync(wrapped)
+                }
+                if let error = assetReaderTerminalError(
+                    readerRef.value,
+                    stage: "Timeline video decode failed before EOF"
+                ) {
+                    failureBox.store(error)
                 }
                 pixelChannel.finish()
             }
@@ -7802,8 +10119,16 @@ func encodeTimelineMOV(
             group.addTask(priority: .userInitiated) {
                 let vIn = videoInRef.value
                 for await wrapped in compressedChannel {
-                    while !vIn.isReadyForMoreMediaData {
-                        await Task.yield()
+                    guard await waitForWriterInput(
+                        vIn,
+                        writer: writerRef.value,
+                        reader: readerRef.value,
+                        failureBox: failureBox,
+                        stage: "Timeline writer stopped accepting video"
+                    ) else {
+                        compressedChannel.finish()
+                        vIn.markAsFinished()
+                        return
                     }
                     guard vIn.append(wrapped.buf) else {
                         failureBox.store(makeWriterFailure(stage: "Timeline video append failed", writer: writerRef.value, reader: readerRef.value))
@@ -7811,7 +10136,7 @@ func encodeTimelineMOV(
                         vIn.markAsFinished()
                         return
                     }
-                    progress.increment()
+                    pipelineProgress?.phase(.video).increment()
                 }
                 vIn.markAsFinished()
             }
@@ -7846,20 +10171,35 @@ func encodeTimelineMOV(
         }
 
         vtSession.invalidate()
-        progress.finish()
         if let error = failureBox.error {
             throw error
         }
+        if let error = assetReaderTerminalError(
+            reader,
+            stage: "Timeline media read failed before EOF"
+        ) {
+            throw error
+        }
+        pipelineProgress?.completePhase(.video)
+        pipelineProgress?.completePhase(.mux)
         await writer.finishWriting()
         if writer.status != .completed {
-            if let error = writer.error {
-                print("[Error] Timeline MOV write failed: \(error.localizedDescription)")
-            }
-            return false
+            throw makeWriterFailure(
+                stage: "Timeline writer finalize failed",
+                writer: writer,
+                reader: reader
+            )
+        }
+        try outputTransaction.commit()
+        if ownedProgress != nil {
+            pipelineProgress?.finish()
         }
         return true
     } catch {
         print("[Error] Timeline MOV encode error: \(error.localizedDescription)")
+        if outputWriterWasCreated {
+            outputTransaction.preserveAfterFailure()
+        }
         return false
     }
 }

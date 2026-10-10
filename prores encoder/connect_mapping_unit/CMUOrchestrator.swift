@@ -102,7 +102,8 @@ func runCMUAnalysisAfterEncode(
     sidecarBaseURL: URL,
     quality: String,
     masteringPeakNits: Float,
-    forcedStartTimecode: String?
+    forcedStartTimecode: String?,
+    progress: ProgressBar? = nil
 ) async throws -> CMUOutputArtifacts {
     guard let inputURL = (inputAsset as? AVURLAsset)?.url else {
         throw CMUError.unsupportedColorSpace(
@@ -136,7 +137,8 @@ func runCMUAnalysisAfterEncode(
         fallbackInputURL: inputURL,
         sidecarBaseURL: sidecarBaseURL,
         masteringPeakNits: masteringPeakNits,
-        forcedStartTimecode: forcedStartTimecode
+        forcedStartTimecode: forcedStartTimecode,
+        progress: progress
     )
 }
 
@@ -150,7 +152,8 @@ func runCMUAnalysisBeforeCompressedEncode(
     colorTransform: ColorTransformRequest?,
     dolbyVisionProfile: DolbyVisionHEVCProfile?,
     masteringPeakNits: Float,
-    forcedStartTimecode: String?
+    forcedStartTimecode: String?,
+    progress: ProgressBar? = nil
 ) async throws -> CMUOutputArtifacts {
     guard isHEVCQuality(quality) || isAV1Quality(quality) else {
         throw CMUError.exportFailed(
@@ -178,6 +181,7 @@ func runCMUAnalysisBeforeCompressedEncode(
         descriptor = inputDescriptor.applying(resolved)
         resolvedTransform = resolved
     }
+    progress?.prepareForLog()
     print("[CMU] Generating Dolby Vision metadata before \(quality.uppercased()) encode.")
     return try await runCMUAnalysis(
         selectedURL: inputURL,
@@ -187,7 +191,8 @@ func runCMUAnalysisBeforeCompressedEncode(
         sidecarBaseURL: sidecarBaseURL,
         masteringPeakNits: masteringPeakNits,
         forcedStartTimecode: forcedStartTimecode,
-        colorTransform: resolvedTransform
+        colorTransform: resolvedTransform,
+        progress: progress
     )
 }
 
@@ -200,7 +205,8 @@ private func runCMUAnalysis(
     sidecarBaseURL: URL,
     masteringPeakNits: Float,
     forcedStartTimecode: String?,
-    colorTransform: ResolvedColorTransform? = nil
+    colorTransform: ResolvedColorTransform? = nil,
+    progress: ProgressBar? = nil
 ) async throws -> CMUOutputArtifacts {
     let timecode = try await cmuResolveTimecodeReference(
         analyzedURL: selectedURL,
@@ -208,6 +214,7 @@ private func runCMUAnalysis(
         forcedStartTimecode: forcedStartTimecode,
         editRate: descriptor.editRate
     )
+    progress?.prepareForLog()
     print(
         "[CMU] Metal-only analysis: \(source.rawValue) \(selectedURL.lastPathComponent), " +
         "\(descriptor.primaries.displayName) PQ, master \(String(format: "%.1f", masteringPeakNits)) nit."
@@ -224,8 +231,10 @@ private func runCMUAnalysis(
         source: source,
         masteringPeakNits: masteringPeakNits,
         timecode: timecode,
-        colorTransform: colorTransform
+        colorTransform: colorTransform,
+        progress: progress
     )
+    progress?.prepareForLog()
     let artifacts = try CMUExporter.write(
         document: document,
         sidecarBaseURL: sidecarBaseURL
@@ -253,7 +262,8 @@ private func runCMUAnalysis(
 func runDolbyVisionLevel4Analysis(
     inputAsset: AVAsset,
     colorTransform: ResolvedColorTransform?,
-    profile: DolbyVisionHEVCProfile
+    profile: DolbyVisionHEVCProfile,
+    progress: ProgressBar? = nil
 ) async throws -> [DolbyVisionLevel4Measurement] {
     guard let inputURL = (inputAsset as? AVURLAsset)?.url else {
         throw CMUError.unsupportedColorSpace(
@@ -273,6 +283,7 @@ func runDolbyVisionLevel4Analysis(
         isDropFrame: false,
         origin: .zero
     )
+    progress?.prepareForLog()
     print(
         "[DoVi] Metal PQ-master Level 4 analysis: \(inputURL.lastPathComponent), " +
         "\(descriptor.primaries.displayName) PQ."
@@ -283,7 +294,8 @@ func runDolbyVisionLevel4Analysis(
         source: analysisTransform == nil ? .input : .transformedInput,
         masteringPeakNits: 10_000,
         timecode: timecode,
-        colorTransform: analysisTransform
+        colorTransform: analysisTransform,
+        progress: progress
     )
     return cmuBuildDolbyVisionLevel4Measurements(
         frames: document.frames
@@ -295,7 +307,8 @@ func runDolbyVisionLevel4Analysis(
 func runCMUAnalysisOnOutput(
     outputURL: URL,
     masteringPeakNits: Float,
-    forcedStartTimecode: String?
+    forcedStartTimecode: String?,
+    progress: ProgressBar? = nil
 ) async throws -> CMUOutputArtifacts {
     let descriptor = try await CMUAssetDescriptor.inspect(url: outputURL)
     let timecode = try await cmuResolveTimecodeReference(
@@ -304,6 +317,7 @@ func runCMUAnalysisOnOutput(
         forcedStartTimecode: forcedStartTimecode,
         editRate: descriptor.editRate
     )
+    progress?.prepareForLog()
     print(
         "[CMU] Metal-only timeline output analysis: \(outputURL.lastPathComponent), " +
         "\(descriptor.primaries.displayName) PQ."
@@ -313,8 +327,10 @@ func runCMUAnalysisOnOutput(
         descriptor: descriptor,
         source: .output,
         masteringPeakNits: masteringPeakNits,
-        timecode: timecode
+        timecode: timecode,
+        progress: progress
     )
+    progress?.prepareForLog()
     let artifacts = try CMUExporter.write(
         document: document,
         sidecarBaseURL: outputURL

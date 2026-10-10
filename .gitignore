@@ -1,20 +1,33 @@
 .DS_Store
-Build/
 build/
 !build/
 build/*
 !build/Release/
-!build/Release/**
-Build/Release/.DS_Store
+build/Release/*
+!build/Release/prores encoder
+!build/Release/ProResEncoderFramework.framework/
+!build/Release/ProResEncoderFramework.framework/**
+!build/Release/ProResEncoderAMA.avx/
+!build/Release/ProResEncoderAMA.avx/**
+!build/Release/SHA256SUMS.txt
 DerivedData/
 dist/
 *.dSYM/
-!build/Release/*.dSYM/
-!build/Release/*.dSYM/**
 *.xcuserstate
 *.moved-aside
 **/*.xcodeproj/project.xcworkspace/xcuserdata/
 **/*.xcodeproj/xcuserdata/
+
+# Licensed Avid AMA/ACF/AAF headers and libraries. Local checkout only.
+# Never publish this directory, including to a private GitHub repository.
+/ThirdParty/AvidSDK/
+/ThirdParty/AvidSDK.manifest.sha256
+**/AMA-SDK*/
+**/LocalEvidence/
+
+# Local research and host debugging records are not release documentation.
+/docs/AMA-output-debug-2026-09-30.md
+/docs/MediaComposer_AVX_ProRes_Plan_2026-09-22/
 
 # Local media outputs and scratch files
 *.mov
@@ -31,4 +44,13 @@ dist/
 *.bin
 BuildFramework/
 TestOutputs/
-/Build/
+
+# These remain excluded even inside allowlisted Release bundles.
+**/.DS_Store
+build/Release/**/*.dSYM/
+build/Release/**/AvidSDK/
+build/Release/**/LocalEvidence/
+build/Release/ProResEncoderAMA.avx/**/*.h
+build/Release/ProResEncoderAMA.avx/**/*.hpp
+build/Release/ProResEncoderAMA.avx/**/*.a
+build/Release/ProResEncoderAMA.avx/**/*.o
