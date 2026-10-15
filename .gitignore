@@ -18,15 +18,25 @@ dist/
 **/*.xcodeproj/project.xcworkspace/xcuserdata/
 **/*.xcodeproj/xcuserdata/
 
-# Licensed Avid AMA/ACF/AAF headers and libraries. Local checkout only.
-# Never publish this directory, including to a private GitHub repository.
-/ThirdParty/AvidSDK/
+# Licensed Avid AMA/ACF/AAF payload stays local. Only these first-party layout
+# README files are public; directories are traversable so the placeholders work.
+/ThirdParty/AvidSDK/**
+!/ThirdParty/AvidSDK/**/
+!/ThirdParty/AvidSDK/README.md
+!/ThirdParty/AvidSDK/amasdk/include/README.md
+!/ThirdParty/AvidSDK/amasdk/lib/debug/README.md
+!/ThirdParty/AvidSDK/amasdk/lib/release/README.md
+!/ThirdParty/AvidSDK/acfsdk/inc/README.md
+!/ThirdParty/AvidSDK/acfsdk/utils/README.md
+!/ThirdParty/AvidSDK/acfsdk/schema/README.md
+!/ThirdParty/AvidSDK/aafsdk/include/README.md
 /ThirdParty/AvidSDK.manifest.sha256
 **/AMA-SDK*/
 **/LocalEvidence/
 
 # Local research and host debugging records are not release documentation.
 /docs/AMA-output-debug-2026-09-30.md
+/Tests/ProResEncoderAMA/ColorFrameProbe.swift
 /docs/MediaComposer_AVX_ProRes_Plan_2026-09-22/
 
 # Local media outputs and scratch files

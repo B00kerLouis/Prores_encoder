@@ -23,6 +23,7 @@
 		C9B221112FE2000100000002 /* ExportSession.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221112FE2000100000001 /* ExportSession.mm */; };
 		C9B223012FE2000100000001 /* ExportSession.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221112FE2000100000001 /* ExportSession.mm */; };
 		C9B223032FE2000100000001 /* ContractTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B223022FE2000100000001 /* ContractTests.mm */; };
+		C9B260012FE2000100000001 /* AMAHDRToneMapper.mm in Contract Sources */ = {isa = PBXBuildFile; fileRef = C9B221122FE2000100000001 /* AMAHDRToneMapper.mm */; };
 		C9B222022FE2000100000001 /* CACFUnknown.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C9B222012FE2000100000001 /* CACFUnknown.cpp */; };
 		C9B222042FE2000100000001 /* CACFClassFactory.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C9B222032FE2000100000001 /* CACFClassFactory.cpp */; };
 		C9B221122FE2000100000002 /* AMAHDRToneMapper.mm in Sources */ = {isa = PBXBuildFile; fileRef = C9B221122FE2000100000001 /* AMAHDRToneMapper.mm */; };
@@ -600,6 +601,7 @@
 			files = (
 				C9B223012FE2000100000001 /* ExportSession.mm in Sources */,
 				C9B223032FE2000100000001 /* ContractTests.mm in Sources */,
+				C9B260012FE2000100000001 /* AMAHDRToneMapper.mm in Contract Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1084,6 +1086,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_NAME = ProResEncoderAMAContractTests;
 				SKIP_INSTALL = YES;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", Foundation, "-framework", Metal, );
 
 			};
 			name = Debug;
@@ -1103,6 +1106,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_NAME = ProResEncoderAMAContractTests;
 				SKIP_INSTALL = YES;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", Foundation, "-framework", Metal, );
 
 			};
 			name = Release;

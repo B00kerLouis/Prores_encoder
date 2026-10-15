@@ -25,7 +25,11 @@ func cmuPreflight(
     }
 
     if isHEVCQuality(quality) || isAV1Quality(quality) {
-        _ = try await CMUAssetDescriptor.inspect(url: inputURL)
+        // A declared, validated PQ transform may create the analysis master from
+        // SDR. Inspecting the unconverted input as PQ first rejected this path.
+        let createsPQ = colorTransform?.outputOETF == .pq
+            && (colorTransform?.outputGamut == .p3D65 || colorTransform?.outputGamut.isRec2020Encoding == true)
+        _ = try await CMUAssetDescriptor.inspect(url: inputURL, allowTransformableInput: createsPQ)
         if let colorTransform {
             guard let track = try? await inputAsset.loadTracks(withMediaType: .video).first else {
                 throw CMUError.noVideoTrack(inputURL)
@@ -165,7 +169,9 @@ func runCMUAnalysisBeforeCompressedEncode(
             "CMU currently requires file-based input media."
         )
     }
-    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
+    let createsPQ = colorTransform?.outputOETF == .pq
+        && (dolbyVisionProfile == nil || dolbyVisionProfile?.usesNativeIPT == true)
+    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL, allowTransformableInput: createsPQ)
     var descriptor = inputDescriptor
     var resolvedTransform: ResolvedColorTransform?
     if let colorTransform,
@@ -270,12 +276,13 @@ func runDolbyVisionLevel4Analysis(
             "Dolby Vision Level 4 analysis requires file-based input media."
         )
     }
-    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL)
     // P8.4/P10.4 still derives authoring L4 from the common PQ master, never
     // from the HLG compatibility base layer.
     let analysisTransform = profile.usesNativeIPT && colorTransform?.outputOETF == .pq
         ? colorTransform
         : nil
+    let inputDescriptor = try await CMUAssetDescriptor.inspect(url: inputURL,
+        allowTransformableInput: analysisTransform != nil)
     let descriptor = analysisTransform.map(inputDescriptor.applying) ?? inputDescriptor
     let timecode = CMUTimecodeReference(
         startFrame: 0,

@@ -56,7 +56,7 @@ ACFRESULT ProResMediaContainerWriter::GetImageFormat(
     AMA::IUncompressedImageProvider::TemporalFieldOrder* fieldOrder,
     AMA::IUncompressedImageProvider::FrameBufferLayout* frameLayout,
     AMA::IUncompressedImageProvider::BufferLineOrientation* orientation) const {
-    return GetRenderedImageFormat(pixelFormat, chromaSubSampling, componentType,
+    return GetRenderedImageFormat(job_.session(), pixelFormat, chromaSubSampling, componentType,
         componentRangeType, colorSpace, fieldOrder, frameLayout, orientation);
 }
 

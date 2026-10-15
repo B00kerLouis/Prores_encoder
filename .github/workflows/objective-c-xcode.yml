@@ -112,8 +112,21 @@ jobs:
             echo '::error::SDK/source files found in the runtime bundle.'
             exit 1
           fi
-          if git ls-files ThirdParty/AvidSDK | grep -q .; then
-            echo '::error::Avid SDK files must remain local.'
+          while IFS= read -r -d '' sdk_path; do
+            case "$sdk_path" in
+              ThirdParty/AvidSDK/README.md|\
+              ThirdParty/AvidSDK/amasdk/include/README.md|\
+              ThirdParty/AvidSDK/amasdk/lib/debug/README.md|\
+              ThirdParty/AvidSDK/amasdk/lib/release/README.md|\
+              ThirdParty/AvidSDK/acfsdk/inc/README.md|\
+              ThirdParty/AvidSDK/acfsdk/utils/README.md|\
+              ThirdParty/AvidSDK/acfsdk/schema/README.md|\
+              ThirdParty/AvidSDK/aafsdk/include/README.md) ;;
+              *) echo "::error::SDK payload is tracked: $sdk_path"; exit 1 ;;
+            esac
+          done < <(git ls-files -z -- ThirdParty/AvidSDK)
+          if git ls-files --error-unmatch ThirdParty/AvidSDK.manifest.sha256 >/dev/null 2>&1; then
+            echo '::error::The local Avid SDK manifest must not be published.'
             exit 1
           fi
           shasum -a 256 -c build/Release/SHA256SUMS.txt

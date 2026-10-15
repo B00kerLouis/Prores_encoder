@@ -125,3 +125,38 @@ kernel void native_dv_pack_uv(
     chroma = clamp(chroma * 0.25f + 0.5f, 0.0f, 1.0f);
     outputUV.write(float4(chroma, 0.0f, 1.0f), gid);
 }
+
+// AMA avoids converting RGB to YCbCr 4:2:0 before the native transform. The
+// float scratch preserves IPT precision until the single final 10-bit packing.
+kernel void native_dv_rgb_half(texture2d<float, access::read> rgb [[texture(0)]],
+    texture2d<float, access::write> ipt [[texture(1)]], constant uint &gamut [[buffer(0)]],
+    uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= ipt.get_width() || xy.y >= ipt.get_height()) return;
+    ipt.write(float4(ndv_rgb_to_iptpqc2(rgb.read(xy).rgb, gamut), 1.0f), xy);
+}
+inline float ndv_p010_word(float code) {
+    return round(clamp(code, 0.0f, 1.0f) * 1023.0f) * 64.0f / 65535.0f;
+}
+kernel void native_dv_pack_float_y(texture2d<float, access::read> ipt [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]], uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= output.get_width() || xy.y >= output.get_height()) return;
+    output.write(float4(ndv_p010_word(ipt.read(xy).x)), xy);
+}
+kernel void native_dv_pack_float_uv(texture2d<float, access::read> ipt [[texture(0)]],
+    texture2d<float, access::write> output [[texture(1)]], uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= output.get_width() || xy.y >= output.get_height()) return;
+    float2 chroma = 0;
+    // HEVC signals left-sited, vertically centered chroma. Filter around the
+    // even luma column rather than shifting it half a pixel with a 2x2 box.
+    for (uint y = 0; y < 2; ++y) {
+        const uint row = xy.y * 2 + y;
+        const uint center = xy.x * 2;
+        const uint left = center > 0 ? center - 1 : 0;
+        const uint right = min(center + 1, ipt.get_width() - 1);
+        chroma += 0.125f * ipt.read(uint2(left, row)).yz
+            + 0.25f * ipt.read(uint2(center, row)).yz
+            + 0.125f * ipt.read(uint2(right, row)).yz;
+    }
+    chroma += 0.5f;
+    output.write(float4(ndv_p010_word(chroma.x), ndv_p010_word(chroma.y), 0, 1), xy);
+}

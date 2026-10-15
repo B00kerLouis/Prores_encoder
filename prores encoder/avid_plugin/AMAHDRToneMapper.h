@@ -6,4 +6,5 @@
                    inputColor:(NSUInteger)inputColor peakNits:(float)peakNits
                         error:(NSError**)error;
 - (NSData*)mapBGRA:(NSData*)source stride:(NSUInteger)stride error:(NSError**)error;
+- (NSData*)mapRGBAHalf:(NSData*)source stride:(NSUInteger)stride error:(NSError**)error;
 @end

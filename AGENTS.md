@@ -36,7 +36,7 @@ The AMA bundle uses `CFBundlePackageType=APPL` and Xcode-generated `Contents/Pkg
 
 Source package: AMA-SDK 3.5.11 in `AMA-SDK-3rd-party-mac`. `ThirdParty/AvidSDK.manifest.sha256` stores relative paths and hashes only.
 
-These files are licensed Avid material. They are gitignored. Do not commit them, attach them to CI logs, or push them to GitHub, including a private repository. A public build without the SDK cannot claim the plug-in was verified.
+The SDK payload is licensed Avid material and remains gitignored. Only the eight first-party README placement files under `ThirdParty/AvidSDK/` are allowlisted for publication. Never commit SDK headers, support sources, libraries, manifests or SDK documentation, including to a private repository. Public CI without the SDK does not build the AMA target.
 
 ## Encoder boundary
 
@@ -49,12 +49,12 @@ The writer's AMA XML maps the public single-file `ProResEncodeOptions` fields: c
 - Project primaries, transfer, matrix, and range are recorded as unavailable. They are not defaulted to Rec.2020/PQ.
 - `GetImageFormat` describes the buffer the plug-in requests. It is not the project color.
 - H.264 with Dolby Vision metadata is an invalid option.
-- Generated Dolby Vision requires a known project color and is not claimed complete.
+- Generated Dolby Vision requires a verified rendered-input declaration; this is separate from an unavailable host project-color query. Native acceptance is scoped in `docs/feature-coverage.md`.
 - Bounce Mix and Bounce Multitrack select a requested host route. Numeric host audio settings are logged when present. That is not proof of Media Composer AAC packets.
 
 ## Verification
 
-`ProResEncoderAMAContractTests` checks the Avid-free session's option matrix, bitrate state, and cancellation. Its no-output finish check covers an unused session branch, not the live writer bridge. It does not load Media Composer. Real timeline samples, reference pictures, PCM/AAC, and Dolby Vision bitstreams are untested.
+`ProResEncoderAMAContractTests` checks the Avid-free session's option matrix, bitrate state, cancellation and worker transport. Its no-output finish check covers an unused session branch, not the live writer bridge. It does not load Media Composer. Current native acceptance and remaining audio/reference-picture gaps are scoped in `docs/feature-coverage.md`.
 
 On 2026-09-23, an earlier signed debug bundle loaded in Media Composer 26.8 arm64 and the host reached Ready. At 17:06, 17 minutes after Ready, the host recorded `CORE_AUDIO_STREAM_ID_ERROR1` and exited. A run without the plug-in reached Ready and exited normally after about 12 minutes, without this error; the observation interval was shorter and cannot establish causality. A new debug bundle with lazy framework loading reached Ready at 17:25. `lsof` showed the AMA Mach-O loaded and the encoder framework absent at startup. Continue the host comparison, including a project and clip, before claiming the Core Audio issue resolved. Export settings UI and actual media output also require a selected host project and clip.
 
@@ -77,3 +77,32 @@ On 2026-09-23, an earlier signed debug bundle loaded in Media Composer 26.8 arm6
 - Publish only reviewed source/configuration, ordinary usage documentation, and the allowlisted runtime products. SDK files, SDK manifests, build logs, debug symbols, and research records remain local.
 - Public CI builds the CLI and framework, runs the Avid-free contract checks, and validates/packages the checked-in AVX. It does not build the SDK-dependent target or establish host export acceptance.
 - The worker implementation is the current export path. Earlier lazy loading and local-symbol loader comparisons are historical observations; full-duration Media Composer ProRes Proxy and Dolby Vision Profile 5 HEVC acceptance remains unpassed.
+
+
+## Current AMA implementation
+
+The dated host observations above are historical. Use `docs/feature-coverage.md`
+for the current supported scope and remaining acceptance gaps.
+
+- The Objective-C++ AMA bridge requests progressive packed 10.6 video-range
+  pictures for declared Rec.709 and Rec.2020 input. Rec.2020/PQ uses the host's
+  supported 709 YCbCr coding equations while retaining Rec.2020 RGB primaries
+  and PQ transfer. Matrix coding and RGB color declaration are separate facts.
+  P3 and unknown declarations retain the BGRA fallback.
+- Color conversion belongs to the existing shared `MetalColorPipeline`.
+  Generated compatible fallback profiles prepare a truthful selected-gamut PQ
+  half-float carrier before CMU. HLG base profiles apply a real final transform;
+  eligible ProRes and single-pass Profile 5 paths stream frames directly.
+- Private carrier and final movie time scales preserve the supplied rational
+  edit rate. The private AMA AV1 replay path uses bounded software decoding;
+  ordinary public decoder defaults remain unchanged. Codec callback delivery
+  preserves FIFO order before muxing.
+- Worker transport has a total monotonic transfer deadline, scoped buffer
+  ownership and cancellable finish. The protocol supports BGRA8, packed 10.6
+  and RGBAHalf. AVX registration does not load the encoder framework at startup.
+- `ColorPixelContracts.swift` and `ProfileMatrixCheckpoints.swift` are optional
+  SDK-free deterministic regressions. The older `--hdr` contract exercises the
+  retained legacy mapper, not the active shared color implementation.
+- Publish reviewed source/configuration, usage documentation and allowlisted
+  runtime products only. Keep user media, diagnostics, measurements, source
+  snapshots, SDK payload and detailed research records local.

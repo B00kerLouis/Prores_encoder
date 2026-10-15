@@ -19,10 +19,16 @@ float3 pqEncode(float3 nits) {
     return pow((3424.0f / 4096.0f + 2413.0f / 128.0f * p) /
         (1.0f + 2392.0f / 128.0f * p), float3(2523.0f / 32.0f));
 }
-kernel void amaHDR(const device uchar* source [[buffer(0)]],
-                   device uchar4* output [[buffer(1)]],
-                   constant Params& p [[buffer(2)]], uint2 xy [[thread_position_in_grid]]) {
-    if (xy.x >= p.width || xy.y >= p.height) return;
+// Match the framework's display-referred BT.2446-A expansion. Normalize the
+// inverse endpoint so declared SDR reference white reaches the requested peak.
+float expandSDRRaw(float nits, float peak) {
+    float x = pow(clamp(nits / 100.0f, 0.0f, 1.0f), 1.0f / 2.4f) * 255.0f;
+    float exponent = x > 70.0f
+        ? (2.8305e-6f * x - 7.4622e-4f) * x + 1.2528f
+        : (1.8712e-5f * x - 2.7334e-3f) * x + 1.3141f;
+    return peak * pow(pow(max(x, 0.0f), exponent) / 1000.0f, 2.4f);
+}
+float3 mapPixel(const device uchar* source, constant Params& p, uint2 xy) {
     uint offset = xy.y * p.stride + xy.x * 4;
     float3 rgb = float3(source[offset + 2], source[offset + 1], source[offset]) / 255.0f;
     if (p.transfer == 0) rgb = pow(rgb, float3(2.4f)) * 100.0f;
@@ -35,13 +41,31 @@ kernel void amaHDR(const device uchar* source [[buffer(0)]],
     }
     rgb = float3(dot(p.row0.xyz, rgb), dot(p.row1.xyz, rgb), dot(p.row2.xyz, rgb));
     float luma = max(dot(rgb, float3(0.2627f, 0.6780f, 0.0593f)), 1.0e-7f);
-    float knee = p.peak * 0.75f;
-    if (luma > knee) {
+    if (p.transfer == 0) {
+        float mapped = expandSDRRaw(luma, p.peak) *
+            (p.peak / max(expandSDRRaw(100.0f, p.peak), 1.0e-6f));
+        // Limit the gain as a whole. Per-channel clipping changes the hue of
+        // saturated SDR highlights and destroys their relative channel detail.
+        rgb *= min(mapped / luma, p.peak / max(max(rgb.r, rgb.g), max(rgb.b, 1.0e-7f)));
+    } else if (luma > p.peak * 0.75f) {
+        float knee = p.peak * 0.75f;
         float mapped = knee + (p.peak - knee) * (1.0f - exp(-(luma - knee) / (p.peak - knee)));
         rgb *= mapped / luma;
     }
-    rgb = pqEncode(clamp(rgb, 0.0f, p.peak));
+    return pqEncode(clamp(rgb, 0.0f, p.peak));
+}
+kernel void amaHDR(const device uchar* source [[buffer(0)]], device uchar4* output [[buffer(1)]],
+                   constant Params& p [[buffer(2)]], uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= p.width || xy.y >= p.height) return;
+    uint offset = xy.y * p.stride + xy.x * 4;
+    float3 rgb = mapPixel(source, p, xy);
     output[xy.y * p.width + xy.x] = uchar4(uchar3(round(rgb.bgr * 255.0f)), source[offset + 3]);
+}
+kernel void amaHDRHalf(const device uchar* source [[buffer(0)]], device half4* output [[buffer(1)]],
+                       constant Params& p [[buffer(2)]], uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= p.width || xy.y >= p.height) return;
+    uint offset = xy.y * p.stride + xy.x * 4;
+    output[xy.y * p.width + xy.x] = half4(half3(mapPixel(source, p, xy)), half(source[offset + 3] / 255.0f));
 }
 )metal";
 
@@ -56,6 +80,7 @@ struct AMAHDRParams {
     id<MTLDevice> _device;
     id<MTLCommandQueue> _queue;
     id<MTLComputePipelineState> _pipeline;
+    id<MTLComputePipelineState> _halfPipeline;
     id<MTLBuffer> _destination;
     AMAHDRParams _params;
 }
@@ -75,9 +100,12 @@ struct AMAHDRParams {
     id<MTLLibrary> library = [_device newLibraryWithSource:[NSString stringWithUTF8String:kAMAHDRKernel] options:nil error:error];
     id<MTLFunction> function = [library newFunctionWithName:@"amaHDR"];
     _pipeline = [_device newComputePipelineStateWithFunction:function error:error];
+    [function release];
+    function = [library newFunctionWithName:@"amaHDRHalf"];
+    _halfPipeline = [_device newComputePipelineStateWithFunction:function error:error];
     [function release]; [library release];
-    _destination = [_device newBufferWithLength:width * height * 4 options:MTLResourceStorageModeShared];
-    if (!_queue || !_pipeline || !_destination) {
+    _destination = [_device newBufferWithLength:width * height * 8 options:MTLResourceStorageModeShared];
+    if (!_queue || !_pipeline || !_halfPipeline || !_destination) {
         if (error && !*error) *error = [NSError errorWithDomain:@"AMAHDR" code:2
             userInfo:@{NSLocalizedDescriptionKey: @"Metal HDR mapping could not allocate its pipeline."}];
         [self release]; return nil;
@@ -101,12 +129,18 @@ struct AMAHDRParams {
 }
 
 - (NSData*)mapBGRA:(NSData*)source stride:(NSUInteger)stride error:(NSError**)error {
+    return [self map:source stride:stride half:NO error:error];
+}
+- (NSData*)mapRGBAHalf:(NSData*)source stride:(NSUInteger)stride error:(NSError**)error {
+    return [self map:source stride:stride half:YES error:error];
+}
+- (NSData*)map:(NSData*)source stride:(NSUInteger)stride half:(BOOL)half error:(NSError**)error {
     if (stride < _params.width * 4 || source.length < stride * _params.height || stride > UINT32_MAX) return nil;
     _params.stride = (uint32_t)stride;
     id<MTLBuffer> input = [_device newBufferWithBytes:source.bytes length:source.length options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> command = [_queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-    [encoder setComputePipelineState:_pipeline];
+    [encoder setComputePipelineState:half ? _halfPipeline : _pipeline];
     [encoder setBuffer:input offset:0 atIndex:0];
     [encoder setBuffer:_destination offset:0 atIndex:1];
     [encoder setBytes:&_params length:sizeof(_params) atIndex:2];
@@ -118,11 +152,11 @@ struct AMAHDRParams {
         if (error) *error = command.error;
         return nil;
     }
-    return [NSData dataWithBytes:_destination.contents length:_params.width * _params.height * 4];
+    return [NSData dataWithBytes:_destination.contents length:_params.width * _params.height * (half ? 8 : 4)];
 }
 
 - (void)dealloc {
-    [_destination release]; [_pipeline release]; [_queue release]; [_device release];
+    [_destination release]; [_halfPipeline release]; [_pipeline release]; [_queue release]; [_device release];
     [super dealloc];
 }
 @end

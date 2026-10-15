@@ -15,6 +15,7 @@ using VideoFrameHandler = std::function<ACFRESULT(const std::uint8_t* bytes, std
 
 // One contract shared by the writer and its per-clip sample consumer.
 ACFRESULT GetRenderedImageFormat(
+    const std::shared_ptr<ExportSession>& session,
     AMA::IUncompressedImageProvider::PixelFormat* pixelFormat,
     AMA::IUncompressedImageProvider::ChromaSubSampling* chromaSubSampling,
     AMA::IUncompressedImageProvider::ComponentType* componentType,

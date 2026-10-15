@@ -316,6 +316,12 @@ SWIFT_CLASS_NAMED("ProResFrameStreamSession")
 /// validated in <code>makeEncodeOptions()</code> before a host export is committed.
 - (nonnull instancetype)initWithOutputURL:(NSURL * _Nonnull)outputURL width:(NSInteger)width height:(NSInteger)height fpsNumerator:(NSInteger)fpsNumerator fpsDenominator:(NSInteger)fpsDenominator quality:(NSString * _Nonnull)quality containerExtension:(NSString * _Nonnull)containerExtension bitrateMbps:(double)bitrateMbps includeDolbyVision:(BOOL)includeDolbyVision advancedOptions:(NSDictionary * _Nonnull)advancedOptions OBJC_DESIGNATED_INITIALIZER;
 - (BOOL)appendBGRAFrame:(NSData * _Nonnull)frame stride:(NSInteger)stride SWIFT_WARN_UNUSED_RESULT;
+/// Private AMA mapped input. PQ must never be rounded back to eight bits.
+- (BOOL)appendRGBAHalfFrame:(NSData * _Nonnull)frame stride:(NSInteger)stride SWIFT_WARN_UNUSED_RESULT;
+/// Host Cb/Y0/Cr/Y1 16-bit 10.6 video-range words. No RGB8 carrier or
+/// separate AMA color curve is introduced; only the shared CLI transform
+/// converts the rendered samples into the declared PQ master.
+- (BOOL)appendPacked422Frame:(NSData * _Nonnull)frame stride:(NSInteger)stride SWIFT_WARN_UNUSED_RESULT;
 /// Media Composer can deliver a rendered sequence as encoded ProRes frames.
 /// Mux those frames without another encode, then use the existing encoder API.
 - (BOOL)appendProResFrame:(NSData * _Nonnull)frame sourceCodec:(NSString * _Nonnull)sourceCodec SWIFT_WARN_UNUSED_RESULT;

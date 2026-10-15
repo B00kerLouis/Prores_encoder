@@ -63,7 +63,8 @@ enum CMUExporter {
     /// Writes one XML sidecar next to the supplied base URL.
     static func write(
         document: CMUAnalysisDocument,
-        sidecarBaseURL: URL
+        sidecarBaseURL: URL,
+        amaStream: Bool = false
     ) throws -> CMUOutputArtifacts {
         let baseURL = sidecarBaseURL.pathExtension.isEmpty
             ? sidecarBaseURL
@@ -80,7 +81,7 @@ enum CMUExporter {
         guard let xmlData = xml.data(using: .utf8) else {
             throw CMUError.exportFailed("XML could not be encoded as UTF-8.")
         }
-        try validateXML(xmlData, document: document)
+        try validateXML(xmlData, document: document, amaStream: amaStream)
         try xmlData.write(to: xmlURL, options: .atomic)
 
         return CMUOutputArtifacts(
@@ -302,7 +303,8 @@ enum CMUExporter {
     /// Parses generated XML and verifies required output, track, shot, and frame fields.
     private static func validateXML(
         _ data: Data,
-        document: CMUAnalysisDocument
+        document: CMUAnalysisDocument,
+        amaStream: Bool
     ) throws {
         let xml = try XMLDocument(
             data: data,
@@ -314,7 +316,14 @@ enum CMUExporter {
             throw CMUError.exportFailed("XML root or namespace is invalid.")
         }
         let text = String(decoding: data, as: UTF8.self)
-        guard text.contains("<Author>Dolby Laboratories</Author>") else {
+        // Preserve the ordinary CMU contract. The owned AMA stream records
+        // its actual author and software instead of attributing it to Dolby.
+        if amaStream {
+            guard document.author == "B00kerLouis", document.software == "ProResEncoderAMA",
+                  text.contains("<Author>B00kerLouis</Author>") else {
+                throw CMUError.exportFailed("AMA XML author/software is invalid.")
+            }
+        } else if !text.contains("<Author>Dolby Laboratories</Author>") {
             throw CMUError.exportFailed("XML Author is not the required Connect Mapping  Unit value.")
         }
         guard !text.contains("<Level2 "), !text.contains("<Level8 ") else {

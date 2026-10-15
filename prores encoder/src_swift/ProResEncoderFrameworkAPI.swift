@@ -292,6 +292,9 @@ public struct ProResEncodeOptions: Sendable {
     /// Profile 7.6 ignores this and always encodes I/P.
     public var bFrames: Bool?
     public var aafMode: ProResAAFMode
+    // Private frame-facade transport. Public callers retain the file writer's
+    // existing default time scales; AMA preserves the supplied rational clock.
+    var amaMediaTimeScale: Int32? = nil
 
     /// Creates an option set with MOV 422 HQ defaults and optional advanced features.
     public init(
@@ -1455,7 +1458,8 @@ public final class ProResEncoder: Sendable {
             useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
             container: outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov,
             outputVideoRaw: options.outputVideoRaw,
-            progress: progress
+            progress: progress,
+            privateFrameStreamMediaTimeScale: options.amaMediaTimeScale
         )
         guard success else {
             throw ProResEncoderError.encodingFailed(

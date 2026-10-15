@@ -25,7 +25,7 @@ struct ColorUniforms {
     float4 lut3DScale;
     uint hasLUT1D;
     uint hasLUT3D;
-    uint reserved0;
+    uint outputIs16Bit;
     uint reserved1;
 };
 
@@ -357,11 +357,16 @@ kernel void color_decode_yuv(
         return;
     }
     const float rawY = sourceY.read(gid).r;
-    const uint2 uvPosition = uint2(gid.x / 2, gid.y / max(u.chromaVerticalSubsampling, 1u));
+    // Decode the actual source planes. The pack parameter describes the
+    // destination; using it here stretches/crops chroma across mixed formats.
+    const uint inputVerticalSubsampling = max(sourceY.get_height() / sourceUV.get_height(), 1u);
+    const uint2 uvPosition = uint2(gid.x / 2, gid.y / inputVerticalSubsampling);
     const float2 rawUV = sourceUV.read(uvPosition).rg;
-    const float y = (rawY * 1023.0f - 64.0f) / 876.0f;
-    const float cb = (rawUV.r * 1023.0f - 512.0f) / 896.0f;
-    const float cr = (rawUV.g * 1023.0f - 512.0f) / 896.0f;
+    // r16Unorm sees the complete 16-bit word, with ten-bit codes in bits 15...6.
+    const float codeScale = 65535.0f / 64.0f;
+    const float y = (rawY * codeScale - 64.0f) / 876.0f;
+    const float cb = (rawUV.r * codeScale - 512.0f) / 896.0f;
+    const float cr = (rawUV.g * codeScale - 512.0f) / 896.0f;
     const float3 signal = ycbcr_to_rgb(y, cb, cr, u.inputYCbCrMatrix);
     const bool lutMode = u.hasLUT1D != 0 || u.hasLUT3D != 0;
     const float3 workingRGB = lutMode ? signal : decode_transfer(signal, u);
@@ -427,7 +432,8 @@ kernel void color_pack_y(
     }
     const float3 rgb = float3(encodedInput.read(gid).rgb);
     const float y = rgb_to_ycbcr(rgb, u.outputYCbCrMatrix).x;
-    const float code = (64.0f + 876.0f * clamp(y, 0.0f, 1.0f)) / 1023.0f;
+    const float yCode = 64.0f + 876.0f * clamp(y, 0.0f, 1.0f);
+    const float code = (u.outputIs16Bit ? yCode : round(yCode)) * (64.0f / 65535.0f);
     outputY.write(float4(code, 0.0f, 0.0f, 1.0f), gid);
 }
 
@@ -456,8 +462,10 @@ kernel void color_pack_uv(
     }
     average /= float(max(count, 1u));
     const float3 yuv = rgb_to_ycbcr(average, u.outputYCbCrMatrix);
-    const float cbCode = (512.0f + 896.0f * clamp(yuv.y, -0.5f, 0.5f)) / 1023.0f;
-    const float crCode = (512.0f + 896.0f * clamp(yuv.z, -0.5f, 0.5f)) / 1023.0f;
+    const float cb = 512.0f + 896.0f * clamp(yuv.y, -0.5f, 0.5f);
+    const float cr = 512.0f + 896.0f * clamp(yuv.z, -0.5f, 0.5f);
+    const float cbCode = (u.outputIs16Bit ? cb : round(cb)) * (64.0f / 65535.0f);
+    const float crCode = (u.outputIs16Bit ? cr : round(cr)) * (64.0f / 65535.0f);
     outputUV.write(float4(cbCode, crCode, 0.0f, 1.0f), gid);
 }
 

@@ -80,6 +80,11 @@ kernel void cmu_analyze_yuv(
     float maxRGBPQ = 0.0f;
 
     if (position.x < uniforms.width && position.y < uniforms.height) {
+        float3 rgbSignal;
+        if (uniforms.matrixID == 2) {
+            // AMA PQ RGB arrives before any chroma subsampling.
+            rgbSignal = clamp(sourceY.read(position).rgb, 0.0f, 1.0f);
+        } else {
         const float yCode = sourceY.read(position).r * 1023.0f;
         const uint2 uvPosition = uint2(position.x / 2, position.y / 2);
         const float2 uvCode = sourceUV.read(uvPosition).rg * 1023.0f;
@@ -94,11 +99,12 @@ kernel void cmu_analyze_yuv(
             ? (uvCode.y - 512.0f) / 1023.0f
             : (uvCode.y - 512.0f) / 896.0f;
 
-        const float3 rgbSignal = clamp(
+        rgbSignal = clamp(
             cmu_ycbcr_to_rgb(y, cb, cr, uniforms.matrixID),
             0.0f,
             1.0f
         );
+        }
         maxRGBPQ = max(max(rgbSignal.r, rgbSignal.g), rgbSignal.b);
         rgbNits = cmu_pq_to_nits(rgbSignal);
         luma = clamp(dot(uniforms.lumaCoefficients.xyz, rgbNits), 0.0f, 10000.0f);

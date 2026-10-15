@@ -74,11 +74,13 @@ enum CMUError: LocalizedError {
 
 /// Supported PQ analysis gamuts and their chromaticity metadata.
 enum CMUPrimaries: String, Codable, Sendable {
+    case rec709 = "rec709"
     case p3D65 = "p3d65"
     case rec2020 = "rec2020"
 
     var displayName: String {
         switch self {
+        case .rec709: return "BT.709"
         case .p3D65: return "P3-D65"
         case .rec2020: return "BT.2020"
         }
@@ -86,6 +88,7 @@ enum CMUPrimaries: String, Codable, Sendable {
 
     var gamut: VideoGamut {
         switch self {
+        case .rec709: return .rec709
         case .p3D65: return .p3D65
         case .rec2020: return .rec2020
         }
@@ -93,6 +96,7 @@ enum CMUPrimaries: String, Codable, Sendable {
 
     var red: String {
         switch self {
+        case .rec709: return "0.64 0.33"
         case .p3D65: return "0.68 0.32"
         case .rec2020: return "0.708 0.292"
         }
@@ -100,6 +104,7 @@ enum CMUPrimaries: String, Codable, Sendable {
 
     var green: String {
         switch self {
+        case .rec709: return "0.30 0.60"
         case .p3D65: return "0.265 0.69"
         case .rec2020: return "0.17 0.797"
         }
@@ -107,6 +112,7 @@ enum CMUPrimaries: String, Codable, Sendable {
 
     var blue: String {
         switch self {
+        case .rec709: return "0.15 0.06"
         case .p3D65: return "0.15 0.06"
         case .rec2020: return "0.131 0.046"
         }
@@ -188,7 +194,7 @@ struct CMUAssetDescriptor: Codable, Sendable {
     }
 
     /// Reads track metadata and rejects media outside the supported PQ gamuts.
-    static func inspect(url: URL) async throws -> CMUAssetDescriptor {
+    static func inspect(url: URL, allowTransformableInput: Bool = false) async throws -> CMUAssetDescriptor {
         let asset = AVURLAsset(
             url: url,
             options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
@@ -213,14 +219,20 @@ struct CMUAssetDescriptor: Codable, Sendable {
             extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix
         ) as? String
 
-        guard transferTag == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String) else {
+        let isPQ = transferTag == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+        let knownTransformable = [kCMFormatDescriptionTransferFunction_ITU_R_709_2 as String,
+            kCMFormatDescriptionTransferFunction_SMPTE_ST_428_1 as String,
+            kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String].contains(transferTag ?? "")
+        guard isPQ || (allowTransformableInput && knownTransformable) else {
             throw CMUError.unsupportedColorSpace(
                 "\(url.lastPathComponent) transfer is \(transferTag ?? "untagged"), not PQ/ST 2084."
             )
         }
 
         let primaries: CMUPrimaries
-        if primariesTag == (kCMFormatDescriptionColorPrimaries_P3_D65 as String) {
+        if allowTransformableInput && primariesTag == (kCMFormatDescriptionColorPrimaries_ITU_R_709_2 as String) {
+            primaries = .rec709
+        } else if primariesTag == (kCMFormatDescriptionColorPrimaries_P3_D65 as String) {
             primaries = .p3D65
         } else if primariesTag == (kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String) {
             primaries = .rec2020

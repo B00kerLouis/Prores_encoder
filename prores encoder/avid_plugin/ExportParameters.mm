@@ -8,8 +8,8 @@
 #include "ProResEncoderAMAAdapter.h"
 #include "ProResEncoderAMAIDs.h"
 #include "SampleConsumer.h"
-#import "AMAHDRToneMapper.h"
 #import "AMAFrameWorkerClient.h"
+#include "AMAWorkerProtocol.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +36,8 @@
               includeDolbyVision:(BOOL)includeDolbyVision
                  advancedOptions:(NSDictionary*)advancedOptions;
 - (BOOL)appendBGRAFrame:(NSData*)frame stride:(NSInteger)stride;
+- (BOOL)appendRGBAHalfFrame:(NSData*)frame stride:(NSInteger)stride;
+- (BOOL)appendPacked422Frame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendProResFrame:(NSData*)frame sourceCodec:(NSString*)sourceCodec;
 - (BOOL)finish;
 - (void)cancel;
@@ -92,6 +94,9 @@ void LogText(acfDebugLevel level, const char* message) {
 }
 
 void TraceHost(const std::string& event) {
+    // Use the existing opt-in pipeline trace for release-host negotiation too.
+    // An image request can fail before any worker exists to report an error.
+    ama_worker::trace("host.%s", event.c_str());
 #if DEBUG
     std::ofstream trace("/tmp/ProResAMA-HostTrace-20260924.log", std::ios::app);
     trace << event << '\n';
@@ -572,7 +577,7 @@ ACFRESULT BuildParameterXML(IACFComponentFactory* factory, const ExportSession& 
     addChoiceInfo(ProResEncoderAMA_IncludeGeneratedDVParameterID, "Embed generated Dolby Vision", "Use generated CMU metadata in the output", yesNo, 2, advanced.includeGeneratedDolbyVisionMetadata);
     addChoiceInfo(ProResEncoderAMA_DolbyCodecTagParameterID, "Dolby Vision codec tag", "Use a Dolby Vision sample entry where supported", yesNo, 2, advanced.useDolbyVisionCodecTag);
     addChoiceInfo(ProResEncoderAMA_OutputVideoRawParameterID, "Raw video beside container", "Also write an elementary video stream", yesNo, 2, advanced.outputVideoRaw);
-    addChoiceInfo(ProResEncoderAMA_MultiPassParameterID, "Multi-pass", "H.264 or HEVC VideoToolbox multi-pass", triState, 3, advanced.multiPass);
+    addChoiceInfo(ProResEncoderAMA_MultiPassParameterID, "Multi-pass", "Encoder default uses live single-pass for generated Rec.709 Profile 5; On retains multi-pass replay", triState, 3, advanced.multiPass);
     addChoiceInfo(ProResEncoderAMA_BFramesParameterID, "B-frames", "H.264 or HEVC B-frame reordering", triState, 3, advanced.bFrames);
     addChoiceInfo(ProResEncoderAMA_AAFModeParameterID, "AAF output", "AAF mode for MXF output", aafModes, 3, advanced.aafMode);
     if (includeInfos && ACFSUCCEEDED(result)) {
@@ -698,14 +703,22 @@ ACFRESULT CopyPluginString(const char* utf8, IACFString** stringOut) {
 }
 
 struct FrameBridge {
+    // AMA can enter consumers concurrently. Serialize initialization, mapping,
+    // append and finish, while allowing cancellation to interrupt an RPC wait.
+    std::mutex processing;
+    std::mutex streamOwnership;
+    std::atomic<bool> cancelled{false};
     id<ProResFrameStreamSessionAPI> stream = nil;
-    AMAHDRToneMapper* toneMapper = nil;
+    std::uint64_t deliveredFrames = 0;
 
     ~FrameBridge() {
         cancel();
     }
 
     ACFRESULT appendBGRA(const std::shared_ptr<ExportSession>& session, const std::uint8_t* bytes, std::size_t size) {
+        ama_worker::trace("bridge.wait object=%p bytes=%zu", this, size);
+        std::lock_guard<std::mutex> operation(processing);
+        if (cancelled.load()) return ACF_E_ABORT;
         if (!session || !bytes || size == 0) {
             return ACF_E_INVALIDARG;
         }
@@ -756,6 +769,21 @@ struct FrameBridge {
                 return ACF_E_INVALIDARG;
             }
         }
+        if (!compressedProRes && access("/tmp/ProResAMA-capture-water", F_OK) == 0 &&
+            (deliveredFrames == 240 || deliveredFrames == 500 || deliveredFrames == 1000 || deliveredFrames == 1800)) {
+            @autoreleasepool {
+                NSString* file = [NSString stringWithUTF8String:session->outputPath().c_str()];
+                NSString* name = [NSString stringWithFormat:@"%@-frame-%04llu-%s.raw", file.stringByDeletingPathExtension,
+                    (unsigned long long)deliveredFrames, session->renderedPackedImage() ? "cbycry10_6" : "bgra8"];
+                int fd = open(name.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+                if (fd >= 0) { std::size_t remaining=size; const auto* ptr=bytes;
+                    while (remaining) { ssize_t n=write(fd,ptr,remaining); if(n<=0) break; ptr+=n; remaining-=n; }
+                    close(fd);
+                }
+            }
+        }
+        ama_worker::trace("bridge.format object=%p kind=%s width=%u height=%u stride=%zu bytes=%zu",
+            this, compressedProRes ? "prores" : (session->renderedPackedImage() ? "cbycry10_6" : "bgra8"), width, height, stride, size);
         if (!stream) {
             TraceHost("FrameBridge creating encoder stream");
             Class streamClass = [AMAFrameWorkerClient class];
@@ -831,27 +859,22 @@ struct FrameBridge {
             if (advanced.aafMode < 3) {
                 addText(@"aafMode", kAAFModes[advanced.aafMode]);
             }
+            // One owner: MC supplies its declared render space; the framework
+            // applies the same color transform as CLI. No second AMA EETF/gamut
+            // curve or RGB8 PQ intermediate is used.
+            if (advanced.inputColor > 0) options[@"amaSharedColorPipeline"] = @YES;
             if (session->codec() == CodecChoice::HEVC && advanced.dolbyProfile == 1 && session->dolbyVisionRequested()) {
                 if (compressedProRes || advanced.inputColor == 0) {
-                    session->failWrite("Profile 5 requires rendered BGRA frames with a verified input color.");
-                    return ACF_E_INVALIDARG;
+                    session->failWrite("Profile 5 requires a declared rendered input color."); return ACF_E_INVALIDARG;
                 }
-                NSError* mappingError = nil;
-                toneMapper = [[AMAHDRToneMapper alloc] initWithWidth:width height:height
-                    inputColor:advanced.inputColor peakNits:static_cast<float>(advanced.colorPeakNits)
-                    error:&mappingError];
-                if (!toneMapper) {
-                    session->failWrite(mappingError.localizedDescription.UTF8String ?: "Metal HDR mapping failed.");
-                    return ACF_E_FAIL;
+                if (advanced.colorMode == 0 && advanced.inputColor == 1) {
+                    options[@"colorMode"] = @"direct"; options[@"colorGamut"] = @"rec2020";
+                    options[@"colorTransfer"] = @"pq"; options[@"colorPeakNits"] = @(advanced.colorPeakNits);
                 }
-                // The carrier now contains mapped Rec.2020/PQ pixels. CMU and
-                // the existing P5 encoder see that same picture, not SDR retags.
-                options[@"inputColorGamut"] = @"rec2020";
-                options[@"inputColorTransfer"] = @"pq";
-                options[@"colorMode"] = @"direct";
-                options[@"colorGamut"] = @"rec2020";
-                options[@"colorTransfer"] = @"pq";
-                TraceHost("AMA Metal tone mapping enabled before CMU: source=" + std::to_string(advanced.inputColor));
+            }
+            options[@"amaPacked422Input"] = @(session->renderedPackedImage());
+            if (session->renderedPackedImage()) {
+                options[@"amaPacked422Matrix"] = @(session->renderedMatrix());
             }
             std::uint32_t fpsNumerator = session->frameRateNumerator();
             std::uint32_t fpsDenominator = session->frameRateDenominator();
@@ -865,7 +888,7 @@ struct FrameBridge {
                 outputPath = [outputPath stringByAppendingPathExtension:[NSString stringWithUTF8String:extension]];
             }
             NSURL* url = [NSURL fileURLWithPath:outputPath];
-            stream = [[streamClass alloc] initWithOutputURL:url
+            id<ProResFrameStreamSessionAPI> created = [[streamClass alloc] initWithOutputURL:url
                                                                     width:static_cast<NSInteger>(width)
                                                                    height:static_cast<NSInteger>(height)
                                                             fpsNumerator:static_cast<NSInteger>(fpsNumerator)
@@ -875,35 +898,36 @@ struct FrameBridge {
                                                              bitrateMbps:session->bitrateMbps()
                                                              includeDolbyVision:session->dolbyVisionRequested()
                                                                advancedOptions:options];
+            {
+                std::lock_guard<std::mutex> ownership(streamOwnership);
+                stream = created;
+            }
+            if (cancelled.load()) { [stream cancel]; return ACF_E_ABORT; }
             TraceHost(stream ? "FrameBridge encoder stream created" : "FrameBridge encoder stream allocation failed");
         }
-        NSData* frame = (toneMapper || compressedProRes) ? [NSData dataWithBytes:bytes length:size] : nil;
-        if (toneMapper) {
-            NSError* error = nil;
-            frame = [toneMapper mapBGRA:frame stride:stride error:&error];
-            if (!frame) {
-                session->failWrite(error.localizedDescription.UTF8String ?: "AMA Metal HDR mapping rejected a frame.");
-                return ACF_E_FAIL;
-            }
-            stride = static_cast<std::size_t>(width) * 4;
-        }
+        NSData* frame = (session->renderedPackedImage() || compressedProRes) ? [NSData dataWithBytes:bytes length:size] : nil;
         const CodecChoice hostCodec = session->codec() <= CodecChoice::ProRes4444XQ
             ? session->codec() : CodecChoice::ProRes4444XQ;
         constexpr const char* hostQualities[] = {"proxy", "422lt", "422", "422hq", "4444", "4444xq"};
         const BOOL appended = compressedProRes
             ? [stream appendProResFrame:frame sourceCodec:[NSString stringWithUTF8String:hostQualities[static_cast<std::size_t>(hostCodec)]]]
-            : (toneMapper
-                ? [stream appendBGRAFrame:frame stride:static_cast<NSInteger>(stride)]
+            : (session->renderedPackedImage()
+                ? [stream appendPacked422Frame:frame stride:static_cast<NSInteger>(stride)]
                 : [(AMAFrameWorkerClient*)stream appendBGRABytes:bytes size:size stride:static_cast<NSInteger>(stride)]);
+        ama_worker::trace("bridge.append.return object=%p success=%d", this, appended);
         if (!appended) {
             const std::string message = stream.lastErrorMessage.UTF8String ? stream.lastErrorMessage.UTF8String : "Frame append failed.";
             session->failWrite(message);
             return ACF_E_FAIL;
         }
+        ++deliveredFrames;
         return ACF_OK;
     }
 
     ACFRESULT finish(const std::shared_ptr<ExportSession>& session) {
+        std::lock_guard<std::mutex> operation(processing);
+        if (cancelled.load()) return ACF_E_ABORT;
+        ama_worker::trace("bridge.finish.enter object=%p", this);
         if (!stream) {
             session->failWrite("No video frames were received.");
             return ACF_E_FAIL;
@@ -913,15 +937,25 @@ struct FrameBridge {
             session->failWrite(message);
             return ACF_E_FAIL;
         }
+        ama_worker::trace("bridge.finish.return object=%p success=1", this);
         return ACF_OK;
     }
 
     void cancel() {
-        [stream cancel];
-        [stream release];
-        stream = nil;
-        [toneMapper release];
-        toneMapper = nil;
+        cancelled.store(true);
+        id<ProResFrameStreamSessionAPI> active = nil;
+        {
+            std::lock_guard<std::mutex> ownership(streamOwnership);
+            active = [stream retain];
+        }
+        [active cancel];
+        [active release];
+        std::lock_guard<std::mutex> operation(processing);
+        {
+            std::lock_guard<std::mutex> ownership(streamOwnership);
+            [stream release];
+            stream = nil;
+        }
     }
 };
 
@@ -1020,6 +1054,12 @@ ACFRESULT WriterJob::beginWrite() {
     try {
         TraceHost("BeginWrite codec=" + std::string(CodecName(session_->codec())) + " entered path=" + session_->outputPath());
         collectHostFacts();
+        if (session_->phase() == Phase::Cancelled || session_->phase() == Phase::Failed) {
+            // Old consumers may still retain their bridge during host cleanup.
+            // Stop that stream before reopening the shared session for a retry.
+            frameBridge_->cancel();
+            frameBridge_ = std::make_shared<FrameBridge>();
+        }
         const Status status = session_->beginWrite();
         TraceHost("BeginWrite status=" + std::to_string(static_cast<int>(status)) + " reason=" + session_->failureReason());
         if (status != Status::Ok) {
@@ -1104,8 +1144,8 @@ ACFRESULT WriterJob::finishWrite() {
 ACFRESULT WriterJob::cancelWrite() {
     try {
         TraceHost("CancelWrite entered frames=" + std::to_string(session_->frameCompletions()));
-        frameBridge_->cancel();
         const Status status = session_->cancel();
+        frameBridge_->cancel();
         logFailure();
         return MapStatus(status);
     } catch (...) {
@@ -1144,6 +1184,45 @@ ACFRESULT WriterJob::getMediaWriterParameter(const acfUID& id, IACFValue** param
     }
     *parameter = nullptr;
     TraceHost("GetMediaWriterParameter id=" + FormatUID(id));
+    if (id == AMA::AMA_MC_ExportVolumeVideoFormat_ID) {
+        AMA::IHostSettings* settings = nullptr;
+        if (AcquireHostSettings(host_, &settings) != ACF_OK || !settings) return ACF_E_PARAMETERNOTAVAILABLE;
+        acfUInt32 width = 0, height = 0;
+        acfBoolean progressive = kACFFalse;
+        const auto widthResult = settings->GetHostSettingUInt32(AMA::AMAHostSetting_VideoImageWidth,
+            AMA::IHostSettings::kProjectScope, &width);
+        const auto heightResult = settings->GetHostSettingUInt32(AMA::AMAHostSetting_VideoImageHeight,
+            AMA::IHostSettings::kProjectScope, &height);
+        const auto scanResult = settings->GetHostSettingBoolean(AMA::AMAHostSetting_VideoIsProgressive,
+            AMA::IHostSettings::kProjectScope, &progressive);
+        acfSInt32 hostFormat = 0;
+        ACFRESULT hostFormatResult = settings->GetHostSettingSInt32(id, AMA::IHostSettings::kProjectScope, &hostFormat);
+        if (ACFFAILED(hostFormatResult)) {
+            hostFormatResult = settings->GetHostSettingSInt32(id, AMA::IHostSettings::kGlobalScope, &hostFormat);
+        }
+        settings->Release();
+        // The image-consumer contract currently requests progressive pictures.
+        // Map only verified SD/HD projects; never guess a format from frame bytes.
+        acfSInt32 format = ACFSUCCEEDED(hostFormatResult) && hostFormat > 0 ? hostFormat : 0;
+        TraceHost("host video-format query result=" + std::to_string(static_cast<unsigned int>(hostFormatResult)) +
+            " value=" + std::to_string(hostFormat));
+        if (format == 0 && ACFSUCCEEDED(widthResult) && ACFSUCCEEDED(heightResult) && ACFSUCCEEDED(scanResult) && progressive) {
+            if (width == 1920 && height == 1080) format = AMA::AMA_MC_ExportVolumeVideoFormat_1080p;
+            else if (width == 1280 && height == 720) format = AMA::AMA_MC_ExportVolumeVideoFormat_720p;
+            else if (width == 720 && height == 576) format = AMA::AMA_MC_ExportVolumeVideoFormat_625p;
+            else if (width == 720 && height == 486) format = AMA::AMA_MC_ExportVolumeVideoFormat_525p;
+        }
+        TraceHost("GetMediaWriterParameter video-format=" + std::to_string(format) +
+            " raster=" + std::to_string(width) + "x" + std::to_string(height) +
+            " progressive=" + std::to_string(progressive));
+        if (format == 0) return ACF_E_PARAMETERNOTAVAILABLE;
+        session_->setRaster(width, height);
+        // MC's AMA exporter reads this as SInt32 (not the UInt32 used by XML
+        // discrete controls); the wrong type asserts before BeginWrite.
+        const ACFRESULT result = MakeTypedValue(factory_, ACFTypeID_SInt32, &format, sizeof(format), parameter);
+        TraceHost("GetMediaWriterParameter video-format SInt32 result=" + std::to_string(static_cast<unsigned int>(result)));
+        return result;
+    }
     if (id == AMA::AMA_MC_ExportVolumeAudioSampleRate_ID) {
         AMA::IHostSettings* settings = nullptr;
         if (AcquireHostSettings(host_, &settings) != ACF_OK || !settings) {
@@ -1381,10 +1460,9 @@ ACFRESULT WriterJob::setValues(const IACFString* xml) {
             advanced.cmuMasteringNits = 0;
         }
         if (codec == CodecChoice::HEVC && advanced.dolbyProfile == 1 && dolby != DolbyChoice::Off) {
-            // P5 receives actual HDR-mapped frames from the AMA Metal stage.
-            advanced.colorMode = 1;
-            advanced.colorGamut = 1;
-            advanced.colorTransfer = 2;
+            // The shared framework owns pixel conversion. Preserve explicit
+            // gamut/transfer choices instead of replacing 2020lm or P3 with
+            // Rec.2020 when MC submits the parameter XML.
             if (dolby == DolbyChoice::Generate) {
                 if (advanced.cmuMasteringNits == 0) advanced.cmuMasteringNits = advanced.colorPeakNits;
                 advanced.includeGeneratedDolbyVisionMetadata = true;

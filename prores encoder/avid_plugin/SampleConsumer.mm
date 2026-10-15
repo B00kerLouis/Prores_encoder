@@ -1,9 +1,11 @@
 #include "SampleConsumer.h"
 
 #include "ExportSession.hpp"
+#include "AMAWorkerProtocol.h"
 
 #include <atomic>
 #include <fstream>
+#include <memory>
 
 namespace prores_ama {
 namespace {
@@ -76,6 +78,7 @@ public:
     }
 
     ACFRESULT ACFMETHODCALLTYPE Setup(const acfUInt32 track, const acfUInt64 flags) override {
+        ama_worker::trace("consumer.setup object=%p track=%u flags=%llu", this, track, (unsigned long long)flags);
         try {
             if (!session_) {
                 return ACF_E_UNEXPECTED;
@@ -91,28 +94,44 @@ public:
         return ConsumeSampleEx(buffer, 0, 0);
     }
 
-    ACFRESULT ACFMETHODCALLTYPE ConsumeSampleEx(AMA::IAVBuffer* buffer, const acfUInt64, const acfUInt64) override {
+    ACFRESULT ACFMETHODCALLTYPE ConsumeSampleEx(AMA::IAVBuffer* buffer, const acfUInt64 offset, const acfUInt64 flags) override {
+        const auto call = calls_.fetch_add(1);
+        ama_worker::trace("consumer.enter object=%p call=%llu offset=%llu flags=%llu", this,
+            (unsigned long long)call, (unsigned long long)offset, (unsigned long long)flags);
+        struct ReturnTrace {
+            const void* object;
+            std::uint64_t call;
+            ACFRESULT result = ACF_E_UNEXPECTED;
+            ~ReturnTrace() { ama_worker::trace("consumer.return object=%p call=%llu result=0x%08x", object,
+                (unsigned long long)call, (unsigned int)result); }
+        } returned{this, call};
         try {
             if (!session_ || !buffer) {
-                return ACF_E_POINTER;
+                return returned.result = ACF_E_POINTER;
             }
             acfUInt32 track = 0;
             acfUInt64 sample = 0;
             acfUInt64 sampleCount = 0;
             const ACFRESULT rangeResult = buffer->GetSampleRange(&track, &sample, &sampleCount);
             if (ACFFAILED(rangeResult)) {
-                return rangeResult;
+                return returned.result = rangeResult;
             }
             acfUInt64 bytes = 0;
             IACFBuffer* storage = nullptr;
             const std::uint8_t* pointer = nullptr;
-            if (buffer->GetBuffer(&storage) == ACF_OK && storage) {
+            const ACFRESULT bufferResult = buffer->GetBuffer(&storage);
+            const auto releaseBuffer = [](IACFBuffer* value) { if (value) value->Release(); };
+            std::unique_ptr<IACFBuffer, decltype(releaseBuffer)> storageOwner(storage, releaseBuffer);
+            if (bufferResult == ACF_OK && storage) {
                 storage->GetSize(&bytes);
                 void* raw = nullptr;
                 if (storage->GetBufferPointer(&raw) == ACF_OK) {
                     pointer = static_cast<const std::uint8_t*>(raw);
                 }
             }
+            ama_worker::trace("consumer.buffer object=%p call=%llu track=%u sample=%llu count=%llu bytes=%llu readable=%d",
+                this, (unsigned long long)call, track, (unsigned long long)sample,
+                (unsigned long long)sampleCount, (unsigned long long)bytes, pointer != nullptr);
 #if DEBUG
             static std::atomic<unsigned int> sampleCalls{0};
             const unsigned int callIndex = sampleCalls.fetch_add(1);
@@ -131,6 +150,7 @@ public:
             }
 #endif
             const ACFRESULT noted = MapStatus(session_->noteSample(track, sample, sampleCount, bytes));
+            if (ACFFAILED(noted)) return returned.result = noted;
             ACFRESULT pushed = ACF_OK;
             if (!pointer || bytes == 0) {
                 session_->failWrite("The AMA host did not provide readable picture bytes.");
@@ -140,9 +160,9 @@ public:
             } else if (sampleCount != 1) {
                 session_->failWrite("The video-only AMA writer received a non-picture sample range.");
                 pushed = ACF_E_INVALIDARG;
-            }
-            if (storage) {
-                storage->Release();
+            } else {
+                session_->failWrite("The AMA video frame handler is unavailable.");
+                pushed = ACF_E_UNEXPECTED;
             }
             if (ACFFAILED(noted) || ACFFAILED(pushed)) {
                 std::ofstream trace("/tmp/ProResAMA-HostTrace-20260924.log", std::ios::app);
@@ -152,14 +172,15 @@ public:
                       << " pushed=" << static_cast<unsigned int>(pushed)
                       << " reason=" << session_->failureReason() << '\n';
             }
-            if (ACFFAILED(noted)) { return noted; }
-            return pushed;
+            return returned.result = pushed;
         } catch (...) {
-            return ACF_E_UNEXPECTED;
+            ama_worker::trace("consumer.exception object=%p call=%llu", this, (unsigned long long)call);
+            return returned.result = ACF_E_UNEXPECTED;
         }
     }
 
     ACFRESULT ACFMETHODCALLTYPE Cleanup(const acfUInt32 track) override {
+        ama_worker::trace("consumer.cleanup object=%p track=%u", this, track);
         try {
             if (session_) {
                 session_->addObservation("ISampleConsumer::Cleanup track=" + std::to_string(track));
@@ -174,6 +195,7 @@ public:
     }
 
     ACFRESULT ACFMETHODCALLTYPE NotifyFrameIsComplete(const acfUInt64 sample) override {
+        ama_worker::trace("consumer.frame_complete object=%p sample=%llu", this, (unsigned long long)sample);
         try {
             if (!session_) {
                 return ACF_E_UNEXPECTED;
@@ -193,16 +215,18 @@ public:
         AMA::IUncompressedImageProvider::TemporalFieldOrder* fieldOrder,
         AMA::IUncompressedImageProvider::FrameBufferLayout* frameLayout,
         AMA::IUncompressedImageProvider::BufferLineOrientation* orientation) const override {
-        return GetRenderedImageFormat(pixelFormat, chromaSubSampling, componentType,
+        return GetRenderedImageFormat(session_, pixelFormat, chromaSubSampling, componentType,
             componentRangeType, colorSpace, fieldOrder, frameLayout, orientation);
     }
 
 private:
     std::shared_ptr<ExportSession> session_;
     VideoFrameHandler videoFrames_;
+    std::atomic<std::uint64_t> calls_{0};
 };
 
 ACFRESULT GetRenderedImageFormat(
+    const std::shared_ptr<ExportSession>& session,
     AMA::IUncompressedImageProvider::PixelFormat* pixelFormat,
     AMA::IUncompressedImageProvider::ChromaSubSampling* chromaSubSampling,
     AMA::IUncompressedImageProvider::ComponentType* componentType,
@@ -220,11 +244,14 @@ ACFRESULT GetRenderedImageFormat(
 #endif
         // This is the buffer layout the plug-in asks the host to deliver.
         // It is not evidence of the project color space.
-        *pixelFormat = AMA::IUncompressedImageProvider::PF_BGRA;
-        *chromaSubSampling = AMA::IUncompressedImageProvider::CSS_4444;
-        *componentType = AMA::IUncompressedImageProvider::CT_UCHAR_FullRange;
-        *componentRangeType = AMA::IUncompressedImageProvider::CRT_FullRange;
-        *colorSpace = AMA::IUncompressedImageProvider::CS_RGB;
+        const bool packed = session && session->negotiatePackedImage(access("/tmp/ProResAMA-force-packed422", F_OK) == 0);
+        ama_worker::trace("image.request packed422=%d input=%u matrix=%u", packed,
+            session ? session->advancedOptions().inputColor : 0, session ? session->renderedMatrix() : 0);
+        *pixelFormat = packed ? AMA::IUncompressedImageProvider::PF_CbYCrY : AMA::IUncompressedImageProvider::PF_BGRA;
+        *chromaSubSampling = packed ? AMA::IUncompressedImageProvider::CSS_4220 : AMA::IUncompressedImageProvider::CSS_4444;
+        *componentType = packed ? AMA::IUncompressedImageProvider::CT_USHORT_10_6 : AMA::IUncompressedImageProvider::CT_UCHAR_FullRange;
+        *componentRangeType = packed ? AMA::IUncompressedImageProvider::CRT_VideoRange : AMA::IUncompressedImageProvider::CRT_FullRange;
+        *colorSpace = packed ? (session->renderedMatrix() == 2020 ? AMA::IUncompressedImageProvider::CS_YCbCr_2020 : AMA::IUncompressedImageProvider::CS_YCbCr_709) : AMA::IUncompressedImageProvider::CS_RGB;
         *fieldOrder = AMA::IUncompressedImageProvider::TFO_Progressive;
         *frameLayout = AMA::IUncompressedImageProvider::FBL_Merged;
         *orientation = AMA::IUncompressedImageProvider::BLO_Top_Bot;

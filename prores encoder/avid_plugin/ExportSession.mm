@@ -55,7 +55,12 @@ void ExportSession::setContainer(ContainerChoice value) { std::lock_guard<std::m
 void ExportSession::setDolby(DolbyChoice value) { std::lock_guard<std::mutex> lock(mutex_); dolby_ = value; }
 void ExportSession::setAudioRoute(AudioRouteChoice value) { std::lock_guard<std::mutex> lock(mutex_); audioRoute_ = value; }
 void ExportSession::setBitrateMbps(double value) { std::lock_guard<std::mutex> lock(mutex_); bitrateMbps_ = value; }
-void ExportSession::setAdvancedOptions(AdvancedOptions value) { std::lock_guard<std::mutex> lock(mutex_); advancedOptions_ = std::move(value); }
+void ExportSession::setAdvancedOptions(AdvancedOptions value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (phase_ == Phase::Writing || phase_ == Phase::Draining || phase_ == Phase::Committed) return;
+    advancedOptions_ = std::move(value);
+    imageFormatChosen_ = false;
+}
 Status ExportSession::applyOptions(CodecChoice codec, ContainerChoice container, DolbyChoice dolby,
                                    AudioRouteChoice audioRoute, double bitrateMbps,
                                    AdvancedOptions advanced) {
@@ -70,6 +75,9 @@ Status ExportSession::applyOptions(CodecChoice codec, ContainerChoice container,
     audioRoute_ = audioRoute;
     bitrateMbps_ = bitrateMbps;
     advancedOptions_ = std::move(advanced);
+    // Settings UI queries can precede the final options. Re-negotiate on the
+    // next GetImageFormat, retaining the last advertised layout until then.
+    imageFormatChosen_ = false;
     if (phase_ == Phase::Validated) {
         phase_ = Phase::Configured;
     }
@@ -99,6 +107,7 @@ void ExportSession::resetOptions() {
     audioRoute_ = AudioRouteChoice::BounceMix;
     bitrateMbps_ = 50;
     advancedOptions_ = AdvancedOptions{};
+    imageFormatChosen_ = false;
     if (phase_ == Phase::Configured || phase_ == Phase::Validated) {
         phase_ = Phase::Configured;
         failureReason_.clear();
@@ -138,6 +147,22 @@ bool ExportSession::dolbyVisionRequestedUnlocked() const {
     return dolby_ == DolbyChoice::Generate && colorContextAvailableUnlocked() &&
         advancedOptions_.cmuMasteringNits != 0 && advancedOptions_.includeGeneratedDolbyVisionMetadata;
 }
+
+bool ExportSession::negotiatePackedImage(bool forcePacked) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!imageFormatChosen_) {
+        const auto input = advancedOptions_.inputColor;
+        renderedPackedImage_ = forcePacked || input == 1 || input == 2 || input == 3;
+        // MC 26.8 delivers Rec.2020/PQ project RGB through the 709 packed
+        // coding matrix. This does not change declared primaries/transfer.
+        // Retain the separate, untested HLG negotiation behavior.
+        renderedMatrix_ = input == 3 ? 2020 : 709;
+        imageFormatChosen_ = true;
+    }
+    return renderedPackedImage_;
+}
+bool ExportSession::renderedPackedImage() const { std::lock_guard<std::mutex> lock(mutex_); return renderedPackedImage_; }
+std::uint32_t ExportSession::renderedMatrix() const { std::lock_guard<std::mutex> lock(mutex_); return renderedMatrix_; }
 
 bool ExportSession::dolbyVisionRequested() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -482,6 +507,27 @@ int ExportSession::runContractSelfCheck() {
         }
     };
 
+    {
+        ExportSession session;
+        expect(!session.negotiatePackedImage(false));
+        AdvancedOptions options;
+        options.inputColor = 1;
+        session.setAdvancedOptions(options);
+        expect(!session.renderedPackedImage()); // Retains the advertised layout.
+        expect(session.negotiatePackedImage(false));
+        expect(session.renderedMatrix() == 709);
+        options.inputColor = 2;
+        session.applyOptions(CodecChoice::ProRes4444, ContainerChoice::MOV,
+            DolbyChoice::Off, AudioRouteChoice::BounceMix, 50, options);
+        expect(session.negotiatePackedImage(false));
+        expect(session.renderedMatrix() == 709);
+        options.inputColor = 3;
+        session.setAdvancedOptions(options);
+        expect(session.negotiatePackedImage(false));
+        expect(session.renderedMatrix() == 2020);
+        session.resetOptions();
+        expect(!session.negotiatePackedImage(false));
+    }
     {
         ExportSession session;
         session.setOutputPath("/tmp/prores-ama-contract.mov");

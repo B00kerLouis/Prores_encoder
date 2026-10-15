@@ -10,19 +10,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			6cS4Um8LuusW6w8papgEp4Gb+6w=
+			/ICCwkJEQkIT9wmah9/Mk6R47Ls=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"e9c4b8526f0bbaeb16eb0f296a9804a7819bfbac"</string>
+			<string>cdhash H"fc8082c24244424213f7099a87dfcc93a478ecbb"</string>
 		</dict>
 		<key>MacOS/ProResEncoderAMAWorker</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Tq7wwKGqG2GAcRMO+DdiNhHgUAY=
+			z8Y5xMPt5doxtxn38P1+urhHLTc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"4eaef0c0a1aa1b618071130ef837623611e05006"</string>
+			<string>cdhash H"cfc639c4c3ede5da31b719f7f0fd7ebab8472d37"</string>
 		</dict>
 	</dict>
 	<key>rules</key>

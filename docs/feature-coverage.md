@@ -1,55 +1,75 @@
 # Feature coverage
 
-Status values: `mapped` means the plug-in has a parameter or callback for the behavior but Media Composer output is not verified. `blocked` means the current framework or host evidence cannot satisfy it. `unchanged` means the existing CLI or framework behavior was not retargeted. Nothing in this table has passed a Media Composer export.
+Verification applies to the recorded configurations, not every combination of
+all public options. Native Media Composer results are separate from standalone
+fixtures and public CI.
 
-The current bridge starts `ProResEncoderAMAWorker` on the first picture and
-loads the bundled encoder framework inside that process. Supported BGRA options
-use direct streaming; other options use the carrier/file encode path. Public CI
-checks the prebuilt Release bundle and the Avid-free contracts. Full-duration
-Media Composer ProRes Proxy and Dolby Vision Profile 5 HEVC exports remain
-unpassed; those checks do not replace host acceptance.
+## Media Composer export path
 
-| Area | Existing behavior | Plug-in entry | Limit | Status |
-|---|---|---|---|---|
-| ProRes profiles | Proxy, LT, 422, HQ, 4444, 4444 XQ | Codec parameter and `ProResFrameStreamSession` | Host BGRA frames go through the existing `encode` API. A 320x180 two-frame MOV was written outside Media Composer. | mapped |
-| H.264 / HEVC / AV1 | Framework codec validation | Codec, container, and compressed bitrate parameters | MOV/MP4 only for these codecs; host frames and output remain untested | mapped |
-| Compressed video bitrate, multi-pass, B-frames | Framework options | AMA numeric bitrate and tri-state controls passed to `ProResFrameStreamSession` | A two-frame H.264 MOV plus raw stream was written outside MC with B-frames off; Output dialog needs host verification | mapped |
-| H.264 Dolby Vision | Framework rejects the combination | Dolby parameter | Still rejected; not replaced by HEVC or a tag | blocked |
-| CBR/VBR, all-intra, recovery | CLI features, not all public framework options | none | Not called through the CLI | unchanged |
-| Containers | MOV, MP4, MXF OP-1a, OP-Atom | Container parameter | MP4 rejects ProRes; MXF rejects H.264/HEVC/AV1 | mapped |
-| Dolby Vision profiles | HEVC 5/7.6/8.1/8.4, AV1 10/10.1/10.4, ProRes metadata | Dolby Off / Generate / External XML | Generate blocked until project color is known; no bitstream check | blocked |
-| Color, LUT, CMU | Framework direct/LUT and CMU options | AMA mode, gamut, transfer, nits, LUT path, and CMU controls | Project primaries/transfer/matrix/range unread; no PQ default; selected transforms reject until verified context exists | blocked |
-| Audio | Framework keep/replace/external audio | AMA route, external file path, replace/delete, MXF grouping | External WAV replacement yielded PCM audio outside MC; host PCM/AAC packets are not captured by the bridge | blocked |
-| Timecode / AAF | Framework start TC and AAF modes | AMA start TC and AAF controls | 10:00:00:00 MOV timecode and OP-Atom AAF were written outside MC; host sequence mapping remains unverified | mapped |
-| Batch / folder | Framework file APIs | not a host timeline | Left on the existing API | unchanged |
-| Timeline interchange | External AAF/XML file APIs | separate from AMA callbacks | Not used as the Media Composer timeline | unchanged |
-| Raw video | Framework `outputVideoRaw` | AMA toggle passed to frame-stream bridge | ProRes and H.264 raw streams were written outside MC | mapped |
-| Elementary multi-format / P7.6 fan-out | `ProResElementaryStreamOptions` | none | Separate framework workflow not yet exposed by the AMA bridge | blocked |
-| Progress, cancel, errors | Framework job controls | GetProgress, CancelWrite, FinishWrite | Host-visible progress and cancel during the final encode are not proven | mapped |
+The arm64 AMA writeback plug-in starts its embedded worker on the first picture.
+The registration module does not load the encoder framework at host startup.
+The worker uses the existing framework encoder and shared Metal color pipeline;
+it does not reconstruct the timeline from source files or invoke the encoder CLI.
 
-`ProResEncoderAMAContractTests` covers the Avid-free session option matrix, bitrate state, and cancellation. Its no-output finish check exercises an unused session branch, not the live `WriterJob` bridge. It does not cover T01–T14 host scenarios in the AMA plan.
+Declared Rec.709 and Rec.2020 inputs use packed high-precision host pictures.
+For the tested Rec.2020/PQ host configuration, the packed YCbCr coding matrix is
+709 while RGB primaries and transfer remain Rec.2020/PQ. These are independent
+properties. Unknown and P3 rendered-input declarations retain the BGRA fallback.
+The plug-in cannot query a verified project color context automatically.
 
-## Public single-file option mapping
+Eligible generated HEVC P5 and ProRes routes stream while host frames arrive.
+Other generated profiles prepare an actual selected-gamut PQ RGBAHalf ProRes4444XQ
+carrier before CMU analysis, then replay it for final encoding. Compatible base
+layers use real BT.2020 RGB conversion; P8.4/P10.4 perform a real PQ-to-HLG
+conversion. Native P5/P10 use the framework's IPT-PQ-C2 pipeline. Peak metadata
+records the transformed master; reconstructed codec/chroma excursions are not
+clamped by a mastering tag.
 
-The AMA XML fields below feed the existing `ProResEncodeOptions` through `ProResFrameStreamSession`. This lists all fields in that public struct; it does not claim that Media Composer has displayed or successfully used every control.
+The private frame path preserves rational movie/video timing. Codec callbacks
+use serial delivery to retain decode order through mux back-pressure. AMA AV1
+carrier replay uses bounded synchronous software ProRes decoding. Public file
+encoder defaults and decoder selection are preserved.
 
-| `ProResEncodeOptions` field | AMA control | Current evidence or limit |
-|---|---|---|
-| `quality` | Codec | ProRes and H.264 short movies written outside MC |
-| output format argument | Container | MOV and OP-Atom short outputs written outside MC |
-| `extraAudioURL` | Extra audio file | WAV replacement produced PCM audio outside MC |
-| `replaceSourceAudio`, `deleteSourceAudio` | Replace source audio, Delete source audio | Replacement tested outside MC; host audio is not captured |
-| `forcedOutputStartTimecode` | Start timecode | MOV track verified at 10:00:00:00 outside MC |
-| `dolbyVisionXMLURL`, `dolbyVisionProfile` | Dolby Vision XML, Dolby Vision profile | Mapped and validated; host metadata output untested |
-| `bitrateMbps` | Numeric compressed video bitrate | Passed to the frame-stream bridge; exact host bitrate untested |
-| `audioChannelsPerMXFFile` | Numeric MXF audio channels per file | OP-Atom AAF generated outside MC without host audio |
-| `colorConversion` | Color mode, output gamut/transfer/peak | Rejected until host project color is verified |
-| `lutColorConversion` | Color mode, LUT file, output gamut/transfer/peak | Rejected until host project color is verified |
-| `cmuMasteringNits` | Numeric CMU mastering peak | Rejected until host project color is verified |
-| `includeGeneratedDolbyVisionMetadata` | Embed generated Dolby Vision | Requires CMU nits and verified project color |
-| `useDolbyVisionCodecTag` | Dolby Vision codec tag | Mapped; compressed Dolby output untested |
-| `outputVideoRaw` | Raw video beside container | ProRes and H.264 raw files written outside MC |
-| `multiPass`, `bFrames` | Tri-state Multi-pass, B-frames | H.264 B-frames off verified outside MC; multi-pass host output untested |
-| `aafMode` | AAF output | OP-Atom AAF written outside MC |
+## Verified and limited behavior
 
-Separate `ProResElementaryStreamOptions`, folder/timeline APIs, and CLI-only controls remain unimplemented in the AMA Output UI. Native Media Composer PCM/AAC delivery, project color lookup, and volume link-back still need host integration.
+| Area | Behavior and scope |
+|---|---|
+| ProRes | Native Proxy exports with composited effects, and tested UHD HDR10/PHDR configurations completed. Other options and historical cold custom-raster stalls remain separate tests. |
+| Generated Dolby Vision | HEVC P5/7.6/8.1/8.4 and AV1 P10/10.1/10.4 completed the recorded 21-case matrices for declared Rec.709/Gamma2.4 and Rec.2020/PQ inputs, across Rec.2020 limited to P3-D65, Rec.2020 and P3-D65 output gamuts. |
+| Profile validation | Native acceptance requires complete host delivery, successful FinishWrite, normal host UI, whole-movie decoding, exact RPU coverage and zero Dolby bitstream errors. P7.6 also requires enhancement-picture coverage. Short synthetic fixtures do not establish host acceptance. |
+| H.264 Dolby Vision | Rejected by the existing framework validation. |
+| Color | Shared range/geometry/transfer/primaries GPU contracts cover the active path. An explicit rendered-input declaration is required; GetImageFormat is a buffer request. DCI-P3/ST2084 project input has not been validated. |
+| Bitrate and codec controls | AMA numeric bitrate and tri-state multi-pass/B-frame controls map to existing single-file framework options. AV1 normalizes unsupported tri-state controls to encoder default. |
+| Containers | MOV/MP4 compressed export paths retain framework restrictions. MP4 rejects ProRes; MXF rejects H.264/HEVC/AV1. |
+| Audio | External-file options are mapped. Native host PCM/AAC packet delivery has not been accepted. |
+| Timecode and AAF | Standalone forced timecode/AAF paths exist. Nonzero host timecode readback and host sequence mapping remain unverified. |
+| External XML and LUT | Controls are mapped; native host acceptance remains unverified. |
+| Progress and cancellation | Normal completion and cancellation are supported. MC's estimate can remain unchanged during carrier replay/final encoding. |
+| Batch and elementary workflows | Folder/timeline APIs, elementary fan-out and CLI-only CBR/VBR/all-intra/recovery controls are not presented as completed AMA features. |
+
+## Single-file option mapping
+
+AMA maps the existing single-file codec/container, numeric bitrate, external
+audio replacement/deletion, start timecode, Dolby XML/profile, MXF grouping,
+direct/LUT conversion, CMU peak, metadata/tag, raw-video, multi-pass, B-frame and
+AAF controls into `ProResEncodeOptions`. Mapping a field is not proof that every
+combination has completed inside Media Composer. Unsupported combinations retain
+existing validation rather than silently choosing another codec or profile.
+
+## Building and testing
+
+Use the [local SDK placement guide](../ThirdParty/AvidSDK/README.md) for AMA builds.
+Only its directory README placeholders are distributed; licensed SDK files and
+local manifests remain ignored. Public CI builds the CLI/framework, runs the
+Avid-free CPU contracts, and verifies/packages the checked-in runtime bundle.
+It does not build the SDK-dependent AMA target or run Media Composer.
+
+`ProResEncoderAMAContractTests` checks session options, cancellation and worker
+transport. `ColorPixelContracts.swift` is an opt-in SDK-free GPU check of the
+shared active color path; build the framework with `ENABLE_TESTABILITY=YES` for
+its `@testable` import. `ProfileMatrixCheckpoints.swift` supplies deterministic
+packed-frame profile/gamut regressions. The legacy `--hdr` contract mode tests
+the retained older mapper and is not validation of the active shared path.
+
+Detailed media, logs, measurements, source snapshots and research records remain
+local and are not included in GitHub source or runtime packages.

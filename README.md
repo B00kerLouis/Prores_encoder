@@ -37,8 +37,10 @@ relicense those bundled dependencies.
 
 Build All also builds `ProResEncoderAMA.avx`, an AMA writeback bundle. Its
 Objective-C++ sources are not part of the CLI or framework targets. The Avid
-headers it compiles against live only in gitignored `ThirdParty/AvidSDK/` and
-must not be published. The bundle is packaged like the installed Avid AMA
+SDK payload it compiles against stays local in `ThirdParty/AvidSDK/` and must
+not be published. The repository includes only first-party directory READMEs;
+the [SDK placement guide](ThirdParty/AvidSDK/README.md) explains how licensed
+SDK owners can populate those locations and build. The bundle is packaged like the installed Avid AMA
 plug-ins, with `CFBundlePackageType=APPL` and `Contents/PkgInfo=APPL????`.
 Media Composer 26.8 on this machine loaded the signed arm64 bundle at startup.
 The encoder framework is embedded. On the first export picture, the plug-in
@@ -47,10 +49,13 @@ starts its bundled `ProResEncoderAMAWorker`, which loads that framework with
 The AMA parameter XML maps the existing single-file
 `ProResEncodeOptions` fields, including codec/container, numeric bitrate,
 timecode, audio file replacement, Dolby Vision, color/LUT, raw video, B-frames,
-multi-pass, and AAF. A completed Media Composer export and the Output dialog
-presentation have not yet been verified. H.264 Dolby Vision remains unsupported,
-and unread project color blocks automatic Dolby Vision. Details are in
-`AGENTS.md` and `docs/feature-coverage.md`.
+multi-pass, and AAF. Native Media Composer 26.8 exports have been verified for
+the tested ProRes and generated HEVC/AV1 Dolby Vision configurations described
+in [feature coverage](docs/feature-coverage.md). H.264 Dolby Vision remains
+unsupported. Project color lookup is unavailable: select an explicit, verified
+rendered-input gamut/transfer. A requested buffer format does not identify the
+project color space. Host PCM/AAC, external XML/LUT and nonzero host timecode
+remain separate acceptance work.
 
 The arm64 Release bundle is checked in at
 [`build/Release/ProResEncoderAMA.avx`](build/Release/ProResEncoderAMA.avx).
@@ -59,8 +64,9 @@ requires macOS 14 or later. Public GitHub Actions build the CLI and framework,
 run the Avid-free contract checks, verify the prebuilt AVX package and its
 checksums, and package it as `ProResEncoderAMA-arm64.zip`. They do not compile
 the AMA target or verify Media Composer exports. Building `Build All` locally
-requires your licensed Avid SDK in `ThirdParty/AvidSDK/`; SDK headers, libraries,
-debug symbols, and local research records are excluded from the release files.
+requires your licensed Avid SDK in the documented placeholder directories;
+SDK headers, support sources, libraries, manifests, debug symbols and local
+research records are excluded from the release files.
 
 ## Requirements
 

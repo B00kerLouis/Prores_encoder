@@ -19,12 +19,18 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
     private let transform: MTLComputePipelineState
     private let packY: MTLComputePipelineState
     private let packUV: MTLComputePipelineState
+    private let sourceFormat: OSType
     private let inputGamut: UInt32
     private let width: Int
     private let height: Int
     private let processLock = NSLock()
 
-    init(width: Int, height: Int, inputGamut: VideoGamut) throws {
+    init(width: Int, height: Int, inputGamut: VideoGamut, inputPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) throws {
+        guard inputPixelFormat == Self.inputPixelFormat || inputPixelFormat == kCVPixelFormatType_64RGBAHalf else {
+            throw MetalColorPipelineError.unsupportedPixelFormat(inputPixelFormat)
+        }
+        sourceFormat = inputPixelFormat
+        let rgbInput = inputPixelFormat == kCVPixelFormatType_64RGBAHalf
         guard width > 0, height > 0, width.isMultiple(of: 2), height.isMultiple(of: 2) else {
             throw MetalColorPipelineError.unsupportedPixelFormat(Self.outputPixelFormat)
         }
@@ -65,7 +71,7 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
         outputPool = pool
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba16Float,
+            pixelFormat: rgbInput ? .rgba32Float : .rgba16Float,
             width: width,
             height: height,
             mipmapped: false
@@ -77,20 +83,22 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
         }
         self.intermediate = intermediate
 
-        let required = ["native_dv_transform", "native_dv_pack_y", "native_dv_pack_uv"]
+        let required = rgbInput
+            ? ["native_dv_rgb_half", "native_dv_pack_float_y", "native_dv_pack_float_uv"]
+            : ["native_dv_transform", "native_dv_pack_y", "native_dv_pack_uv"]
         guard let library = Self.loadLibrary(device: device, requiredFunctions: required) else {
             throw MetalColorPipelineError.libraryUnavailable
         }
-        transform = try Self.makePipeline("native_dv_transform", library: library, device: device)
-        packY = try Self.makePipeline("native_dv_pack_y", library: library, device: device)
-        packUV = try Self.makePipeline("native_dv_pack_uv", library: library, device: device)
+        transform = try Self.makePipeline(required[0], library: library, device: device)
+        packY = try Self.makePipeline(required[1], library: library, device: device)
+        packUV = try Self.makePipeline(required[2], library: library, device: device)
     }
 
     func process(_ source: CVPixelBuffer, pts: CMTime) throws -> CVPixelBuffer {
         processLock.lock()
         defer { processLock.unlock() }
 
-        guard CVPixelBufferGetPixelFormatType(source) == Self.inputPixelFormat,
+        guard CVPixelBufferGetPixelFormatType(source) == sourceFormat,
               CVPixelBufferGetWidth(source) == width,
               CVPixelBufferGetHeight(source) == height else {
             throw MetalColorPipelineError.unsupportedPixelFormat(CVPixelBufferGetPixelFormatType(source))
@@ -111,24 +119,6 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
         commandBuffer.label = "Native Dolby Vision IPT \(CMTimeGetSeconds(pts))"
 
         var retained: [CVMetalTexture] = []
-        let sourceY = try makeTexture(
-            from: source,
-            plane: 0,
-            format: .r16Unorm,
-            width: width,
-            height: height,
-            label: "Native DV source Y",
-            retained: &retained
-        )
-        let sourceUV = try makeTexture(
-            from: source,
-            plane: 1,
-            format: .rg16Unorm,
-            width: CVPixelBufferGetWidthOfPlane(source, 1),
-            height: CVPixelBufferGetHeightOfPlane(source, 1),
-            label: "Native DV source UV",
-            retained: &retained
-        )
         let outputY = try makeTexture(
             from: destination,
             plane: 0,
@@ -148,6 +138,30 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
             retained: &retained
         )
 
+        if sourceFormat == kCVPixelFormatType_64RGBAHalf {
+            let rgb = try makeTexture(from: source, plane: 0, format: .rgba16Float,
+                width: width, height: height, label: "Native DV RGB", retained: &retained)
+            try encode(transform, textures: [rgb, intermediate], constantValue: inputGamut,
+                width: width, height: height, commandBuffer: commandBuffer)
+        } else {
+        let sourceY = try makeTexture(
+            from: source,
+            plane: 0,
+            format: .r16Unorm,
+            width: width,
+            height: height,
+            label: "Native DV source Y",
+            retained: &retained
+        )
+        let sourceUV = try makeTexture(
+            from: source,
+            plane: 1,
+            format: .rg16Unorm,
+            width: CVPixelBufferGetWidthOfPlane(source, 1),
+            height: CVPixelBufferGetHeightOfPlane(source, 1),
+            label: "Native DV source UV",
+            retained: &retained
+        )
         try encode(
             transform,
             textures: [sourceY, sourceUV, intermediate],
@@ -156,6 +170,7 @@ final class NativeDolbyVisionColorPipeline: @unchecked Sendable {
             height: height,
             commandBuffer: commandBuffer
         )
+        }
         try encode(
             packY,
             textures: [intermediate, outputY],

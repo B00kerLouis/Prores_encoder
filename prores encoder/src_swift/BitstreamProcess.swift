@@ -1448,6 +1448,7 @@ private final class VTCallbackRefcon: @unchecked Sendable {
     // than creating a Swift task for every codec callback.
     var encodedSampleHandler: (@Sendable (SendableSampleBuffer) -> Void)?
     private let asyncStateLock = NSLock()
+    private let asyncDeliveryQueue = DispatchQueue(label: "prores.codec.delivery")
     private var asyncSubmittedCount: Int64 = 0
     private var asyncCompletedCount: Int64 = 0
     private var asyncDeliveryPendingCount: Int64 = 0
@@ -1591,13 +1592,15 @@ private final class VTCallbackRefcon: @unchecked Sendable {
             return
         }
         asyncDeliveryPendingCount += 1
-        asyncStateLock.unlock()
-
         let wrapped = SendableSampleBuffer(buf: sampleBuffer)
-        Task {
-            await channel.sendAsync(wrapped)
+        // Codec callback order is decode order. Independent Swift tasks can
+        // overtake one another before reaching the muxer. Enqueue under the
+        // state lock, then apply channel back-pressure on this serial queue.
+        asyncDeliveryQueue.async {
+            channel.send(wrapped)
             self.completeAsyncDelivery()?.finish()
         }
+        asyncStateLock.unlock()
     }
 
     /// Decrements delivery count and checks whether deferred finish can proceed.
@@ -1693,7 +1696,8 @@ final class ProResSession: @unchecked Sendable {
          hevcOptions: HEVCEncodeOptions? = nil,
          sourcePixelFormat: OSType? = nil,
          sourceFrameCount: Int = 0,
-         sourceTimeRange: CMTimeRange = .invalid) throws {
+         sourceTimeRange: CMTimeRange = .invalid,
+         maximumFrameDelay: Int? = nil) throws {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
@@ -1921,6 +1925,10 @@ final class ProResSession: @unchecked Sendable {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 value: kCFBooleanFalse
             )
+        }
+        if let maximumFrameDelay {
+            try setProperty(kVTCompressionPropertyKey_MaxFrameDelayCount,
+                value: NSNumber(value: maximumFrameDelay))
         }
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
         if requiresNativeHEVCHardware && prepareStatus != noErr {

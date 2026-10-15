@@ -10,6 +10,8 @@
     advancedOptions:(NSDictionary*)options;
 - (BOOL)appendBGRABytes:(const void*)bytes size:(NSUInteger)size stride:(NSInteger)stride;
 - (BOOL)appendBGRAFrame:(NSData*)frame stride:(NSInteger)stride;
+- (BOOL)appendRGBAHalfFrame:(NSData*)frame stride:(NSInteger)stride;
+- (BOOL)appendPacked422Frame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendProResFrame:(NSData*)frame sourceCodec:(NSString*)codec;
 - (BOOL)finish;
 - (void)cancel;

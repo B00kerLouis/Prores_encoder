@@ -654,6 +654,10 @@ private func makeWriterFailure(
     var parts = ["\(stage)"]
     var underlyingError: Error?
     parts.append("writer.status=\(writerStatusName(writer.status))")
+    if FileManager.default.fileExists(atPath: "/tmp/ProResAMA-enable-frame-trace"),
+       let error = writer.error as NSError? {
+        print("[AMA writer diagnostic] \(stage): \(error.domain) \(error.code), \(error.userInfo)")
+    }
     if let error = writer.error?.localizedDescription {
         parts.append("writer.error=\(error)")
         underlyingError = writer.error
@@ -5613,15 +5617,42 @@ private func removeAV1StaticHDRSampleEntryBoxes(in movieURL: URL) throws {
 }
 
 /// Inserts static HDR boxes into ProRes sample entries when metadata is available.
-private func patchProResStaticHDRSampleEntryBoxes(
+func patchProResStaticHDRSampleEntryBoxes(
     in movieURL: URL,
     masteringDisplayColorVolume: Data?,
-    contentLightLevelInfo: Data?
+    contentLightLevelInfo: Data?,
+    inPlacePrivateCarrier: Bool = false
 ) throws {
     guard let targets = try findProResStaticHDRSampleEntryPatchTargets(
         in: movieURL,
         masteringDisplayColorVolume: masteringDisplayColorVolume,
         contentLightLevelInfo: contentLightLevelInfo) else {
+        return
+    }
+    if inPlacePrivateCarrier {
+        // The target finder rejects front-moov files. Move only the trailing
+        // moov bytes in reverse, preserving every mdat byte and chunk offset.
+        // This is restricted to an owned temporary carrier, with bounded memory.
+        let handle = try FileHandle(forUpdating: movieURL)
+        defer { try? handle.close() }
+        let end = try handle.seekToEnd()
+        let delta = UInt64(targets.insertionData.count)
+        var cursor = end
+        while cursor > targets.insertOffset {
+            let count = min(cursor - targets.insertOffset, 1024 * 1024)
+            let start = cursor - count
+            let block = try readExactData(from: handle, at: start, count: Int(count))
+            try handle.seek(toOffset: start + delta)
+            try handle.write(contentsOf: block)
+            cursor = start
+        }
+        try handle.seek(toOffset: targets.insertOffset)
+        try handle.write(contentsOf: targets.insertionData)
+        for patch in targets.sizePatches {
+            try handle.seek(toOffset: patch.offset)
+            try handle.write(contentsOf: data(for: patch))
+        }
+        try handle.synchronize()
         return
     }
     try rewriteMovieFile(
@@ -6526,7 +6557,8 @@ func encodeMOV(
     outputVideoRaw: Bool = false,
     progress: ProgressBar? = nil,
     reconnectAttempt: Int = 0,
-    timecodeFrameCountOverride: Int64? = nil
+    timecodeFrameCountOverride: Int64? = nil,
+    privateFrameStreamMediaTimeScale: Int32? = nil
 ) async -> Bool {
 
     guard finalOutputURL.pathExtension.lowercased() == container.fileExtension else {
@@ -6857,9 +6889,12 @@ func encodeMOV(
         }
         return proResReaderPixelFormat(quality)
     }()
-    let av1NativeDecodeReason = (isAV1 && sourceIsProRes)
-        ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
-        : nil
+    let privateAMAAV1Carrier = privateFrameStreamMediaTimeScale != nil && isAV1 && sourceIsProRes
+    let av1NativeDecodeReason = privateAMAAV1Carrier
+        ? "The owned AMA carrier uses bounded synchronous software ProRes decoding."
+        : ((isAV1 && sourceIsProRes)
+            ? await av1DecodeProbeFailure(asset: asset, videoTrack: videoTrack)
+            : nil)
     let decodedVideoPlan: DecodedVideoOutputPlan?
     do {
         if isPassthrough || av1NativeDecodeReason != nil {
@@ -7179,7 +7214,8 @@ func encodeMOV(
                         videoTrack: videoTrack,
                         formatDescription: sourceFormatDescription,
                         width: width,
-                        height: height
+                        height: height,
+                        allowHardwareDecode: privateAMAAV1Carrier ? false : nil
                     )
                 }
             } else if isHEVC, hevcOptions?.dvProfile?.isProfile76 == true {
@@ -7287,6 +7323,9 @@ func encodeMOV(
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: container.fileType)
+        if let scale = privateFrameStreamMediaTimeScale {
+            writer.movieTimeScale = scale
+        }
         outputWriterWasCreated = true
         writer.shouldOptimizeForNetworkUse = false
         configureRecoverableMovieFragments(
@@ -7301,6 +7340,9 @@ func encodeMOV(
         let videoIn = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: vFmtDesc)
         videoIn.expectsMediaDataInRealTime = false
+        if let scale = privateFrameStreamMediaTimeScale {
+            videoIn.mediaTimeScale = scale
+        }
         videoIn.transform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
         guard writer.canAdd(videoIn) else {
             throw NSError(
@@ -8582,6 +8624,12 @@ func encodeMOV(
                             return
                         }
                         guard vIn.append(sampleToAppend) else {
+                            if privateFrameStreamMediaTimeScale != nil {
+                                print("[AMA packet diagnostic] Video append failed at packet \(frameIndex); " +
+                                    "PTS \(CMSampleBufferGetPresentationTimeStamp(sampleToAppend)), " +
+                                    "DTS \(CMSampleBufferGetDecodeTimeStamp(sampleToAppend)), " +
+                                    "duration \(CMSampleBufferGetDuration(sampleToAppend)).")
+                            }
                             failureBox.store(makeWriterFailure(stage: "Video append failed", writer: writerRef.value, reader: readerRef.value))
                             compressedChannel.finish()
                             vIn.markAsFinished()
@@ -9117,7 +9165,8 @@ func encodeMOV(
                     container: container,
                     outputVideoRaw: outputVideoRaw,
                     progress: progress,
-                    reconnectAttempt: reconnectAttempt + 1
+                    reconnectAttempt: reconnectAttempt + 1,
+                    privateFrameStreamMediaTimeScale: privateFrameStreamMediaTimeScale
                 )
             }
         }
@@ -10201,5 +10250,159 @@ func encodeTimelineMOV(
             outputTransaction.preserveAfterFailure()
         }
         return false
+    }
+}
+
+/// Completes only the owned AMA live Profile 5 transaction. HEVC and CMU have
+/// already run while MC delivered frames. This pass reads compressed packets,
+/// injects their presentation-indexed RPUs, and preserves exact PTS/DTS.
+func finalizeAMAColorStream(spoolURL: URL, outputURL: URL, width: Int, height: Int,
+    rate: FramerateInfo, options: ProResEncodeOptions, frames: [CMUFrameStats],
+    cancellationRequested: @escaping @Sendable () -> Bool) async throws {
+    let transaction = DirectOutputTransaction(finalURL: outputURL)
+    let sidecar = outputURL.deletingLastPathComponent().appendingPathComponent(".ama-cmu-\(UUID().uuidString)")
+    defer {
+        try? FileManager.default.removeItem(at: sidecar.appendingPathExtension("xml"))
+        try? FileManager.default.removeItem(at: transaction.workingURL)
+    }
+    let isProRes = options.quality != "hevc"
+    let duration = Double(frames.count) / rate.fps
+    let descriptor = CMUAssetDescriptor(path: outputURL.path, fileName: outputURL.lastPathComponent,
+        width: width, height: height, editRate: CMURational(numerator: rate.numerator, denominator: rate.denominator),
+        codec: isProRes ? "ProRes" : "HEVC", primaries: .rec2020, signalRange: isProRes ? .video : .full,
+        matrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String, taggedDurationSeconds: duration)
+    let maxCLL = Int((frames.map(\.maxRGBNits).max() ?? 0).rounded())
+    let maxFALL = Int((frames.map(\.avgLumaNits).max() ?? 0).rounded())
+    let document = CMUAnalysisDocument(schemaVersion: "5.1.0", generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
+        author: "B00kerLouis", software: "ProResEncoderAMA", softwareVersion: "1.0",
+        analysisSource: .transformedInput, media: descriptor, masteringPeakNits: options.cmuMasteringNits ?? options.colorConversion?.targetPeakNits ?? 1000,
+        timecode: CMUTimecodeReference(startFrame: 0, stringValue: "00:00:00:00", isDropFrame: false, origin: .zero),
+        durationFrames: Int64(frames.count), durationSeconds: duration, recordIn: 0, recordOut: Int64(frames.count - 1),
+        maxCLL: max(maxCLL, maxFALL), maxFALL: maxFALL, level1Like: cmuBuildLevel1(frames),
+        outputID: UUID(), trackID: UUID(), shotID: UUID(), frames: frames)
+    let artifacts = try CMUExporter.write(document: document, sidecarBaseURL: sidecar, amaStream: true)
+    if isProRes {
+        if options.includeGeneratedDolbyVisionMetadata || options.forcedOutputStartTimecode != nil {
+            let success = await encodeMOV(asset: AVURLAsset(url: spoolURL), outputURL: transaction.workingURL,
+                quality: "pass", extraAudioURL: nil, audioReplace: false, deleteSourceAudio: true,
+                forcedOutputStartTimecode: options.forcedOutputStartTimecode,
+                dolbyVisionXMLURL: options.includeGeneratedDolbyVisionMetadata ? artifacts.xmlURL : nil,
+                hevcOptions: nil, av1Options: nil, colorSpace: nil, fpsInfo: rate, colorTransform: nil)
+            guard success else { throw ProResEncoderError.invalidOption("AMA ProRes metadata/timecode remux failed.") }
+        } else {
+            guard rename(spoolURL.path, transaction.workingURL.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        }
+        // These bytes describe the actual mapped PQ master, not an SDR retag.
+        var mastering = Data()
+        func add16(_ value: UInt16) { mastering.append(UInt8(value >> 8)); mastering.append(UInt8(value & 255)) }
+        func add32(_ value: UInt32) { for shift in [24,16,8,0] { mastering.append(UInt8((value >> shift) & 255)) } }
+        for xy: UInt16 in [8500,39850,6550,2300,35400,14600,15635,16450] { add16(xy) }
+        add32(UInt32((document.masteringPeakNits * 10000).rounded())); add32(1)
+        var light = Data()
+        for value in [max(maxCLL,maxFALL),maxFALL] { let v = UInt16(clamping: value); light.append(UInt8(v >> 8)); light.append(UInt8(v & 255)) }
+        try patchProResStaticHDRSampleEntryBoxes(in: transaction.workingURL,
+            masteringDisplayColorVolume: mastering, contentLightLevelInfo: light, inPlacePrivateCarrier: true)
+        guard !cancellationRequested(), rename(transaction.workingURL.path, outputURL.path) == 0 else {
+            throw ProResEncoderError.invalidOption("AMA ProRes output was not committed.")
+        }
+        print("[AMA live] Finalized \(frames.count) \(options.quality) PQ pictures; DV metadata=\(options.includeGeneratedDolbyVisionMetadata), HDR10 maxCLL=\(maxCLL), maxFALL=\(maxFALL).")
+        return
+    }
+    let metadata = try DolbyVisionMetadataSource(xmlURL: artifacts.xmlURL,
+        videoColorProfile: nativeDolbyVisionMetadataColorProfile(for: .rec2020))
+    let provider = DolbyVisionRPUProvider(metadataSource: metadata, profile: .profile5,
+        expectedFrameCount: Int64(frames.count), level4Measurements: artifacts.level4Measurements, frameRate: rate.fps)
+    guard try await provider.waitForCompletion() == frames.count else {
+        throw ProResEncoderError.invalidOption("AMA generated RPU coverage is incomplete.")
+    }
+    let asset = AVURLAsset(url: spoolURL)
+    guard let track = try await asset.loadTracks(withMediaType: .video).first,
+          let description = try await track.load(.formatDescriptions).first else {
+        throw ProResEncoderError.invalidOption("The AMA live compressed track is missing.")
+    }
+    let reader = try AVAssetReader(asset: asset)
+    let videoOut = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    videoOut.alwaysCopiesSampleData = false
+    guard reader.canAdd(videoOut) else { throw ProResEncoderError.invalidOption("The live track is unreadable.") }
+    reader.add(videoOut)
+    let writer = try AVAssetWriter(outputURL: transaction.workingURL,
+        fileType: outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov)
+    writer.movieTimeScale = Int32(rate.numerator)
+    let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: description)
+    videoIn.mediaTimeScale = Int32(rate.numerator)
+    guard writer.canAdd(videoIn) else { throw ProResEncoderError.invalidOption("The output rejected live HEVC.") }
+    writer.add(videoIn)
+    var tcInput: AVAssetWriterInput?
+    var tcSample: CMSampleBuffer?
+    if outputURL.pathExtension.lowercased() == "mov", let start = options.forcedOutputStartTimecode {
+        let tc = try makeSyntheticQuickTimeTimecodeTrack(startTimecode: start, fpsInfo: rate, frameCount: Int64(frames.count))
+        let input = AVAssetWriterInput(mediaType: .timecode, outputSettings: nil, sourceFormatHint: tc.formatDescription)
+        input.mediaTimeScale = Int32(rate.numerator)
+        guard writer.canAdd(input) else { throw ProResEncoderError.invalidOption("The output rejected timecode.") }
+        writer.add(input)
+        let association = AVAssetTrack.AssociationType.timecode.rawValue
+        guard videoIn.canAddTrackAssociation(withTrackOf: input, type: association) else { throw ProResEncoderError.invalidOption("Timecode association is unavailable.") }
+        videoIn.addTrackAssociation(withTrackOf: input, type: association)
+        tcInput = input; tcSample = tc.sampleBuffer
+    }
+    guard reader.startReading(), writer.startWriting() else {
+        throw reader.error ?? writer.error ?? ProResEncoderError.invalidOption("The live metadata remux did not start.")
+    }
+    writer.startSession(atSourceTime: .zero)
+    func wait(_ input: AVAssetWriterInput) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while !input.isReadyForMoreMediaData {
+            if cancellationRequested() { throw CancellationError() }
+            guard writer.status == .writing, ProcessInfo.processInfo.systemUptime < deadline else {
+                throw writer.error ?? ProResEncoderError.invalidOption("The live metadata writer stopped accepting samples.")
+            }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+    do {
+        if let tcInput, let tcSample {
+            try await wait(tcInput)
+            guard tcInput.append(tcSample) else { throw writer.error ?? ProResEncoderError.invalidOption("Timecode append failed.") }
+            tcInput.markAsFinished()
+        }
+        var seen = Set<Int64>()
+        while let sample = autoreleasepool(invoking: { videoOut.copyNextSampleBuffer() }) {
+            if cancellationRequested() { throw CancellationError() }
+            // AVAssetReader may expose a timing-only edit-list marker with no
+            // payload. It is not an encoded picture or an RPU frame. Exact
+            // picture coverage below still rejects an actually missing frame.
+            if CMSampleBufferGetDataBuffer(sample) == nil && CMSampleBufferGetTotalSampleSize(sample) == 0 {
+                continue
+            }
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            let index = CMTimeConvertScale(pts, timescale: Int32(rate.numerator), method: .roundHalfAwayFromZero).value / Int64(rate.denominator)
+            guard index >= 0, index < frames.count, seen.insert(index).inserted else {
+                throw ProResEncoderError.invalidOption("AMA HEVC presentation coverage is invalid.")
+            }
+            let rpu = try await provider.rpu(forFrame: index)
+            let decorated = try sampleBufferByInjectingHEVCRPU(sample, rpuNALUnit: rpu)
+            try await wait(videoIn)
+            guard videoIn.append(decorated) else { throw writer.error ?? ProResEncoderError.invalidOption("RPU sample append failed.") }
+        }
+        guard reader.status == .completed, seen.count == frames.count else {
+            throw reader.error ?? ProResEncoderError.invalidOption("AMA compressed/RPU frame coverage is incomplete.")
+        }
+        videoIn.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(value: Int64(frames.count * rate.denominator), timescale: Int32(rate.numerator)))
+        await writer.finishWriting()
+        guard writer.status == .completed, !cancellationRequested() else {
+            throw writer.error ?? ProResEncoderError.invalidOption("AMA metadata remux did not complete.")
+        }
+        try patchDolbyVisionHEVCConfigurationAtom(in: transaction.workingURL, profile: .profile5, width: width, height: height, fps: rate.fps)
+        try removeHEVCStaticHDRSampleEntryBoxes(in: transaction.workingURL)
+        _ = try normalizeCompressedVideoSampleEntry(in: transaction.workingURL, codec: .hevc,
+            useDolbyVisionCodecTag: options.useDolbyVisionCodecTag, profile: .profile5)
+        guard try await movieContainsDolbyVisionRPU(at: transaction.workingURL, codec: .hevc), !cancellationRequested() else {
+            throw ProResEncoderError.invalidOption("AMA output RPU verification failed.")
+        }
+        guard rename(transaction.workingURL.path, outputURL.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        print("[AMA live] Finalized \(seen.count) Profile 5 pictures/RPUs; CMU maxCLL \(maxCLL), maxFALL \(maxFALL). No decode or HEVC pass in Finish.")
+    } catch {
+        reader.cancelReading(); writer.cancelWriting(); throw error
     }
 }

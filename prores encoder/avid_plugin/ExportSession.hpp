@@ -146,6 +146,11 @@ public:
     void addObservation(std::string text);
     std::vector<std::string> observations() const;
     std::map<std::uint32_t, TrackObservation> tracks() const;
+    // Negotiated image layout is fixed for this export, even if MC asks both
+    // writer and sample consumer at different stages of option negotiation.
+    bool negotiatePackedImage(bool forcePacked);
+    bool renderedPackedImage() const;
+    std::uint32_t renderedMatrix() const;
     std::uint64_t frameCompletions() const;
 
     // Returns the number of failed checks. Zero means the contract holds.
@@ -178,6 +183,8 @@ private:
     std::vector<std::string> observations_;
     std::map<std::uint32_t, TrackObservation> tracks_;
     std::uint64_t frameCompletions_ = 0;
+    bool imageFormatChosen_ = false, renderedPackedImage_ = false;
+    std::uint32_t renderedMatrix_ = 709;
 };
 
 const char* CodecName(CodecChoice value);

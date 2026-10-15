@@ -72,7 +72,7 @@ private struct MetalColorUniforms {
     var lut3DScale: SIMD4<Float>
     var hasLUT1D: UInt32
     var hasLUT3D: UInt32
-    var reserved0: UInt32
+    var outputIs16Bit: UInt32
     var reserved1: UInt32
 }
 
@@ -124,7 +124,7 @@ final class MetalColorPipeline: @unchecked Sendable {
         }
         // BGRA is RGB/full range. Packing it into P010 is a separate output
         // choice, so conversion never quantizes a PQ result back to 8-bit RGB.
-        if destinationFormat != kCVPixelFormatType_32BGRA {
+        if destinationFormat != kCVPixelFormatType_32BGRA && destinationFormat != kCVPixelFormatType_64RGBAHalf {
             guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
                 throw MetalColorPipelineError.unsupportedPixelFormat(destinationFormat)
             }
@@ -221,7 +221,7 @@ final class MetalColorPipeline: @unchecked Sendable {
             lut3DScale: SIMD4(resolved.lut?.threeDimensional?.domainScale ?? SIMD3(repeating: 1), 0),
             hasLUT1D: resolved.lut?.oneDimensional == nil ? 0 : 1,
             hasLUT3D: resolved.lut?.threeDimensional == nil ? 0 : 1,
-            reserved0: 0,
+            outputIs16Bit: destinationFormat == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange ? 1 : 0,
             reserved1: 0
         )
     }
@@ -263,11 +263,11 @@ final class MetalColorPipeline: @unchecked Sendable {
         commandBuffer.label = "ProRes Encoder Metal Color \(CMTimeGetSeconds(pts))"
 
         var retainedTextures: [CVMetalTexture] = []
-        if pixelFormat == kCVPixelFormatType_32BGRA {
+        if pixelFormat == kCVPixelFormatType_32BGRA || pixelFormat == kCVPixelFormatType_64RGBAHalf {
             let sourceTexture = try makeTexture(
                 from: source,
                 plane: 0,
-                pixelFormat: .bgra8Unorm,
+                pixelFormat: pixelFormat == kCVPixelFormatType_64RGBAHalf ? .rgba16Float : .bgra8Unorm,
                 width: width,
                 height: height,
                 label: "source BGRA",
@@ -310,11 +310,11 @@ final class MetalColorPipeline: @unchecked Sendable {
 
         try encodeTransform(commandBuffer: commandBuffer)
 
-        if outputPixelFormat == kCVPixelFormatType_32BGRA {
+        if outputPixelFormat == kCVPixelFormatType_32BGRA || outputPixelFormat == kCVPixelFormatType_64RGBAHalf {
             let outputTexture = try makeTexture(
                 from: destination,
                 plane: 0,
-                pixelFormat: .bgra8Unorm,
+                pixelFormat: outputPixelFormat == kCVPixelFormatType_64RGBAHalf ? .rgba16Float : .bgra8Unorm,
                 width: width,
                 height: height,
                 label: "output BGRA",
@@ -624,6 +624,7 @@ final class MetalColorPipeline: @unchecked Sendable {
             || format == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
             || format == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange
             || format == kCVPixelFormatType_32BGRA
+            || format == kCVPixelFormatType_64RGBAHalf
     }
 }
 

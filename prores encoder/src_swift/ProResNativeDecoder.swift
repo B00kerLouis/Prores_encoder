@@ -28,6 +28,8 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
     private let pixelBufferPool: CVPixelBufferPool
     private let width: Int
     private let height: Int
+    private let decoderSpecification: CFDictionary?
+    private let privateAMACarrier: Bool
     private var session: VTDecompressionSession?
     private var decodeMode: ProResNativeDecodeMode?
     private var pendingPixelBuffer: CVPixelBuffer?
@@ -38,7 +40,8 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         videoTrack: AVAssetTrack,
         formatDescription: CMFormatDescription,
         width: Int,
-        height: Int
+        height: Int,
+        allowHardwareDecode: Bool? = nil
     ) throws {
         guard width > 0, height > 0 else {
             throw NSError(
@@ -57,6 +60,10 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
 
         self.width = width
         self.height = height
+        self.privateAMACarrier = allowHardwareDecode == false
+        self.decoderSpecification = allowHardwareDecode.map {
+            [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String: $0] as CFDictionary
+        }
         self.reader = try AVAssetReader(asset: asset)
         self.output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
         self.output.alwaysCopiesSampleData = false
@@ -70,18 +77,23 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
         }
         reader.add(output)
 
+        var destinationAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String:
+                NSNumber(value: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+            kCVPixelBufferWidthKey as String: NSNumber(value: width),
+            kCVPixelBufferHeightKey as String: NSNumber(value: height)
+        ]
+        if privateAMACarrier {
+            destinationAttributes[kCVPixelBufferMetalCompatibilityKey as String] = true
+            destinationAttributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:]
+        }
         var pool: CVPixelBufferPool?
         let poolStatus = CVPixelBufferPoolCreate(
             kCFAllocatorDefault,
             [
                 kCVPixelBufferPoolMinimumBufferCountKey as String: 2
             ] as CFDictionary,
-            [
-                kCVPixelBufferPixelFormatTypeKey as String:
-                    NSNumber(value: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
-                kCVPixelBufferWidthKey as String: NSNumber(value: width),
-                kCVPixelBufferHeightKey as String: NSNumber(value: height)
-            ] as CFDictionary,
+            destinationAttributes as CFDictionary,
             &pool
         )
         guard poolStatus == kCVReturnSuccess, let pool else {
@@ -105,7 +117,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
             )
         }
 
-        guard let firstSample = output.copyNextSampleBuffer() else {
+        guard let firstSample = nextCompressedPicture() else {
             if reader.status == .failed {
                 throw NSError(
                     domain: "AV1Encode",
@@ -120,7 +132,9 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
 
         try configureSessionAndDecodeFirstFrame(
             firstSample: firstSample,
-            formatDescription: formatDescription
+            formatDescription: privateAMACarrier
+                ? (CMSampleBufferGetFormatDescription(firstSample) ?? formatDescription)
+                : formatDescription
         )
     }
 
@@ -152,7 +166,7 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
             return nil
         }
 
-        guard let sample = output.copyNextSampleBuffer() else {
+        guard let sample = nextCompressedPicture() else {
             if reader.status == .failed {
                 throw NSError(
                     domain: "AV1Encode",
@@ -167,6 +181,18 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
 
         let decoded = try decode(sampleBuffer: sample, with: session)
         return try convertToP010(decoded)
+    }
+
+    /// Owned AMA carriers can begin with a zero-sample timing marker.
+    /// That marker is not a ProRes picture and must not be sent to VT.
+    private func nextCompressedPicture() -> CMSampleBuffer? {
+        while let sample = output.copyNextSampleBuffer() {
+            if !privateAMACarrier || (CMSampleBufferGetNumSamples(sample) > 0
+                && CMSampleBufferGetDataBuffer(sample) != nil) {
+                return sample
+            }
+        }
+        return nil
     }
 
     /// Tries supported output layouts in preference order and retains the first result.
@@ -187,11 +213,18 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
                     formatDescription: formatDescription,
                     pixelFormat: candidate
                 )
-                let firstDecoded = try decode(sampleBuffer: firstSample, with: createdSession)
-                self.session = createdSession
-                self.decodeMode = try mode(for: CVPixelBufferGetPixelFormatType(firstDecoded))
-                self.pendingPixelBuffer = try convertToP010(firstDecoded)
-                return
+                do {
+                    let firstDecoded = try decode(sampleBuffer: firstSample, with: createdSession)
+                    let mode = try mode(for: CVPixelBufferGetPixelFormatType(firstDecoded))
+                    let converted = try convertToP010(firstDecoded)
+                    self.session = createdSession
+                    self.decodeMode = mode
+                    self.pendingPixelBuffer = converted
+                    return
+                } catch {
+                    VTDecompressionSessionInvalidate(createdSession)
+                    throw error
+                }
             } catch {
                 lastError = error
                 if let session {
@@ -228,16 +261,21 @@ final class ProResNativeDecodeSession: @unchecked Sendable {
             decompressionOutputRefCon: nil
         )
 
+        var attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormat),
+            kCVPixelBufferWidthKey as String: NSNumber(value: width),
+            kCVPixelBufferHeightKey as String: NSNumber(value: height)
+        ]
+        if privateAMACarrier {
+            attributes[kCVPixelBufferMetalCompatibilityKey as String] = true
+            attributes[kCVPixelBufferIOSurfacePropertiesKey as String] = [:]
+        }
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             formatDescription: formatDescription,
-            decoderSpecification: nil,
-            imageBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormat),
-                kCVPixelBufferWidthKey as String: NSNumber(value: width),
-                kCVPixelBufferHeightKey as String: NSNumber(value: height)
-            ] as CFDictionary,
+            decoderSpecification: decoderSpecification,
+            imageBufferAttributes: attributes as CFDictionary,
             outputCallback: &callbackRecord,
             decompressionSessionOut: &session
         )

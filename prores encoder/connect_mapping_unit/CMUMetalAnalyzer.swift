@@ -175,6 +175,8 @@ final class CMUMetalAnalyzer {
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLComputePipelineState
     private let textureCache: CVMetalTextureCache
+    private var rgbSlot: CMUStatsSlot?
+    private var rgbGroupCount = 0
 
     /// Creates the GPU device, command queue, compute pipeline, and texture cache.
     init() throws {
@@ -206,6 +208,41 @@ final class CMUMetalAnalyzer {
             throw CMUError.textureCreationFailed("texture cache", status)
         }
         textureCache = cache
+    }
+
+    /// Measures one host-rendered PQ RGB frame before codec/chroma quantization.
+    /// The caller serializes submissions; only one reusable statistics slot exists.
+    func analyzeRGBFrame(_ pixelBuffer: CVPixelBuffer, frameIndex: Int64, pts: CMTime) throws -> CMUFrameStats {
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_64RGBAHalf else {
+            throw CMUError.unsupportedPixelBuffer(CVPixelBufferGetPixelFormatType(pixelBuffer))
+        }
+        let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
+        let groupsX = (width + 15) / 16, groupsY = (height + 15) / 16
+        let count = groupsX * groupsY
+        if rgbSlot == nil || rgbGroupCount != count {
+            rgbSlot = CMUStatsSlot(device: device, groupCount: count)
+            rgbGroupCount = count
+        }
+        guard let slot = rgbSlot, let command = commandQueue.makeCommandBuffer(),
+              let encoder = command.makeComputeCommandEncoder() else { throw CMUError.bufferAllocationFailed }
+        slot.reset()
+        var retained: [CVMetalTexture] = []
+        let texture = try makeTexture(pixelBuffer: pixelBuffer, plane: 0, pixelFormat: .rgba16Float,
+            width: width, height: height, label: "AMA PQ RGB", retained: &retained)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(texture, index: 0)
+        encoder.setTexture(texture, index: 1)
+        encoder.setBuffer(slot.histogram, offset: 0, index: 0)
+        encoder.setBuffer(slot.extrema, offset: 0, index: 1)
+        encoder.setBuffer(slot.partials, offset: 0, index: 2)
+        var uniforms = CMUMetalUniforms(width: UInt32(width), height: UInt32(height), matrixID: 2,
+            fullRange: 1, lumaCoefficients: SIMD4<Float>(0.2627, 0.6780, 0.0593, 0))
+        encoder.setBytes(&uniforms, length: MemoryLayout<CMUMetalUniforms>.stride, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: groupsX, height: groupsY, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        encoder.endEncoding(); command.commit()
+        return try CMUPendingFrame(commandBuffer: command, slot: slot, pixelBuffer: pixelBuffer,
+            retainedTextures: retained, frameIndex: frameIndex, ptsSeconds: pts.seconds, groupCount: count).finish()
     }
 
     /// Decodes all frames, optionally applies a color transform, and returns exact
@@ -528,7 +565,7 @@ private func cmuPercentile(
 }
 
 /// Derives bounded minimum, midpoint, and maximum anchors from frame percentiles.
-private func cmuBuildLevel1(_ frames: [CMUFrameStats]) -> CMULevel1Like {
+func cmuBuildLevel1(_ frames: [CMUFrameStats]) -> CMULevel1Like {
     let minimum = min(
         min(max(cmuNitsToPQNormalized(frames.map(\.minLumaNits).min() ?? 0), 0), 1),
         12.0 / 4095.0

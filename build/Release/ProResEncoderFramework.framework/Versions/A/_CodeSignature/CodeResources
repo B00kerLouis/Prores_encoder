@@ -10,7 +10,7 @@
 		</data>
 		<key>Resources/default.metallib</key>
 		<data>
-		hl3lH8vR8k5U2kxpgWGwU0RDKtg=
+		1vDrHIMdBX0Kt0PAEpfNW0qA0l0=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -19,14 +19,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			LvI7ACOh9kTKNDUn1R402UXEje9WMhG+PIdDDUfLwr0=
+			CIm/Aq7NedVcykFg1meKb4bAWvl5GOnrAvECUpGV4gA=
 			</data>
 		</dict>
 		<key>Modules/ProResEncoderFramework.swiftmodule/Project/arm64-apple-macos.swiftsourceinfo</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JszI+v9rMo84PQhEtBzSzKTrYh+VqeFanGdPIzT+cRs=
+			ptidcKridsC9m+OnYf9FtLSIIaXN3cnXvtYpUEsbe5o=
 			</data>
 		</dict>
 		<key>Modules/ProResEncoderFramework.swiftmodule/arm64-apple-macos.abi.json</key>
@@ -40,14 +40,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			bmVuXl4G86cQLA61ErTdCjqm4dNLuTHlJ/EAyT11HfE=
+			hyuSINW4kNv5fIsjte/bWHz8GwU44A92oE2BCJJiZao=
 			</data>
 		</dict>
 		<key>Modules/ProResEncoderFramework.swiftmodule/arm64-apple-macos.swiftmodule</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			4eWrb00J4jO+lFS3Kqnf8jBbzQY1qkCLwLMVsQxQ48g=
+			Kp8D3KamL6vmYNmCSL9fhhEoY7mD5AKDe66LodICpY8=
 			</data>
 		</dict>
 		<key>Modules/module.modulemap</key>
@@ -68,7 +68,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			VltBggqYb5p0Qo5G5hcpOf3XjiRO79IHuAtfHcbOGvk=
+			zeJHwkLTG8w3CGyUoivNIIUImjsASdkw/Mbv/COKCf8=
 			</data>
 		</dict>
 	</dict>
