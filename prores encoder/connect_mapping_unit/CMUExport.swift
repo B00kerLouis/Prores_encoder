@@ -64,7 +64,8 @@ enum CMUExporter {
     static func write(
         document: CMUAnalysisDocument,
         sidecarBaseURL: URL,
-        amaStream: Bool = false
+        amaStream: Bool = false,
+        hybridStream: Bool = false
     ) throws -> CMUOutputArtifacts {
         let baseURL = sidecarBaseURL.pathExtension.isEmpty
             ? sidecarBaseURL
@@ -81,7 +82,7 @@ enum CMUExporter {
         guard let xmlData = xml.data(using: .utf8) else {
             throw CMUError.exportFailed("XML could not be encoded as UTF-8.")
         }
-        try validateXML(xmlData, document: document, amaStream: amaStream)
+        try validateXML(xmlData, document: document, amaStream: amaStream, hybridStream: hybridStream)
         try xmlData.write(to: xmlURL, options: .atomic)
 
         return CMUOutputArtifacts(
@@ -304,7 +305,8 @@ enum CMUExporter {
     private static func validateXML(
         _ data: Data,
         document: CMUAnalysisDocument,
-        amaStream: Bool
+        amaStream: Bool,
+        hybridStream: Bool
     ) throws {
         let xml = try XMLDocument(
             data: data,
@@ -322,6 +324,11 @@ enum CMUExporter {
             guard document.author == "B00kerLouis", document.software == "ProResEncoderAMA",
                   text.contains("<Author>B00kerLouis</Author>") else {
                 throw CMUError.exportFailed("AMA XML author/software is invalid.")
+            }
+        } else if hybridStream {
+            guard document.author == "B00kerLouis", document.software == "ProResEncoder",
+                  text.contains("<Author>B00kerLouis</Author>") else {
+                throw CMUError.exportFailed("Hybrid XML author/software is invalid.")
             }
         } else if !text.contains("<Author>Dolby Laboratories</Author>") {
             throw CMUError.exportFailed("XML Author is not the required Connect Mapping  Unit value.")

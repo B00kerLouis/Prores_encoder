@@ -254,7 +254,8 @@ final class CMUMetalAnalyzer {
         masteringPeakNits: Float,
         timecode: CMUTimecodeReference,
         colorTransform: ResolvedColorTransform? = nil,
-        progress: ProgressBar? = nil
+        progress: ProgressBar? = nil,
+        privateHybridFrameRange: Range<Int64>? = nil
     ) async throws -> CMUAnalysisDocument {
         let asset = AVURLAsset(
             url: url,
@@ -289,6 +290,21 @@ final class CMUMetalAnalyzer {
             throw CMUError.readerOutputUnavailable
         }
         reader.add(output)
+        var hybridStart: CMTime?
+        if let range = privateHybridFrameRange {
+            let sourceRange = try await track.load(.timeRange)
+            let offset = CMTime(value: range.lowerBound * Int64(descriptor.editRate.denominator),
+                timescale: Int32(descriptor.editRate.numerator))
+            let duration = CMTime(value: Int64(range.count) * Int64(descriptor.editRate.denominator),
+                timescale: Int32(descriptor.editRate.numerator))
+            let requested = CMTimeRange(start: CMTimeAdd(sourceRange.start, offset), duration: duration)
+            guard range.lowerBound >= 0, !range.isEmpty,
+                  CMTimeCompare(CMTimeRangeGetEnd(requested), CMTimeRangeGetEnd(sourceRange)) <= 0 else {
+                throw CMUError.exportFailed("Hybrid analysis range is outside the source picture range.")
+            }
+            reader.timeRange = requested
+            hybridStart = requested.start
+        }
         guard reader.startReading() else {
             throw CMUError.readerStartFailed(
                 reader.error?.localizedDescription ?? "unknown reader error"
@@ -310,7 +326,11 @@ final class CMUMetalAnalyzer {
         var availableSlots = slots
         var pending: [CMUPendingFrame] = []
         var frameStats: [CMUFrameStats] = []
-        frameStats.reserveCapacity(Int(max(await estimateFrameCount(asset: asset), 0)))
+        if let range = privateHybridFrameRange {
+            frameStats.reserveCapacity(range.count)
+        } else {
+            frameStats.reserveCapacity(Int(max(await estimateFrameCount(asset: asset), 0)))
+        }
         var decodedFrameIndex: Int64 = 0
         var firstPTS: CMTime?
         var lastEndPTS: CMTime?
@@ -330,6 +350,14 @@ final class CMUMetalAnalyzer {
                 continue
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            if let hybridStart {
+                let expected = CMTimeAdd(hybridStart, CMTime(
+                    value: decodedFrameIndex * Int64(descriptor.editRate.denominator),
+                    timescale: Int32(descriptor.editRate.numerator)))
+                guard CMTimeCompare(pts, expected) == 0 else {
+                    throw CMUError.exportFailed("Hybrid analysis source is not CFR at picture \(decodedFrameIndex).")
+                }
+            }
             let pixelBuffer = try colorPipeline?.process(
                 decodedPixelBuffer,
                 pts: pts
@@ -389,6 +417,9 @@ final class CMUMetalAnalyzer {
         guard !frameStats.isEmpty else {
             throw CMUError.noDecodedFrames
         }
+        if let range = privateHybridFrameRange, Int64(frameStats.count) != Int64(range.count) {
+            throw CMUError.exportFailed("Hybrid CMU analysis decoded \(frameStats.count)/\(range.count) pictures.")
+        }
 
         let exactDuration: Double
         if let firstPTS, let lastEndPTS {
@@ -405,8 +436,8 @@ final class CMUMetalAnalyzer {
         return CMUAnalysisDocument(
             schemaVersion: "5.1.0",
             generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
-            author: "Dolby Laboratories",
-            software: "Connect Mapping Unit",
+            author: privateHybridFrameRange == nil ? "Dolby Laboratories" : "B00kerLouis",
+            software: privateHybridFrameRange == nil ? "Connect Mapping Unit" : "ProResEncoder",
             softwareVersion: "1.2.5",
             analysisSource: source,
             media: descriptor,

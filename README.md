@@ -3,11 +3,12 @@
 Author: [B00kerLouis](https://github.com/B00kerLouis).
 
 Native macOS CLI and Framework for professional video encoding, HDR color
-conversion, dynamic metadata processing, MOV/MP4/MXF mastering, linked timeline
+conversion, dynamic metadata processing, MOV/MP4/MKV/MXF mastering, linked timeline
 workflows, batch encoding, and external-audio replacement.
 
 MOV remains the default container. H.264, HEVC, and AV1 can also be written to
-MP4 with `-ef mp4` or simply by giving `-o` a `.mp4` filename. `--outupt-video-raw`
+MP4 or MKV with `-ef mp4` / `-ef mkv`, or by giving `-o` the corresponding
+`.mp4` / `.mkv` extension. `--outupt-video-raw`
 (`-ovr`) writes the final encoded video elementary stream; Dolby Vision Profile
 7.6 writes its required separate BL and EL HEVC streams.
 
@@ -54,8 +55,10 @@ the tested ProRes and generated HEVC/AV1 Dolby Vision configurations described
 in [feature coverage](docs/feature-coverage.md). H.264 Dolby Vision remains
 unsupported. Project color lookup is unavailable: select an explicit, verified
 rendered-input gamut/transfer. A requested buffer format does not identify the
-project color space. Host PCM/AAC, external XML/LUT and nonzero host timecode
-remain separate acceptance work.
+project color space. Timeline PCM delivery with Delete source audio Off has
+completed a full native export; Bounce Mix packages the delivered left/right
+words as one stereo stream. Host-encoded AAC, external XML/LUT and nonzero host
+timecode remain separate acceptance work.
 
 The arm64 Release bundle is checked in at
 [`build/Release/ProResEncoderAMA.avx`](build/Release/ProResEncoderAMA.avx).
@@ -402,6 +405,27 @@ MP4; MP4 accepts H.264, HEVC, and AV1. `-ovr` writes `*_raw.prores`,
 `*_raw.h264`, `*_raw.hevc`, or `*_raw.obu` next to the container. With HEVC Dolby
 Vision Profile 7.6 it instead writes `*_P7_6_BL.hevc` and `*_P7_6_EL.hevc`.
 
+### Matroska input and output
+
+```bash
+proresencoder -i input.mkv -q hevc -b 50 -o output.mkv
+proresencoder -i input.mkv -q h264 -b 20 -o output.mp4
+proresencoder -i input.mov -q av1 -b 50 -ef mkv -o output.mkv
+```
+
+MKV supports H.264, HEVC and AV1, including the encoder's HEVC Dolby Vision
+P5/7.6/8.1/8.4 and AV1 P10/10.1/10.4 configurations. Existing profile, frame-rate
+and color requirements still apply. QuickTime timecode tracks remain MOV-only.
+The Framework exposes `ProResOutputFormat.mkv`, and AMA exposes MKV in Container.
+
+MKV input selects the default enabled video/audio track, or the first enabled
+track when no default exists. Subtitles, attachments and unselected additional
+tracks are omitted. Native EBML indexing supplies an on-demand movie view to the
+existing decoder; it does not stage or decode the entire source movie. Output
+repackages the existing encoder's compressed packets on the destination volume.
+Dolby configuration, in-band RPUs/enhancement NALs, color and static HDR metadata
+are retained by the container layer. MKV uses the ordinary encoding path.
+
 MOV timecode behavior:
 
 - If the source already contains a MOV timecode track, the output MOV keeps
@@ -431,10 +455,21 @@ proresencoder -i input.mov -ef opatom -q 422hq --audio-ch-per-file 1 -o output_d
 
 ## External Audio and Source-Audio Deletion
 
-Use `-aa` to add an external audio track. The encoder accepts audio readable
-through the native runtime, including common PCM and compressed audio formats.
-MOV-compatible codecs are muxed where supported; inputs that require conversion
-use an explicit channel layout.
+Use `-aa` to add external audio. For MOV/MP4/MKV output, source audio and
+containerized `-aa` audio are copied as original packets and configurations.
+The software does not require an audio decoder or a registered codec name to
+preserve an ISO BMFF sound track. AC-4, AV3A, MPEG-H and future sample entries
+are not classified as PCM/AAC or rejected because AVFoundation does not decode
+them. No implicit PCM/AAC transcode is performed. The two MXF modes retain their
+existing audio handling.
+
+MOV/MP4 sample entries are preserved in full. MKV uses registered native codec
+mappings where available and `A_QUICKTIME` to retain otherwise unrecognized ISO
+sample entries and configuration boxes. Containerized AC-4, AV3A and MPEG-H supplied
+through `-aa` have been checked by complete configuration and payload hashes
+across all three output containers. Raw audio without packet/configuration
+metadata still needs a parser for its source framing; this is independent of
+whether a destination container can carry the codec.
 
 Add `--audio-replace` / `-ar`, or combine `-aa` with
 `--delete-source-audio` / `-dsa`, to drop source audio and keep only the
@@ -551,3 +586,76 @@ proresencoder -i source.mov -q hevc -b 20 \
   --resume-recovery output.recoverable-XXXXXXXX.mov \
   -o output.mov
 ```
+
+### Hybrid MOV and parallel VideoToolbox sessions
+
+The CLI automatically uses Hybrid MOV for eligible single-file ProRes, H.264,
+and HEVC MOV output from a CFR source directly readable by AVFoundation.
+Automatic parallelism targets **two encoding jobs**. Use `--vt-workers 1` or
+`--vt-workers 2` to select single/dual encoding, or `--no-hybrid-mov` for the
+ordinary writer. `--hybrid-mov` remains an explicit force-on option.
+
+```bash
+proresencoder -i source.mov -q proxy -o output.mov # automatic Hybrid MOV, target 2
+proresencoder -i source.mov -q proxy --vt-workers 1 -o single.mov
+# After interruption, repeat the same source, output and encoding options:
+proresencoder -i source.mov -q proxy --hybrid-resume --vt-workers 2 -o output.mov
+```
+
+This native muxer follows the documented [OBS Hybrid MOV design](https://obsproject.com/blog/obs-studio-hybrid-mp4):
+it writes an initialization movie and recoverable fragments, then appends full
+sample tables and changes a 16-byte header to expose an ordinary MOV. Finishing
+does not copy the completed media payload. No OBS source code is included.
+
+Omitting `--vt-workers`, or setting it to `0`, targets two jobs. The selected
+codec/raster's VT parallel limit caps the target. Candidates are prepared
+simultaneously with hardware acceleration required; a missing recommendation
+does not force a Pro/Max/Ultra chip to one job. A limit below two or an unavailable
+second hardware session falls back to one, with a CLI reason. Chip names and CPU
+core counts do not determine the result. This verifies concurrent hardware
+contexts, not a physical media-engine count or a measured fastest configuration.
+Short inputs can use one job because there is only one subdivision; that reason
+is logged separately. Explicit values 3 through 8 remain for advanced testing.
+Unconverted ProRes streams compressed pictures directly to their
+final offsets with four in-flight pictures per session and an ordered source reader.
+Transformed ProRes and H.264/HEVC use bounded, independently encoded subdivisions
+on the output volume. Completed out-of-order subdivisions are retained for reuse.
+More sessions do not guarantee more throughput or identical HEVC rate control.
+
+`--hybrid-fragment-frames 0` selects the encoder's recommended minimum frame count
+and duration, with a 240-frame minimum and a 2400-frame cap. Set 24 through 2400
+explicitly for a different recovery/performance tradeoff. A resume keeps the saved
+subdivision size. It may change the worker count. The movie and video clocks use
+the exact edit-rate numerator, including 30000/1001.
+
+The visible `output.hybrid-partial.mov` and hidden `.output.mov.hybrid-state`
+directory form one recovery job; retain both. The journal is checksummed and
+committed only after fragment synchronization. Resume verifies committed fragment
+SHA-256 hashes and the source path, size, modification time, head/tail fingerprint,
+and encoding/LUT parameters before discarding an incomplete tail. A damaged
+committed fragment fails explicitly. An exclusive job lock prevents two encoders
+from continuing the same file. Existing delivery files are refused for new jobs.
+SMB uses a same-volume move when exclusive-rename extensions are unavailable.
+Filesystem synchronization relies on the destination server's durability behavior.
+Unfinalized duration/seeking support varies by reader; fragmented B-frame media
+can have a demuxer-applied decoder-delay timestamp bias. Resume/finalize for
+delivery; the completed movie uses the exact zero-based presentation timeline.
+
+This mode currently preserves one video track and QuickTime timecode. Default
+selection preserves source audio by using the ordinary writer unless `-dsa` was
+explicitly selected. External audio/XML, timed metadata, pass-through, raw output,
+AV1 and standalone/ProRes CMU also retain their ordinary paths with a CLI reason.
+Explicit Hybrid options reject unsupported combinations. Sources requiring a
+temporary sample-entry retag retain the ordinary path; a recovery job always
+identifies the persistent source file. Batch/timeline workflows and AMA sequence
+resume retain their existing paths. Generated HEVC Dolby Vision can use `--cmu N -ci` with an
+explicit profile and the existing color options. Analysis and GOP/rate-control
+state are scoped to each subdivision, so metadata and HEVC bytes need not match
+an uninterrupted single-session encode. `--no-hybrid-mov` selects the existing
+ordinary encoding behavior.
+
+The Framework's existing default remains opt-in, including AMA's private calls.
+Framework callers can set `ProResEncodeOptions.hybridMovie` to
+`ProResHybridMovieOptions(workers: 2)` and set its `resume` property for continuation.
+The public file `encode` entry point uses the same muxer. Independent full decode,
+timestamp and real process-kill regressions are in `Tests/HybridMOV/`.

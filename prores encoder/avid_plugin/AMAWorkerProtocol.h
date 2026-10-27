@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 
 namespace ama_worker {
-enum Command : std::uint32_t { Initialize = 1, BGRA = 2, ProRes = 3, Finish = 4, RGBAHalf = 5, Packed422 = 6 };
+enum Command : std::uint32_t { Initialize = 1, BGRA = 2, ProRes = 3, Finish = 4, RGBAHalf = 5, Packed422 = 6, TimelineAudio = 7 };
 struct Request { std::uint32_t command; std::uint32_t strideOrCodec; std::uint64_t size; };
 struct Response { std::int32_t success; std::uint32_t messageSize; };
 constexpr std::size_t maximumFrameBytes = 64 * 1024 * 1024;

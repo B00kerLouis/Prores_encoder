@@ -1209,7 +1209,7 @@ private struct DolbyVisionEditRate {
 }
 
 /// Parsed timecode start, frame quanta, and drop-frame state.
-private struct QuickTimeTimecodeInfo {
+struct QuickTimeTimecodeInfo {
     let startFrame: Int64
     let fps: Int
     let isDropFrame: Bool
@@ -3514,7 +3514,7 @@ private func nativeDolbyVisionMetadataColorProfile(
 }
 
 /// Reads the first timecode sample and its drop-frame format flags.
-private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) async throws -> QuickTimeTimecodeInfo {
+func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) async throws -> QuickTimeTimecodeInfo {
     guard let fd = try? await track.load(.formatDescriptions).first else {
         throw NSError(
             domain: "DolbyVisionMetadata",
@@ -3593,7 +3593,7 @@ private func readQuickTimeTimecodeInfo(asset: AVAsset, track: AVAssetTrack) asyn
 /// Reads a 32-bit QuickTime timecode sample directly from a URL-backed MOV.
 /// This is used only when AVFoundation exposes the track and sample timing but
 /// omits the sample's CMBlockBuffer.
-private func readQuickTimeTimecodeInfoFromMOVSample(
+func readQuickTimeTimecodeInfoFromMOVSample(
     sourceURL: URL,
     trackID: CMPersistentTrackID,
     expectedFormatDescription: CMFormatDescription?
@@ -4392,8 +4392,10 @@ struct DecodableSource {
     let asset: AVURLAsset
     let url: URL
     private let retaggedCopyURL: URL?
+    private let matroskaSource: MatroskaAssetSource?
 
-    init(asset: AVURLAsset, url: URL, retaggedCopyURL: URL?) {
+    init(asset: AVURLAsset, url: URL, retaggedCopyURL: URL?, matroskaSource: MatroskaAssetSource? = nil) {
+        self.matroskaSource = matroskaSource
         self.asset = asset
         self.url = url
         self.retaggedCopyURL = retaggedCopyURL
@@ -4401,6 +4403,8 @@ struct DecodableSource {
 
     /// Removes the retag copy. Safe to call more than once.
     func cleanup() {
+        MatroskaAssetSource.release(url: asset.url)
+        withExtendedLifetime(matroskaSource) {}
         guard let retaggedCopyURL else { return }
         RetagCopyRegistry.shared.remove(retaggedCopyURL)
     }
@@ -4422,6 +4426,12 @@ func makeDecodableSource(
     for sourceURL: URL,
     pixelFormats: [OSType] = retagProbePixelFormats
 ) async -> DecodableSource {
+    if ["mkv", "webm"].contains(sourceURL.pathExtension.lowercased()) || (try? NativeContainerKind.identify(sourceURL)) == .matroska {
+        do {
+            let source = try MatroskaAssetSource(url: sourceURL)
+            return DecodableSource(asset: source.asset, url: sourceURL, retaggedCopyURL: nil, matroskaSource: source)
+        } catch { print("[Decode] \(error.localizedDescription)") }
+    }
     let asset = AVURLAsset(url: sourceURL)
     guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first else {
         return DecodableSource(asset: asset, url: sourceURL, retaggedCopyURL: nil)
@@ -6012,14 +6022,15 @@ private func waitForWriterInput(
 
 // MARK: - Encoded Container and Elementary Stream Output
 
-/// The two ISO base-media containers supported by the single-file encoder.
+/// Output containers; Matroska repackages the existing compressed movie path.
 enum EncodedVideoContainer: Sendable {
     case mov
     case mp4
+    case mkv
 
     var fileType: AVFileType {
         switch self {
-        case .mov: return .mov
+        case .mov, .mkv: return .mov
         case .mp4: return .mp4
         }
     }
@@ -6028,6 +6039,7 @@ enum EncodedVideoContainer: Sendable {
         switch self {
         case .mov: return "mov"
         case .mp4: return "mp4"
+        case .mkv: return "mkv"
         }
     }
 
@@ -6558,12 +6570,40 @@ func encodeMOV(
     progress: ProgressBar? = nil,
     reconnectAttempt: Int = 0,
     timecodeFrameCountOverride: Int64? = nil,
-    privateFrameStreamMediaTimeScale: Int32? = nil
+    privateFrameStreamMediaTimeScale: Int32? = nil,
+    parallelSubdivision: VTParallelSubdivision? = nil,
+    containerMediaTimeScale: Int32? = nil
 ) async -> Bool {
 
     guard finalOutputURL.pathExtension.lowercased() == container.fileExtension else {
         print("[Error] \(container.fileExtension.uppercased()) encoding requires a .\(container.fileExtension) output path.")
         return false
+    }
+
+    if container == .mkv {
+        guard quality == "pass" || isH264Quality(quality) || isHEVCQuality(quality) || isAV1Quality(quality),
+              forcedOutputStartTimecode == nil else {
+            print("[Error] MKV supports H.264, HEVC or AV1; QuickTime timecode requires MOV.")
+            return false
+        }
+        let temporary = finalOutputURL.deletingLastPathComponent().appendingPathComponent(".mkv-packets-\(UUID().uuidString).mov")
+        let profile = hevcOptions?.dvProfile ?? av1Options?.dvProfile
+        let raw = EncodedVideoRawOutput.outputURLs(for: temporary, quality: quality, profile: profile)
+        defer { for url in [temporary] + raw { try? FileManager.default.removeItem(at: url) } }
+        guard await encodeMOV(asset: asset, outputURL: temporary, quality: quality,
+            extraAudioURL: extraAudioURL, audioReplace: audioReplace, deleteSourceAudio: deleteSourceAudio,
+            forcedOutputStartTimecode: nil, dolbyVisionXMLURL: dolbyVisionXMLURL,
+            dolbyVisionLevel4Measurements: dolbyVisionLevel4Measurements, hevcOptions: hevcOptions,
+            av1Options: av1Options, colorSpace: colorSpace, fpsInfo: fpsInfo, colorTransform: colorTransform,
+            useDolbyVisionCodecTag: useDolbyVisionCodecTag, container: .mov, outputVideoRaw: outputVideoRaw,
+            progress: progress, privateFrameStreamMediaTimeScale: privateFrameStreamMediaTimeScale,
+            containerMediaTimeScale: Int32(fpsInfo.numerator)) else { return false }
+        do {
+            let targets = EncodedVideoRawOutput.outputURLs(for: finalOutputURL, quality: quality, profile: profile)
+            let additional = outputVideoRaw ? Array(zip(raw, targets)).map { (working: $0.0, final: $0.1) } : []
+            try await MatroskaMuxer.write(movieURL: temporary, outputURL: finalOutputURL, additionalFiles: additional)
+            return true
+        } catch { print("[Error] \(error.localizedDescription)"); return false }
     }
 
     // The working file lives beside the destination. Encoding therefore retains
@@ -6653,9 +6693,17 @@ func encodeMOV(
     } == true
     let writesAV1Video = isAV1 || passthroughIsAV1
     let removesSourceAudio = audioReplace || deleteSourceAudio
-    let audioTrack = removesSourceAudio
-        ? nil
-        : (try? await asset.loadTracks(withMediaType: .audio).first)
+    let nativeAudioSource: NativeMovieFile?
+    do {
+        if !removesSourceAudio, let source = asset as? AVURLAsset {
+            if let matroska = MatroskaAssetSource.nativeSource(for: source.url) { nativeAudioSource = matroska }
+            else if source.url.isFileURL, try NativeContainerKind.identify(source.url) == .isoMovie {
+                nativeAudioSource = try NativeMovieFile(url: source.url, audioOnly: true)
+            } else { nativeAudioSource = nil }
+        } else { nativeAudioSource = nil }
+    } catch { print("[Audio] Container packet indexing failed: \(error.localizedDescription)"); return false }
+    let sourceAudioTracks = removesSourceAudio || nativeAudioSource != nil ? [] : ((try? await asset.loadTracks(withMediaType: .audio)) ?? [])
+    let audioTrack = sourceAudioTracks.first
     let sourceMetadataTracks = container.supportsQuickTimeAncillaryTracks
         ? ((try? await asset.loadTracks(withMediaType: .metadata)) ?? [])
         : []
@@ -6983,17 +7031,33 @@ func encodeMOV(
     var extraAudioReader: AVAssetReader? = nil
     var extraAudioTrack:  AVAssetTrack?  = nil
     var externalAudioSampleSource: (any AudioSampleBufferSource)? = nil
+    var nativeExtraAudioSource: NativeMovieFile?
+    var nativeExtraMatroska: MatroskaAssetSource?
+    defer { if let nativeExtraMatroska { MatroskaAssetSource.release(url: nativeExtraMatroska.asset.url) } }
     if let eaURL = extraAudioURL {
+        do {
+            if try NativeContainerKind.identify(eaURL) == .isoMovie {
+                nativeExtraAudioSource = try NativeMovieFile(url: eaURL, audioOnly: true)
+            } else if try NativeContainerKind.identify(eaURL) == .matroska {
+                nativeExtraMatroska = try MatroskaAssetSource(url: eaURL, primaryOnly: false, allowAudioOnly: true)
+                nativeExtraAudioSource = nativeExtraMatroska?.nativeMovie
+            }
+            if let nativeExtraAudioSource, !nativeExtraAudioSource.tracks.contains(where: { $0.handler == "soun" }) {
+                throw MatroskaError.invalid("the extra audio container has no sound track")
+            }
+        } catch { print("[Audio] \(error.localizedDescription)"); return false }
+    }
+    if let eaURL = extraAudioURL, nativeExtraAudioSource == nil {
         let eaAsset = AVURLAsset(url: eaURL)
         if let track = try? await eaAsset.loadTracks(withMediaType: .audio).first {
             let formatHint = try? await track.load(.formatDescriptions).first
             if let formatHint,
                !movSupportsAudioPassthrough(formatDescription: formatHint) {
                 do {
-                    externalAudioSampleSource = try AVAudioFilePCMSource(url: eaURL)
-                    print("[Audio] Decoding external audio to 32-bit float PCM for MOV compatibility.")
+                    externalAudioSampleSource = try AudioFilePacketSource(url: eaURL)
+                    print("[Audio] Preserving the external audio format and packets without a PCM conversion.")
                 } catch {
-                    print("[Error] External audio PCM decoder could not be created: \(error.localizedDescription)")
+                    print("[Error] External audio packet index could not be created: \(error.localizedDescription)")
                     return false
                 }
             } else {
@@ -7023,17 +7087,14 @@ func encodeMOV(
     } else {
         sourceAudioFormatHint = nil
     }
-    let sourceAudioPCMSettings = sourceAudioFormatHint.flatMap {
-        movPCMTranscodeSettings(formatDescription: $0)
-    }
+    // Source audio is always packet passthrough. A container rejection must
+    // surface as an error, never trigger an implicit PCM/AAC transcode.
+    let sourceAudioPCMSettings: [String: Any]? = nil
     let extraAudioFormatHint: CMFormatDescription?
     if let extraAudioTrack {
         extraAudioFormatHint = try? await extraAudioTrack.load(.formatDescriptions).first
     } else {
         extraAudioFormatHint = externalAudioSampleSource?.formatDescription
-    }
-    if sourceAudioPCMSettings != nil {
-        print("[Audio] Source codec is not safe for MOV passthrough; converting it to 32-bit float PCM.")
     }
 
     do {
@@ -7078,6 +7139,15 @@ func encodeMOV(
             }
             reader.add(output)
             audioOut = output
+        }
+
+        var remainingAudioOutputs: [(AVAssetTrack, AVAssetReaderTrackOutput)] = []
+        for track in sourceAudioTracks.dropFirst() {
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            output.alwaysCopiesSampleData = false
+            guard reader.canAdd(output) else { throw ProResEncoderError.encodingFailed("The source audio track \(track.trackID) cannot be read without transcoding.") }
+            reader.add(output)
+            remainingAudioOutputs.append((track, output))
         }
 
         var tcOut: AVAssetReaderTrackOutput? = nil
@@ -7282,7 +7352,8 @@ func encodeMOV(
                             value: CMTimeValue(estimatedFrames) * CMTimeValue(fpsInfo.denominator),
                             timescale: CMTimeScale(max(fpsInfo.numerator, 1))
                         )
-                    )
+                    ),
+                    parallelSubdivision: parallelSubdivision
                 )
             }
         }
@@ -7323,7 +7394,7 @@ func encodeMOV(
         // ── Writer ──
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: container.fileType)
-        if let scale = privateFrameStreamMediaTimeScale {
+        if let scale = privateFrameStreamMediaTimeScale ?? containerMediaTimeScale ?? ((asset as? AVURLAsset)?.url.scheme == "prores-matroska" ? Int32(fpsInfo.numerator) : nil) {
             writer.movieTimeScale = scale
         }
         outputWriterWasCreated = true
@@ -7340,7 +7411,7 @@ func encodeMOV(
         let videoIn = AVAssetWriterInput(
             mediaType: .video, outputSettings: nil, sourceFormatHint: vFmtDesc)
         videoIn.expectsMediaDataInRealTime = false
-        if let scale = privateFrameStreamMediaTimeScale {
+        if let scale = privateFrameStreamMediaTimeScale ?? containerMediaTimeScale ?? ((asset as? AVURLAsset)?.url.scheme == "prores-matroska" ? Int32(fpsInfo.numerator) : nil) {
             videoIn.mediaTimeScale = scale
         }
         videoIn.transform = (try? await videoTrack.load(.preferredTransform)) ?? .identity
@@ -7390,6 +7461,19 @@ func encodeMOV(
             writer.add(input)
             audioIn = input
             sourceTrackInputMap[aTrack.trackID] = input
+        }
+
+        var remainingAudioPairs: [MediaPumpPair] = []
+        for (track, output) in remainingAudioOutputs {
+            guard let hint = try await track.load(.formatDescriptions).first else {
+                throw ProResEncoderError.encodingFailed("Source audio track \(track.trackID) has no packet format.")
+            }
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: hint)
+            guard writer.canAdd(input) else {
+                throw ProResEncoderError.encodingFailed("\(container.fileExtension.uppercased()) cannot mux source audio track \(track.trackID) losslessly; select a compatible container.")
+            }
+            writer.add(input); sourceTrackInputMap[track.trackID] = input
+            remainingAudioPairs.append(MediaPumpPair(input: input, output: output))
         }
 
         var extraAudioIn: AVAssetWriterInput? = nil
@@ -7591,6 +7675,8 @@ func encodeMOV(
 
         // Build pump pairs for passthrough tracks
         let audioPair = audioIn.flatMap { i in audioOut.map { o in MediaPumpPair(input: i, output: o) } }
+        let sourceAudioPairs = audioPair.map { [$0] } ?? []
+        let audioPairs = sourceAudioPairs + remainingAudioPairs
         let extraAudioPair = extraAudioIn.flatMap { i in extraAudioOut.map { o in MediaPumpPair(input: i, output: o) } }
         let audioSampleSourcePair = extraAudioIn.flatMap { input in
             externalAudioSampleSource.map { source in
@@ -7635,7 +7721,7 @@ func encodeMOV(
                         failureBox.store(error)
                     }
                 }
-                if let pair = audioPair {
+                for pair in audioPairs {
                     group.addTask(priority: .userInitiated) {
                         do {
                             try await withCheckedThrowingContinuation { cont in
@@ -7949,7 +8035,7 @@ func encodeMOV(
                         vIn.markAsFinished()
                     }
 
-                    if let pair = audioPair {
+                    for pair in audioPairs {
                         group.addTask(priority: .userInitiated) {
                             do {
                                 try await withCheckedThrowingContinuation { cont in
@@ -8654,7 +8740,7 @@ func encodeMOV(
                 }
 
                 // Start audio, timecode, and metadata pumps.
-                if let pair = audioPair {
+                for pair in audioPairs {
                     group.addTask(priority: .userInitiated) {
                         do {
                             try await withCheckedThrowingContinuation { cont in
@@ -8960,6 +9046,8 @@ func encodeMOV(
         let additionalFiles = Array(zip(workingRawOutputURLs, finalRawOutputURLs)).map {
             (working: $0.0, final: $0.1)
         }
+        if let nativeAudioSource { try NativeContainerAudio.append(source: nativeAudioSource, to: outputURL) }
+        if let nativeExtraAudioSource { try NativeContainerAudio.append(source: nativeExtraAudioSource, to: outputURL) }
         try outputTransaction.commit(additionalFiles: additionalFiles)
         if outputVideoRaw {
             for rawURL in finalRawOutputURLs {

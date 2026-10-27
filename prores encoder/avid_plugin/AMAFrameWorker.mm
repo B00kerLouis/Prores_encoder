@@ -14,6 +14,7 @@
 - (BOOL)appendRGBAHalfFrame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendPacked422Frame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendProResFrame:(NSData*)frame sourceCodec:(NSString*)codec;
+- (BOOL)setTimelineAudioFiles:(NSArray*)paths;
 - (BOOL)finish;
 - (void)cancel;
 @end
@@ -51,8 +52,8 @@ int main(int argc, const char* argv[]) {
         // logs owned configuration fields, never SDK text or frame contents.
         NSDictionary* values = [config[@"options"] isKindOfClass:NSDictionary.class] ? config[@"options"] : @{};
         NSString* settings = [NSString stringWithFormat:
-            @"worker.config output=%@ quality=%@ container=%@ profile=%@ inputGamut=%@ inputTransfer=%@ inputMatrix=%@ gamut=%@ transfer=%@ peak=%@ cmu=%@ multiPass=%@ bFrames=%@",
-            [config[@"output"] lastPathComponent], config[@"quality"], config[@"container"], values[@"dolbyVisionProfile"], values[@"inputColorGamut"],
+            @"worker.config output=%@ quality=%@ container=%@ profile=%@ includeGenerated=%@ inputGamut=%@ inputTransfer=%@ inputMatrix=%@ gamut=%@ transfer=%@ peak=%@ cmu=%@ multiPass=%@ bFrames=%@",
+            [config[@"output"] lastPathComponent], config[@"quality"], config[@"container"], values[@"dolbyVisionProfile"], values[@"includeGeneratedDolbyVisionMetadata"], values[@"inputColorGamut"],
             values[@"inputColorTransfer"], values[@"amaPacked422Matrix"], values[@"colorGamut"], values[@"colorTransfer"], values[@"colorPeakNits"],
             values[@"cmuMasteringNits"], values[@"multiPass"], values[@"bFrames"]];
         ama_worker::trace("%s", settings.UTF8String);
@@ -80,6 +81,9 @@ int main(int argc, const char* argv[]) {
                 else if (request.command == ama_worker::ProRes && request.strideOrCodec < 6) {
                     NSArray* names = @[@"proxy", @"422lt", @"422", @"422hq", @"4444", @"4444xq"];
                     result = [session appendProResFrame:frame sourceCodec:names[request.strideOrCodec]];
+                } else if (request.command == ama_worker::TimelineAudio) {
+                    id paths = [NSPropertyListSerialization propertyListWithData:frame options:0 format:nil error:nil];
+                    if ([paths isKindOfClass:NSArray.class]) result = [session setTimelineAudioFiles:paths];
                 } else if (request.command == ama_worker::Finish) { result = [session finish]; finished = result; }
                 ama_worker::trace("framework.return request=%llu success=%d", (unsigned long long)requestIndex, result);
                 if (!reply(responseFD, result, result ? @"" : session.lastErrorMessage) || !result || finished) break;

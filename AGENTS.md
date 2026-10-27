@@ -106,3 +106,21 @@ for the current supported scope and remaining acceptance gaps.
 - Publish reviewed source/configuration, usage documentation and allowlisted
   runtime products only. Keep user media, diagnostics, measurements, source
   snapshots, SDK payload and detailed research records local.
+
+## Current container and audio implementation
+
+- The Framework owns native Matroska indexing and packet muxing. H.264, HEVC,
+  AV1 and the existing Dolby Vision profiles are supported for MKV. Reading
+  selects primary video/audio and omits unselected tracks, subtitles and attachments.
+- MOV/MP4/MKV preserve source and containerized external audio packets and
+  sample descriptions without requiring a registered decoder. Do not assume an
+  input audio codec or silently convert it to PCM or AAC. MXF retains its own
+  existing audio behavior. Preserve opaque codec configuration and track references.
+- AMA receives host-rendered audio separately from pictures. Bounce Mix combines
+  delivered left/right sample words losslessly; Direct Out retains host track order.
+  Host render-format negotiation is not an assertion about source-file codecs.
+- The CLI can use the native Hybrid MOV path for eligible single-source jobs.
+  Audio, timed metadata, unsupported options and Matroska input use the ordinary
+  encoder path. Hybrid checkpoints and media payloads remain on the output volume.
+- Keep local SDK payload, user media, research records and build logs out of Git.
+  The public runtime bundle and deterministic SDK-free tests may be published.

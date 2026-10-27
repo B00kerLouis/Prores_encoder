@@ -44,6 +44,7 @@ const char* ContainerName(ContainerChoice value) {
         case ContainerChoice::MP4: return "MP4";
         case ContainerChoice::MXFOP1a: return "MXF OP-1a";
         case ContainerChoice::MXFOPAtom: return "MXF OP-Atom";
+        case ContainerChoice::MKV: return "MKV";
     }
     return "unknown container";
 }
@@ -182,8 +183,8 @@ Status ExportSession::validateUnlocked() {
         return Status::InvalidState;
     }
 
-    if (container_ == ContainerChoice::MP4 && !isCompressedCodecUnlocked()) {
-        failureReason_ = "MP4 output supports H.264, HEVC, or AV1.";
+    if ((container_ == ContainerChoice::MP4 || container_ == ContainerChoice::MKV) && !isCompressedCodecUnlocked()) {
+        failureReason_ = std::string(ContainerName(container_)) + " output supports H.264, HEVC, or AV1.";
         phase_ = Phase::Configured;
         return Status::InvalidOption;
     }
@@ -562,6 +563,18 @@ int ExportSession::runContractSelfCheck() {
         session.setOutputPath("/tmp/prores-ama-contract.mp4");
         session.setCodec(CodecChoice::ProRes422HQ);
         session.setContainer(ContainerChoice::MP4);
+        expect(session.validate() == Status::InvalidOption);
+    }
+    for (const auto codec : {CodecChoice::H264, CodecChoice::HEVC, CodecChoice::AV1}) {
+        ExportSession session;
+        session.setOutputPath("/tmp/prores-ama-contract.mkv");
+        session.setContainer(ContainerChoice::MKV);
+        session.setCodec(codec);
+        expect(session.validate() == Status::Ok);
+    }
+    {
+        ExportSession session;
+        session.setContainer(ContainerChoice::MKV);
         expect(session.validate() == Status::InvalidOption);
     }
     {

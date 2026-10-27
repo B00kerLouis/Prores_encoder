@@ -281,6 +281,8 @@ typedef unsigned int swift_uint4  __attribute__((__ext_vector_type__(4)));
 #if __has_warning("-Watimport-in-framework-header")
 #pragma clang diagnostic ignored "-Watimport-in-framework-header"
 #endif
+@import AVFoundation;
+@import Foundation;
 @import ObjectiveC;
 #endif
 
@@ -304,6 +306,15 @@ typedef unsigned int swift_uint4  __attribute__((__ext_vector_type__(4)));
 
 #if defined(__OBJC__)
 
+@class AVAssetResourceLoader;
+@class AVAssetResourceLoadingRequest;
+SWIFT_CLASS("_TtC22ProResEncoderFramework19MatroskaAssetSource")
+@interface MatroskaAssetSource : NSObject <AVAssetResourceLoaderDelegate>
+- (BOOL)resourceLoader:(AVAssetResourceLoader * _Nonnull)loader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest * _Nonnull)request SWIFT_WARN_UNUSED_RESULT;
+- (nonnull instancetype)init SWIFT_UNAVAILABLE;
++ (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
+@end
+
 @class NSString;
 @class NSURL;
 @class NSDictionary;
@@ -325,6 +336,8 @@ SWIFT_CLASS_NAMED("ProResFrameStreamSession")
 /// Media Composer can deliver a rendered sequence as encoded ProRes frames.
 /// Mux those frames without another encode, then use the existing encoder API.
 - (BOOL)appendProResFrame:(NSData * _Nonnull)frame sourceCodec:(NSString * _Nonnull)sourceCodec SWIFT_WARN_UNUSED_RESULT;
+/// Called with closed CAF files written from the host’s actual PCM samples.
+- (BOOL)setTimelineAudioFiles:(NSArray<NSString *> * _Nonnull)paths SWIFT_WARN_UNUSED_RESULT;
 - (BOOL)finish SWIFT_WARN_UNUSED_RESULT;
 - (void)cancel;
 - (nonnull instancetype)init SWIFT_UNAVAILABLE;

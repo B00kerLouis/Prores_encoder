@@ -34,7 +34,7 @@ import ProResEncoderFramework
         }
         let session = ProResFrameStreamSession(outputURL: URL(fileURLWithPath: a[4]),
             width: width, height: height, fpsNumerator: numerator, fpsDenominator: denominator,
-            quality: av1 ? "av1" : "hevc", containerExtension: "mp4", bitrateMbps: 25,
+            quality: av1 ? "av1" : "hevc", containerExtension: URL(fileURLWithPath: a[4]).pathExtension, bitrateMbps: 25,
             includeDolbyVision: true, advancedOptions: options as NSDictionary)
         // Packed Cb/Y0/Cr/Y1 10.6 with neutral ramp, white, and known primaries.
         var frame = Data(count: width * height * 4)

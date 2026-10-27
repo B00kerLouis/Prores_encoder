@@ -1006,6 +1006,8 @@
 					CoreFoundation,
 					"-framework",
 					CoreServices,
+					"-framework",
+					AudioToolbox,
 				);
 			};
 			name = Debug;
@@ -1066,6 +1068,8 @@
 					CoreFoundation,
 					"-framework",
 					CoreServices,
+					"-framework",
+					AudioToolbox,
 				);
 			};
 			name = Release;

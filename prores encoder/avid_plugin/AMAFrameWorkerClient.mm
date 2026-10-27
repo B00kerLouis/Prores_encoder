@@ -157,6 +157,12 @@
     if (index == NSNotFound) { [self setFailure:@"The AMA source ProRes codec is invalid."]; return NO; }
     return [self sendBytes:frame.bytes size:frame.length command:ama_worker::ProRes argument:(std::uint32_t)index];
 }
+- (BOOL)setTimelineAudioFiles:(NSArray*)paths {
+    NSError* error = nil;
+    NSData* plist = [NSPropertyListSerialization dataWithPropertyList:paths format:NSPropertyListBinaryFormat_v1_0 options:0 error:&error];
+    if (!plist) { [self setFailure:error.localizedDescription]; return NO; }
+    return [self sendBytes:plist.bytes size:plist.length command:ama_worker::TimelineAudio argument:0];
+}
 - (BOOL)finish {
     std::lock_guard<std::mutex> lock(_rpc);
     if (self.lastErrorMessage.length) return NO;

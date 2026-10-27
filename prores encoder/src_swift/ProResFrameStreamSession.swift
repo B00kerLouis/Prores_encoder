@@ -13,6 +13,9 @@ private final class EncodeResult: @unchecked Sendable {
 @objc(ProResFrameStreamSession)
 public final class ProResFrameStreamSession: NSObject, @unchecked Sendable {
     private let outputURL: URL
+    private let finalOutputURL: URL
+    private let matroskaOutput: Bool
+    private var timelineAudioURLs: [URL] = []
     private let width: Int
     private let height: Int
     private let fpsNumerator: Int32
@@ -88,7 +91,12 @@ public final class ProResFrameStreamSession: NSObject, @unchecked Sendable {
         includeDolbyVision: Bool,
         advancedOptions: NSDictionary
     ) {
-        self.outputURL = outputURL
+        self.finalOutputURL = outputURL
+        self.matroskaOutput = containerExtension.lowercased() == "mkv"
+        let needsPackaging = (advancedOptions["amaHostAudioEnabled"] as? Bool == true) || containerExtension.lowercased() == "mkv"
+        self.outputURL = needsPackaging
+            ? outputURL.deletingLastPathComponent().appendingPathComponent(".ama-video-\(UUID().uuidString).\(containerExtension.lowercased() == "mkv" ? "mov" : outputURL.pathExtension)")
+            : outputURL
         self.width = width
         self.height = height
         self.fpsNumerator = Int32(max(fpsNumerator, 1))
@@ -327,7 +335,56 @@ public final class ProResFrameStreamSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Called with closed CAF files written from the host's actual PCM samples.
+    @objc public func setTimelineAudioFiles(_ paths: [String]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, paths.count <= 64,
+              advancedOptions["amaHostAudioEnabled"] as? Bool == true else {
+            return fail("Timeline audio was not negotiated for this export.")
+        }
+        timelineAudioURLs = paths.map { URL(fileURLWithPath: $0) }
+        return true
+    }
+
     @objc public func finish() -> Bool {
+        guard finishVideo() else { return false }
+        guard outputURL != finalOutputURL else { return true }
+        let result = EncodeResult()
+        let videoURL = outputURL, destination = finalOutputURL, audio = timelineAudioURLs, mkv = matroskaOutput
+        Task.detached { [self] in
+            do {
+                try await AMATimelineAudio.append(to: videoURL, audioURLs: audio,
+                    interleaveStereo: advancedOptions["amaBounceMix"] as? Bool == true,
+                    expectedDuration: CMTime(value: frameIndex * Int64(fpsDenominator), timescale: fpsNumerator),
+                    cancelled: { [weak self] in self?.isCancellationRequested ?? true })
+                guard !isCancellationRequested else { throw CancellationError() }
+                let options = try makeEncodeOptions()
+                let profile = options.dolbyVisionProfile.flatMap { DolbyVisionHEVCProfile(argument: $0.rawValue) }
+                let raw = EncodedVideoRawOutput.outputURLs(for: videoURL, quality: quality, profile: profile)
+                let targets = EncodedVideoRawOutput.outputURLs(for: destination, quality: quality, profile: profile)
+                let additional = options.outputVideoRaw ? Array(zip(raw, targets)).map { (working: $0.0, final: $0.1) } : []
+                if mkv {
+                    try await MatroskaMuxer.write(movieURL: videoURL, outputURL: destination, additionalFiles: additional,
+                        cancellationRequested: { [weak self] in self?.isCancellationRequested ?? true })
+                } else {
+                    let transaction = DirectOutputTransaction(finalURL: destination)
+                    try DirectOutputTransaction.installByRename(from: videoURL, to: transaction.workingURL)
+                    try transaction.commit(additionalFiles: additional)
+                }
+            } catch { result.error = error }
+            result.semaphore.signal()
+        }
+        result.semaphore.wait()
+        try? FileManager.default.removeItem(at: videoURL)
+        if let error = result.error { return fail(error.localizedDescription) }
+        return true
+    }
+
+    deinit {
+        if outputURL != finalOutputURL { try? FileManager.default.removeItem(at: outputURL) }
+    }
+
+    private func finishVideo() -> Bool {
         lock.lock()
         let frames = frameIndex
         let carrier = carrierURL

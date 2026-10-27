@@ -40,8 +40,8 @@ encoder defaults and decoder selection are preserved.
 | H.264 Dolby Vision | Rejected by the existing framework validation. |
 | Color | Shared range/geometry/transfer/primaries GPU contracts cover the active path. An explicit rendered-input declaration is required; GetImageFormat is a buffer request. DCI-P3/ST2084 project input has not been validated. |
 | Bitrate and codec controls | AMA numeric bitrate and tri-state multi-pass/B-frame controls map to existing single-file framework options. AV1 normalizes unsupported tri-state controls to encoder default. |
-| Containers | MOV/MP4 compressed export paths retain framework restrictions. MP4 rejects ProRes; MXF rejects H.264/HEVC/AV1. |
-| Audio | External-file options are mapped. Native host PCM/AAC packet delivery has not been accepted. |
+| Containers | MOV/MP4/MKV compressed output; MKV supports H.264/HEVC/AV1 and the seven existing Dolby Vision profiles. MP4/MKV reject ProRes; MXF rejects H.264/HEVC/AV1. Native MKV readers omit subtitles, attachments and additional tracks after selecting primary video/audio. |
+| Audio | Native container indexing preserves original sound sample entries and packets for MOV/MP4/MKV, including codecs unavailable to AVFoundation. Containerized AC-4/AV3A/MPEG-H source and external `-aa` tracks passed full payload/configuration hash comparisons. A complete MC UHD/24 P8.4 export retained all 2234 pictures and 4,468,000 PCM samples per delivered channel with Delete source audio Off. Bounce Mix interleaves the host's L/R sample words without encoding; Direct Out retains delivered track order. Host-encoded AAC remains separate acceptance work. |
 | Timecode and AAF | Standalone forced timecode/AAF paths exist. Nonzero host timecode readback and host sequence mapping remain unverified. |
 | External XML and LUT | Controls are mapped; native host acceptance remains unverified. |
 | Progress and cancellation | Normal completion and cancellation are supported. MC's estimate can remain unchanged during carrier replay/final encoding. |
@@ -73,3 +73,26 @@ the retained older mapper and is not validation of the active shared path.
 
 Detailed media, logs, measurements, source snapshots and research records remain
 local and are not included in GitHub source or runtime packages.
+
+## Container and audio regressions
+
+`Tests/ContainerIO/ContainerIOChecks.swift` exercises the public encoder and
+frame facade for MKV, opaque external audio, exact PCM sample counts and
+cancellation. `NativePacketChecks.swift` checks complete sound sample entries
+and audio payload hashes without loading an audio decoder. Compile that helper
+with `Matroska.swift`, `MatroskaAsset.swift`, `AMATimelineAudio.swift` and
+`NativeContainerAudio.swift`. ProfileMatrixCheckpoints accepts `.mkv` outputs.
+
+Seven short MKV Dolby fixtures have independent Dolby Bitstream Verifier
+coverage: P7.6 at UHD/24, other profiles at 30000/1001. These are container and
+bitstream regressions, separate from full-duration Media Composer acceptance.
+The native reader also restores the rational frame clock of declared CFR MKV
+material rather than accumulating rounded Matroska timestamps.
+
+The final native MKV P8.4/UHD24 export completed all 2234 pictures/RPUs and a
+48 kHz, 24-bit little-endian stereo stream with 4,468,000 sample frames. The
+standard decoder's PCM output was byte-identical to the accepted MOV audio
+(26,808,000 bytes). Its complete HEVC elementary stream was also byte-identical
+to the previously decoded MOV reference; Dolby verification reported zero errors.
+Legacy QuickTime PCM precision/endianness and native Matroska PCM mapping are
+covered by integer big-endian and float32/float64 decoded-word regressions.

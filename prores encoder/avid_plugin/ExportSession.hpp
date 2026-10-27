@@ -29,7 +29,8 @@ enum class ContainerChoice : std::uint32_t {
     MOV = 0,
     MP4 = 1,
     MXFOP1a = 2,
-    MXFOPAtom = 3
+    MXFOPAtom = 3,
+    MKV = 4
 };
 
 enum class DolbyChoice : std::uint32_t {

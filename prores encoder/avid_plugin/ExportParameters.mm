@@ -1,6 +1,7 @@
 #include "ExportParameters.h"
 
 #import <Foundation/Foundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 
 #include "HostAudioRouting.h"
 #include "HostExportContext.h"
@@ -39,6 +40,7 @@
 - (BOOL)appendRGBAHalfFrame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendPacked422Frame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendProResFrame:(NSData*)frame sourceCodec:(NSString*)sourceCodec;
+- (BOOL)setTimelineAudioFiles:(NSArray*)paths;
 - (BOOL)finish;
 - (void)cancel;
 @end
@@ -365,8 +367,8 @@ ACFRESULT AddCodecVisibilityRules(AMA::IParametersWriter* writer, IACFComponentF
 }
 
 ACFRESULT AddContainerVisibilityRules(AMA::IParametersWriter* writer, IACFComponentFactory* factory) {
-    for (acfUInt32 container = 0; container <= static_cast<acfUInt32>(ContainerChoice::MXFOPAtom); ++container) {
-        const bool mxf = container >= static_cast<acfUInt32>(ContainerChoice::MXFOP1a);
+    for (acfUInt32 container = 0; container <= static_cast<acfUInt32>(ContainerChoice::MKV); ++container) {
+        const bool mxf = container == static_cast<acfUInt32>(ContainerChoice::MXFOP1a) || container == static_cast<acfUInt32>(ContainerChoice::MXFOPAtom);
         const bool mov = container == static_cast<acfUInt32>(ContainerChoice::MOV);
         const struct { const acfUID& target; bool visible; } rules[] = {
             {ProResEncoderAMA_StartTimecodeParameterID, mov},
@@ -492,7 +494,7 @@ ACFRESULT BuildParameterXML(IACFComponentFactory* factory, const ExportSession& 
         "ProRes Proxy", "ProRes 422 LT", "ProRes 422", "ProRes 422 HQ",
         "ProRes 4444", "ProRes 4444 XQ", "HEVC", "AV1", "H.264"
     };
-    const char* containers[] = {"MOV", "MP4", "MXF OP-1a", "MXF OP-Atom"};
+    const char* containers[] = {"MOV", "MP4", "MXF OP-1a", "MXF OP-Atom", "MKV"};
     const char* dolby[] = {"Off", "Generate from rendered frames", "External XML"};
     const char* audio[] = {"Bounce Mix", "Bounce Multitrack"};
     const AdvancedOptions advanced = session.advancedOptions();
@@ -514,7 +516,7 @@ ACFRESULT BuildParameterXML(IACFComponentFactory* factory, const ExportSession& 
     }
     if (includeInfos && ACFSUCCEEDED(result)) {
         stage = "Container";
-        result = AddDiscreteParameter(writer, ProResEncoderAMA_ContainerParameterID, "Container", "Output container", containers, 4, static_cast<acfUInt32>(session.container()));
+        result = AddDiscreteParameter(writer, ProResEncoderAMA_ContainerParameterID, "Container", "Output container", containers, 5, static_cast<acfUInt32>(session.container()));
     }
     if (includeInfos && ACFSUCCEEDED(result)) {
         stage = "Container visibility rules";
@@ -710,6 +712,76 @@ struct FrameBridge {
     std::atomic<bool> cancelled{false};
     id<ProResFrameStreamSessionAPI> stream = nil;
     std::uint64_t deliveredFrames = 0;
+    std::uint32_t audioSampleRate = 0;
+    std::uint32_t audioBitDepth = 0;
+    struct AudioTrack {
+        AudioFileID file = nullptr;
+        std::string path;
+        std::uint32_t channels = 0;
+        std::uint64_t endSample = 0;
+    };
+    std::map<std::uint32_t, AudioTrack> audioTracks;
+
+    void clearAudio() {
+        for (auto& item : audioTracks) {
+            if (item.second.file) AudioFileClose(item.second.file);
+            if (!item.second.path.empty()) unlink(item.second.path.c_str());
+        }
+        audioTracks.clear();
+    }
+
+    ACFRESULT appendAudio(const std::shared_ptr<ExportSession>& session, std::uint32_t track,
+        std::uint64_t sample, std::uint64_t count, const std::uint8_t* bytes, std::size_t size) {
+        std::lock_guard<std::mutex> operation(processing);
+        if (cancelled.load()) return ACF_E_ABORT;
+        const auto options = session->advancedOptions();
+        if (options.deleteSourceAudio || options.replaceSourceAudio) return ACF_OK;
+        const auto reject = [&](const char* message) { session->failWrite(message); return ACF_E_FAIL; };
+        const std::uint32_t word = audioBitDepth / 8;
+        if (!bytes || !size || !count || !audioSampleRate || !word || count > UINT64_MAX / word ||
+            size % (count * word) != 0 || size / (count * word) == 0 || size / (count * word) > 64 || track > 64)
+            return reject("The host PCM buffer does not match the negotiated rate, bit depth or sample range.");
+        const auto channels = static_cast<std::uint32_t>(size / (count * word));
+        auto& audio = audioTracks[track];
+        if (!audio.file) {
+            audio.channels = channels;
+            NSString* directory = [[NSString stringWithUTF8String:session->outputPath().c_str()] stringByDeletingLastPathComponent];
+            NSString* path = [directory stringByAppendingPathComponent:[NSString stringWithFormat:@".ama-host-audio-%@-%u.caf", NSUUID.UUID.UUIDString, track]];
+            audio.path = path.UTF8String;
+            AudioStreamBasicDescription format{};
+            format.mSampleRate = audioSampleRate;
+            format.mFormatID = kAudioFormatLinearPCM;
+            format.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            format.mBytesPerPacket = format.mBytesPerFrame = channels * word;
+            format.mFramesPerPacket = 1;
+            format.mChannelsPerFrame = channels;
+            format.mBitsPerChannel = audioBitDepth;
+            if (AudioFileCreateWithURL((CFURLRef)[NSURL fileURLWithPath:path], kAudioFileCAFType, &format, 0, &audio.file) != noErr)
+                return reject("The host PCM transaction could not be created on the output volume.");
+            ama_worker::trace("audio.open track=%u rate=%u bits=%u channels=%u", track, audioSampleRate, audioBitDepth, channels);
+        }
+        if (channels != audio.channels || sample < audio.endSample || sample > INT64_MAX / (channels * word) ||
+            count > UINT64_MAX - sample || size > UINT32_MAX)
+            return reject("The host changed PCM layout or supplied overlapping audio ranges.");
+        // Missing sample ranges represent timeline silence, never concatenation.
+        std::uint8_t zeros[65536]{};
+        auto offset = audio.endSample * channels * word;
+        const auto target = sample * channels * word;
+        while (offset < target) {
+            if (cancelled.load()) return ACF_E_ABORT;
+            UInt32 chunk = static_cast<UInt32>(std::min<std::uint64_t>(sizeof(zeros), target - offset));
+            if (AudioFileWriteBytes(audio.file, false, offset, &chunk, zeros) != noErr || !chunk)
+                return reject("The host PCM silence range could not be written.");
+            offset += chunk;
+        }
+        UInt32 written = static_cast<UInt32>(size);
+        if (AudioFileWriteBytes(audio.file, false, target, &written, bytes) != noErr || written != size)
+            return reject("The host PCM sample range could not be written.");
+        audio.endSample = sample + count;
+        ama_worker::trace("audio.append track=%u sample=%llu count=%llu bytes=%zu", track,
+            (unsigned long long)sample, (unsigned long long)count, size);
+        return ACF_OK;
+    }
 
     ~FrameBridge() {
         cancel();
@@ -805,6 +877,7 @@ struct FrameBridge {
                 case ContainerChoice::MP4: extension = "mp4"; break;
                 case ContainerChoice::MXFOP1a: extension = "op1a"; break;
                 case ContainerChoice::MXFOPAtom: extension = "opatom"; break;
+                case ContainerChoice::MKV: extension = "mkv"; break;
             }
             const AdvancedOptions advanced = session->advancedOptions();
             NSMutableDictionary* options = [NSMutableDictionary dictionary];
@@ -824,6 +897,9 @@ struct FrameBridge {
             addText(@"extraAudioPath", advanced.extraAudioPath);
             options[@"replaceSourceAudio"] = [NSNumber numberWithBool:advanced.replaceSourceAudio];
             options[@"deleteSourceAudio"] = [NSNumber numberWithBool:advanced.deleteSourceAudio];
+            options[@"amaHostAudioEnabled"] = @(!advanced.deleteSourceAudio && !advanced.replaceSourceAudio &&
+                (session->container() == ContainerChoice::MOV || session->container() == ContainerChoice::MP4 || session->container() == ContainerChoice::MKV));
+            options[@"amaBounceMix"] = @(session->audioRoute() == AudioRouteChoice::BounceMix);
             addText(@"forcedStartTimecode", advanced.forcedStartTimecode);
             if (session->dolby() == DolbyChoice::ExternalXML) {
                 addText(@"dolbyVisionXMLPath", advanced.dolbyVisionXMLPath);
@@ -883,7 +959,7 @@ struct FrameBridge {
                 fpsDenominator = 1;
             }
             NSString* outputPath = [NSString stringWithUTF8String:session->outputPath().c_str()];
-            if ((session->container() == ContainerChoice::MOV || session->container() == ContainerChoice::MP4) &&
+            if ((session->container() == ContainerChoice::MOV || session->container() == ContainerChoice::MP4 || session->container() == ContainerChoice::MKV) &&
                 outputPath.pathExtension.length == 0) {
                 outputPath = [outputPath stringByAppendingPathExtension:[NSString stringWithUTF8String:extension]];
             }
@@ -932,11 +1008,24 @@ struct FrameBridge {
             session->failWrite("No video frames were received.");
             return ACF_E_FAIL;
         }
+        NSMutableArray* audioFiles = [NSMutableArray array];
+        for (auto& item : audioTracks) {
+            if (item.second.file) {
+                const OSStatus status = AudioFileClose(item.second.file);
+                item.second.file = nullptr;
+                if (status != noErr) { session->failWrite("The host PCM transaction did not close."); return ACF_E_FAIL; }
+            }
+            [audioFiles addObject:[NSString stringWithUTF8String:item.second.path.c_str()]];
+        }
+        if (audioFiles.count && ![stream setTimelineAudioFiles:audioFiles]) {
+            session->failWrite(stream.lastErrorMessage.UTF8String ?: "Host PCM delivery failed."); return ACF_E_FAIL;
+        }
         if (![stream finish]) {
             const std::string message = stream.lastErrorMessage.UTF8String ? stream.lastErrorMessage.UTF8String : "Encoding failed.";
             session->failWrite(message);
             return ACF_E_FAIL;
         }
+        clearAudio();
         ama_worker::trace("bridge.finish.return object=%p success=1", this);
         return ACF_OK;
     }
@@ -956,6 +1045,7 @@ struct FrameBridge {
             [stream release];
             stream = nil;
         }
+        clearAudio();
     }
 };
 
@@ -1088,6 +1178,8 @@ ACFRESULT WriterJob::beginClip(acfUInt32 index, AMA::ISampleConsumer** consumer)
             @autoreleasepool {
                 return bridge->appendBGRA(session, bytes, size);
             }
+        }, [session, bridge](std::uint32_t track, std::uint64_t sample, std::uint64_t count, const std::uint8_t* bytes, std::size_t size) {
+            @autoreleasepool { return bridge->appendAudio(session, track, sample, count, bytes, size); }
         }, consumer);
         TraceHost("BeginClip consumer result=" + std::to_string(static_cast<unsigned int>(result)));
         return result;
@@ -1242,6 +1334,7 @@ ACFRESULT WriterJob::getMediaWriterParameter(const acfUID& id, IACFValue** param
             return ACF_E_PARAMETERNOTAVAILABLE;
         }
         const acfSInt32 sampleRate = projectRate.numerator / projectRate.denominator;
+        frameBridge_->audioSampleRate = sampleRate;
         const ACFRESULT result = MakeTypedValue(
             factory_, ACFTypeID_SInt32, &sampleRate, sizeof(sampleRate), parameter);
         TraceHost("GetMediaWriterParameter audio-rate=" + std::to_string(sampleRate) +
@@ -1250,6 +1343,47 @@ ACFRESULT WriterJob::getMediaWriterParameter(const acfUID& id, IACFValue** param
             session_->addObservation("projectAudioRate=" + std::to_string(sampleRate));
         }
         return result;
+    }
+    if (id == AMA::AMA_MC_ExportVolumeAudioBitDepth_ID) {
+        AMA::IHostSettings* settings = nullptr;
+        if (AcquireHostSettings(host_, &settings) != ACF_OK || !settings) return ACF_E_PARAMETERNOTAVAILABLE;
+        acfUInt32 bits = 0;
+        for (const auto scope : {AMA::IHostSettings::kProjectScope, AMA::IHostSettings::kUserScope, AMA::IHostSettings::kGlobalScope}) {
+            if (settings->GetHostSettingUInt32(id, scope, &bits) == ACF_OK && bits > 0) break;
+            acfSInt32 signedBits = 0;
+            if (settings->GetHostSettingSInt32(id, scope, &signedBits) == ACF_OK && signedBits > 0) { bits = signedBits; break; }
+        }
+        settings->Release();
+        const bool suppliedByHost = bits == 16 || bits == 24 || bits == 32;
+        if (!suppliedByHost) {
+            // Writeback requires the receiver to request a rendered PCM layout
+            // before any sequence metadata arrives. MC's integer render export
+            // supports 16/24 bits; request its full precision. This is a wire
+            // format request, never a declaration about source-file codecs or
+            // source bit depth. File workflows bypass this host renderer and
+            // retain original compressed audio, including unknown codecs.
+            bits = 24;
+        }
+        frameBridge_->audioBitDepth = bits;
+        ama_worker::trace("audio.negotiate bits=%u source=%s", bits,
+            suppliedByHost ? "host-setting" : "writer-render-delivery-request");
+        return MakeTypedValue(factory_, ACFTypeID_SInt32, &bits, sizeof(bits), parameter);
+    }
+    if (id == AMA::AMA_MC_ExportVolumeAudioMixFormat_ID) {
+        const acfSInt32 mix = session_->audioRoute() == AudioRouteChoice::BounceMix
+            ? AMA::AMA_MC_ExportVolumeAudioMixFormat_Stereo : AMA::AMA_MC_ExportVolumeAudioMixFormat_DirectOut;
+        return MakeTypedValue(factory_, ACFTypeID_SInt32, &mix, sizeof(mix), parameter);
+    }
+    if (id == AMA::AMA_MC_ExportVolumeAudioFileArrangement_ID) {
+        const char* arrangement = session_->audioRoute() == AudioRouteChoice::BounceMix ? "two channel" : "single channel";
+        return MakeTypedValue(factory_, ACFTypeID_UTF8String, arrangement, static_cast<acfUInt32>(std::strlen(arrangement) + 1), parameter);
+    }
+    if (id == AMA::AMA_MC_ExportVolumeAudioEssenceCoding_ID) {
+        // SMPTE ST 382 uncompressed little-endian PCM, identical to the
+        // project's existing MXF PCM coding label (UL registry version 0x0a).
+        const acfUID coding = {0x04020201, 0x0100, 0,
+            {0x06, 0x0e, 0x2b, 0x34, 0x04, 0x01, 0x01, 0x0a}};
+        return MakeTypedValue(factory_, ACFTypeID_UID, &coding, sizeof(coding), parameter);
     }
     if (id == AMA::AMA_MC_ExportVolumeVideoSampleRate_ID) {
         AMA::IHostSettings* settings = nullptr;
@@ -1386,7 +1520,7 @@ ACFRESULT WriterJob::setValues(const IACFString* xml) {
         if (ReadUInt32Parameter(document, ProResEncoderAMA_CodecParameterID, &value) && value <= static_cast<std::uint32_t>(CodecChoice::H264)) {
             codec = static_cast<CodecChoice>(value);
         }
-        if (ReadUInt32Parameter(document, ProResEncoderAMA_ContainerParameterID, &value) && value <= static_cast<std::uint32_t>(ContainerChoice::MXFOPAtom)) {
+        if (ReadUInt32Parameter(document, ProResEncoderAMA_ContainerParameterID, &value) && value <= static_cast<std::uint32_t>(ContainerChoice::MKV)) {
             container = static_cast<ContainerChoice>(value);
         }
         if (ReadUInt32Parameter(document, ProResEncoderAMA_DolbyParameterID, &value) && value <= static_cast<std::uint32_t>(DolbyChoice::ExternalXML)) {
@@ -1480,7 +1614,7 @@ ACFRESULT WriterJob::setValues(const IACFString* xml) {
         if (container != ContainerChoice::MOV) {
             advanced.forcedStartTimecode.clear();
         }
-        if (container == ContainerChoice::MOV || container == ContainerChoice::MP4) {
+        if (container == ContainerChoice::MOV || container == ContainerChoice::MP4 || container == ContainerChoice::MKV) {
             advanced.aafMode = 0;
         } else {
             advanced.includeGeneratedDolbyVisionMetadata = false;

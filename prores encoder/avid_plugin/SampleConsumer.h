@@ -13,6 +13,8 @@ class ExportSession;
 
 using VideoFrameHandler = std::function<ACFRESULT(const std::uint8_t* bytes, std::size_t size)>;
 
+using AudioSampleHandler = std::function<ACFRESULT(std::uint32_t track, std::uint64_t sample, std::uint64_t count, const std::uint8_t* bytes, std::size_t size)>;
+
 // One contract shared by the writer and its per-clip sample consumer.
 ACFRESULT GetRenderedImageFormat(
     const std::shared_ptr<ExportSession>& session,
@@ -28,6 +30,7 @@ ACFRESULT GetRenderedImageFormat(
 ACFRESULT CreateSampleConsumer(
     const std::shared_ptr<ExportSession>& session,
     VideoFrameHandler videoFrames,
+    AudioSampleHandler audioSamples,
     AMA::ISampleConsumer** consumer);
 }
 #endif

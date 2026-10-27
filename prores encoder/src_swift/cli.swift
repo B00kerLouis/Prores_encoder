@@ -76,6 +76,11 @@ enum ProResEncoderCLI {
         var inputXMLPath    = ""
         var inputAAFPath    = ""
         var recoveryMoviePath = ""
+        var hybridMOV = false
+        var ordinaryMOV = false
+        var hybridResume = false
+        var vtWorkers = 0
+        var hybridFragmentFrames = 0
         var outputPath      = ""
         var quality         = "422hq"
         var extraAudioPath  = ""
@@ -141,6 +146,27 @@ enum ProResEncoderCLI {
                 inputAAFPath = requireValue(for: args[idx])
             case "--resume-recovery":
                 recoveryMoviePath = requireValue(for: args[idx])
+            case "--hybrid-mov":
+                hybridMOV = true
+            case "--no-hybrid-mov":
+                ordinaryMOV = true
+            case "--hybrid-resume":
+                hybridMOV = true
+                hybridResume = true
+            case "--vt-workers":
+                let raw = requireValue(for: args[idx])
+                guard let value = Int(raw), (0...8).contains(value) else {
+                    print("[Error] --vt-workers accepts 0 (automatic) through 8."); exit(1)
+                }
+                hybridMOV = true
+                vtWorkers = value
+            case "--hybrid-fragment-frames":
+                let raw = requireValue(for: args[idx])
+                guard let value = Int(raw), value == 0 || (24...2400).contains(value) else {
+                    print("[Error] --hybrid-fragment-frames accepts 0 (automatic) or 24...2400."); exit(1)
+                }
+                hybridMOV = true
+                hybridFragmentFrames = value
             case "-o", "--output":
                 outputPath = requireValue(for: args[idx])
             case "-q", "-quality", "--quality":
@@ -268,13 +294,20 @@ enum ProResEncoderCLI {
         }
 
         if !exportFormatWasExplicitlySet,
-           URL(fileURLWithPath: outputPath).pathExtension.lowercased() == "mp4" {
-            exportFormat = "mp4"
+           ["mp4", "mkv"].contains(URL(fileURLWithPath: outputPath).pathExtension.lowercased()) {
+            exportFormat = URL(fileURLWithPath: outputPath).pathExtension.lowercased()
+        }
+        if ordinaryMOV && hybridMOV {
+            print("[Error] --no-hybrid-mov cannot be combined with Hybrid MOV or --vt-workers options."); exit(1)
+        }
+        if hybridMOV && (inputFilePath.isEmpty || !inputFolderPath.isEmpty
+            || !inputXMLPath.isEmpty || !inputAAFPath.isEmpty || transformMode != nil) {
+            print("[Error] Hybrid MOV requires -i <single file>."); exit(1)
         }
 
-        let validExportFormats: Set<String> = ["mov", "mp4", "op1a", "opatom"]
+        let validExportFormats: Set<String> = ["mov", "mp4", "mkv", "op1a", "opatom"]
         guard validExportFormats.contains(exportFormat) else {
-            print("[Error] Invalid export format: \(exportFormat). Use mov, mp4, op1a, or opatom.")
+            print("[Error] Invalid export format: \(exportFormat). Use mov, mp4, mkv, op1a, or opatom.")
             printUsage()
             exit(1)
         }
@@ -291,7 +324,7 @@ enum ProResEncoderCLI {
             print("[Error] --cmu-include requires --cmu <nits>.")
             exit(1)
         }
-        if cmuInclude && !(exportFormat == "mov" || exportFormat == "mp4") {
+        if cmuInclude && !(exportFormat == "mov" || exportFormat == "mp4" || exportFormat == "mkv") {
             print("[Error] --cmu-include is supported only with MOV or MP4 compressed output.")
             exit(1)
         }
@@ -456,7 +489,7 @@ enum ProResEncoderCLI {
             exit(1)
         }
         if wantsVideoBitrateOptions {
-            guard exportFormat == "mov" || exportFormat == "mp4" else {
+            guard exportFormat == "mov" || exportFormat == "mp4" || exportFormat == "mkv" else {
                 print("[Error] -q \(quality) is supported only with MOV or MP4 output.")
                 exit(1)
             }
@@ -520,7 +553,7 @@ enum ProResEncoderCLI {
             print("[Error] --b-frames on is mutually exclusive with --all-intra.")
             exit(1)
         }
-        if exportFormat == "mp4" && !wantsVideoBitrateOptions && quality != "pass" {
+        if (exportFormat == "mp4" || exportFormat == "mkv") && !wantsVideoBitrateOptions && quality != "pass" {
             print("[Error] MP4 output supports only -q h264, -q hevc, -q av1, or -q pass.")
             exit(1)
         }
@@ -528,7 +561,7 @@ enum ProResEncoderCLI {
             print("[Error] MXF output does not support -q pass; choose a ProRes quality to write valid RDD-36 essence.")
             exit(1)
         }
-        if (exportFormat == "mov" || exportFormat == "mp4") && aafMode != .none {
+        if (exportFormat == "mov" || exportFormat == "mp4" || exportFormat == "mkv") && aafMode != .none {
             print("[Error] AAF (-ea / -ea-all) is only available with MXF output formats (op1a / opatom)."); exit(1)
         }
         if forcedOutputStartTimecode != nil && exportFormat != "mov" {
@@ -536,7 +569,7 @@ enum ProResEncoderCLI {
             exit(1)
         }
         if !dolbyVisionXMLPath.isEmpty {
-            guard exportFormat == "mov" || exportFormat == "mp4" else {
+            guard exportFormat == "mov" || exportFormat == "mp4" || exportFormat == "mkv" else {
                 print("[Error] Dolby Vision export is supported only with MOV or MP4 compressed output; MXF (OP-1A/OP-Atom) is not supported.")
                 exit(1)
             }
@@ -653,17 +686,72 @@ enum ProResEncoderCLI {
         }
 
         // ── Single File Mode ──
+        if hybridMOV && inputFilePath.isEmpty {
+            print("[Error] Hybrid MOV currently requires -i <single file>."); exit(1)
+        }
         if !inputFilePath.isEmpty {
             let inputURL = URL(fileURLWithPath: inputFilePath)
             guard fm.fileExists(atPath: inputURL.path) else {
                 print("[Error] Input file not found: \(inputFilePath)"); exit(1)
             }
-            let decodableSource = await makeDecodableSource(for: inputURL)
+            if !hybridMOV && !ordinaryMOV && config.exportFormat == "mov" {
+                let reason: String?
+                if inputURL.pathExtension.lowercased() == "mkv" {
+                    reason = "Matroska uses the native packet reader"
+                } else if config.quality == "pass" || isAV1Quality(config.quality) {
+                    reason = "\(config.quality) uses its existing encoding/muxing path"
+                } else if !recoveryMoviePath.isEmpty {
+                    reason = "--resume-recovery uses the ordinary recovery writer"
+                } else if extraAudioURL != nil || config.audioReplace {
+                    reason = "external audio uses the ordinary writer"
+                } else if config.dolbyVisionXMLURL != nil || config.outputVideoRaw || config.aafMode != .none {
+                    reason = "external XML, raw video or AAF requires the ordinary writer"
+                } else if config.cmuMasteringNits != nil && !(isHEVCQuality(config.quality) && config.cmuInclude) {
+                    reason = "this CMU/metadata workflow requires the ordinary writer"
+                } else {
+                    reason = await hybridMOVSourceIneligibilityReason(asset: AVURLAsset(url: inputURL),
+                        deleteSourceAudio: config.deleteSourceAudio)
+                }
+                if let reason {
+                    print("[MOV] Using ordinary MOV: \(reason).")
+                } else {
+                    hybridMOV = true
+                    print("[MOV] Hybrid MOV enabled by default; automatic parallelism targets 2 workers.")
+                }
+            }
+            let decodableSource: DecodableSource
+            if hybridMOV {
+                // Recovery identity must refer to the persistent user source,
+                // never a per-process sample-entry-retag copy.
+                decodableSource = DecodableSource(asset: AVURLAsset(url: inputURL),
+                    url: inputURL, retaggedCopyURL: nil)
+            } else {
+                decodableSource = await makeDecodableSource(for: inputURL)
+            }
             let asset = decodableSource.asset
             let baseName = inputURL.deletingPathExtension().lastPathComponent
-            let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+            let movieExtension = config.exportFormat == "mkv" ? "mkv" : (config.exportFormat == "mp4" ? "mp4" : "mov")
+            if hybridMOV {
+                guard config.exportFormat == "mov", recoveryMoviePath.isEmpty, extraAudioURL == nil,
+                      !config.audioReplace, config.dolbyVisionXMLURL == nil,
+                      !config.outputVideoRaw, config.aafMode == .none,
+                      config.quality != "pass", !isAV1Quality(config.quality),
+                      config.cmuMasteringNits == nil || (isHEVCQuality(config.quality) && config.cmuInclude) else {
+                    print("[Error] Hybrid MOV supports single-file VT codecs and generated HEVC Dolby Vision; external audio/XML, raw, AV1, AAF and standalone CMU use the ordinary path.")
+                    exit(1)
+                }
+                let finalOut = isOutFile ? outputURL.deletingPathExtension().appendingPathExtension("mov")
+                    : outputURL.appendingPathComponent("\(baseName).mov")
+                let ok = await encodeHybridMOV(sourceURL: decodableSource.url, outputURL: finalOut,
+                    quality: config.quality, hevcOptions: config.hevcOptions,
+                    colorTransform: config.colorTransform, forcedStartTimecode: config.forcedOutputStartTimecode,
+                    deleteSourceAudio: config.deleteSourceAudio, cmuMasteringNits: config.cmuMasteringNits,
+                    useDolbyVisionCodecTag: config.dvFlag,
+                    requestedWorkers: vtWorkers, fragmentFrames: hybridFragmentFrames, resume: hybridResume)
+                exit(ok ? 0 : 1)
+            }
             if !recoveryMoviePath.isEmpty {
-                guard config.exportFormat == "mov" || config.exportFormat == "mp4" else {
+                guard config.exportFormat == "mov" || config.exportFormat == "mp4" || config.exportFormat == "mkv" else {
                     print("[Error] --resume-recovery supports MOV or MP4 output only.")
                     exit(1)
                 }
@@ -705,7 +793,7 @@ enum ProResEncoderCLI {
                     fpsInfo: await framerateInfo(from: asset),
                     colorTransform: config.colorTransform,
                     useDolbyVisionCodecTag: config.dvFlag,
-                    container: config.exportFormat == "mp4" ? .mp4 : .mov
+                    container: config.exportFormat == "mkv" ? .mkv : (config.exportFormat == "mp4" ? .mp4 : .mov)
                 )
                 exit(success && fileHasContent(finalOut) ? 0 : 1)
             }
@@ -756,14 +844,13 @@ enum ProResEncoderCLI {
                 guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
                     continue
                 }
-                let candidate = AVURLAsset(url: file)
-                if ((try? await candidate.loadTracks(withMediaType: .video)) ?? []).isEmpty == false {
+                if await mediaContainerHasVideo(at: file) {
                     videos.append(file)
                 }
             }
             videos.sort { $0.lastPathComponent < $1.lastPathComponent }
             guard !videos.isEmpty else { print("[Info] No supported video files found."); exit(0) }
-            let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+            let movieExtension = config.exportFormat == "mkv" ? "mkv" : (config.exportFormat == "mp4" ? "mp4" : "mov")
             let destinations = videos.map {
                 outputURL.appendingPathComponent($0.deletingPathExtension().lastPathComponent)
                     .appendingPathExtension(movieExtension).standardizedFileURL.resolvingSymlinksInPath()
@@ -793,7 +880,7 @@ enum ProResEncoderCLI {
             var sequencedAAFClips: [AAFClipInfo] = []
             for file in videos {
                 let baseName = file.deletingPathExtension().lastPathComponent
-                let movieExtension = config.exportFormat == "mp4" ? "mp4" : "mov"
+                let movieExtension = config.exportFormat == "mkv" ? "mkv" : (config.exportFormat == "mp4" ? "mp4" : "mov")
                 let finalOut = outputURL.appendingPathComponent(
                     "\(baseName).\(movieExtension)"
                 )
@@ -1108,7 +1195,7 @@ private func processSingleVideo(
         colorSpace: cs, fpsInfo: fpsI,
             colorTransform: config.colorTransform,
             useDolbyVisionCodecTag: config.dvFlag,
-        container: config.exportFormat == "mp4" ? .mp4 : .mov,
+        container: config.exportFormat == "mkv" ? .mkv : (config.exportFormat == "mp4" ? .mp4 : .mov),
         outputVideoRaw: config.outputVideoRaw,
         progress: progress)
 
@@ -1178,7 +1265,7 @@ private func fileHasContent(_ url: URL) -> Bool {
 
 /// Checks every file produced by the selected container mode before starting work.
 private func encodingOutputExists(for requestedURL: URL, config: CLIConfig) -> Bool {
-    guard config.exportFormat != "mov" && config.exportFormat != "mp4" else {
+    guard config.exportFormat != "mov" && config.exportFormat != "mp4" && config.exportFormat != "mkv" else {
         return fileHasContent(requestedURL)
     }
     let directory = requestedURL.deletingLastPathComponent()
@@ -1454,6 +1541,7 @@ private func printUsage() {
     Output format:
       -ef, --export-format <format>   Export format (default: mov)
         mov             MOV container (default)
+        mkv             Matroska (H.264, HEVC, AV1 and supported Dolby Vision profiles)
         mp4             MP4 container (H.264, HEVC, AV1, or -q pass; also inferred from a .mp4 -o path)
         op1a            MXF OP-1a (direct VT→MXF)
         opatom          MXF OP-Atom (direct VT→MXF)
@@ -1471,6 +1559,11 @@ private func printUsage() {
       -df, --dv-flag                  Use dav1 for valid AV1 Profile 10/10.4 delivery; Profile 5/7.6 use dvh1/dvhe, while Profile 8.1/8.4/10.1 retain hvc1/av01 for dvesverifier Test 100 conformance
       --outupt-video-raw,-ovr         Also write the encoded ProRes, H.264, HEVC, or AV1 elementary stream; with -q hevc -dp 76 writes Profile 7.6 BL/EL .hevc streams
       --resume-recovery <file>         Resume eligible MOV/MP4 recovery media with -i and -o; cannot be combined with CMU, Dolby Vision, raw video, or replacement audio
+      --hybrid-mov                    Force Hybrid MOV (default for eligible single-file VT MOV output)
+      --no-hybrid-mov                 Use the ordinary MOV writer
+      --vt-workers <0...8>             0/omitted: auto target 2, hardware fallback 1; 1/2: manual single/dual; 3...8: advanced
+      --hybrid-fragment-frames <N>     0 = codec recommendation (default); or 24...2400 frames/checkpoint
+      --hybrid-resume                 Verify the saved job and continue; keep -i, -o and encoding options identical
       -aa, --add-audio <audio_file>   Add external audio in MOV mode, or provide replacement audio
       -ar, --audio-replace            Replace source audio with the -aa audio file
       -dsa, --delete-source-audio     Delete source audio first; may be combined with -aa to add only the new audio

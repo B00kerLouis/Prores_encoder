@@ -13,6 +13,7 @@
 - (BOOL)appendRGBAHalfFrame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendPacked422Frame:(NSData*)frame stride:(NSInteger)stride;
 - (BOOL)appendProResFrame:(NSData*)frame sourceCodec:(NSString*)codec;
+- (BOOL)setTimelineAudioFiles:(NSArray*)paths;
 - (BOOL)finish;
 - (void)cancel;
 @end

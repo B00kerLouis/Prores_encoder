@@ -54,6 +54,7 @@ dist/
 *.bin
 BuildFramework/
 TestOutputs/
+Tests/HybridMOV/__pycache__/
 
 # These remain excluded even inside allowlisted Release bundles.
 **/.DS_Store

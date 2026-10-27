@@ -9,6 +9,7 @@ import VideoToolbox
 public enum ProResOutputFormat: String, Sendable {
     case mov
     case mp4
+    case mkv
     case op1a
     case opatom
 }
@@ -267,6 +268,21 @@ public struct ProResLUTColorConversion: Sendable {
     }
 }
 
+/// Opt-in recoverable MOV and independent VideoToolbox compression sessions.
+/// A zero worker count targets two concurrent hardware jobs, falling back to
+/// one when the codec limit or simultaneous hardware-session check requires it.
+public struct ProResHybridMovieOptions: Sendable {
+    public var workers: Int
+    public var framesPerFragment: Int
+    public var resume: Bool
+
+    public init(workers: Int = 0, framesPerFragment: Int = 0, resume: Bool = false) {
+        self.workers = workers
+        self.framesPerFragment = framesPerFragment
+        self.resume = resume
+    }
+}
+
 /// Options shared by single-file, folder, and timeline encoding.
 public struct ProResEncodeOptions: Sendable {
     public var quality: String
@@ -292,6 +308,7 @@ public struct ProResEncodeOptions: Sendable {
     /// Profile 7.6 ignores this and always encodes I/P.
     public var bFrames: Bool?
     public var aafMode: ProResAAFMode
+    public var hybridMovie: ProResHybridMovieOptions?
     // Private frame-facade transport. Public callers retain the file writer's
     // existing default time scales; AMA preserves the supplied rational clock.
     var amaMediaTimeScale: Int32? = nil
@@ -315,7 +332,8 @@ public struct ProResEncodeOptions: Sendable {
         outputVideoRaw: Bool = false,
         multiPass: Bool? = nil,
         bFrames: Bool? = nil,
-        aafMode: ProResAAFMode = .none
+        aafMode: ProResAAFMode = .none,
+        hybridMovie: ProResHybridMovieOptions? = nil
     ) {
         self.quality = quality
         self.extraAudioURL = extraAudioURL
@@ -335,6 +353,7 @@ public struct ProResEncodeOptions: Sendable {
         self.multiPass = multiPass
         self.bFrames = bFrames
         self.aafMode = aafMode
+        self.hybridMovie = hybridMovie
     }
 
     /// Enforces mutual exclusion between direct conversion and LUT burn-in.
@@ -496,12 +515,12 @@ public final class ProResEncoder: Sendable {
         }
         if options.includeGeneratedDolbyVisionMetadata
             && format != .mov
-            && format != .mp4 {
+            && format != .mp4 && format != .mkv {
             throw ProResEncoderError.invalidOption(
                 "includeGeneratedDolbyVisionMetadata is supported only in MOV or MP4 compressed output."
             )
         }
-        if (format == .mov || format == .mp4) && options.aafMode != .none {
+        if (format == .mov || format == .mp4 || format == .mkv) && options.aafMode != .none {
             throw ProResEncoderError.invalidOption(
                 "AAF generation is available only for OP-1a or OP-Atom MXF output."
             )
@@ -560,7 +579,7 @@ public final class ProResEncoder: Sendable {
             options.dolbyVisionXMLURL != nil
             || options.includeGeneratedDolbyVisionMetadata
         if wantsVideoBitrateOptions {
-            guard format == .mov || format == .mp4 else {
+            guard format == .mov || format == .mp4 || format == .mkv else {
                 throw ProResEncoderError.invalidOption(
                     "\(quality) output is supported only in MOV or MP4."
                 )
@@ -647,7 +666,7 @@ public final class ProResEncoder: Sendable {
                 )
             }
         }
-        if format == .mp4 && !(wantsH264 || wantsHEVC || wantsAV1) && quality != "pass" {
+        if (format == .mp4 || format == .mkv) && !(wantsH264 || wantsHEVC || wantsAV1) && quality != "pass" {
             throw ProResEncoderError.invalidOption(
                 "MP4 output supports H.264, HEVC, AV1, or pass-through."
             )
@@ -657,10 +676,37 @@ public final class ProResEncoder: Sendable {
                 "MXF output does not support pass-through. Choose a ProRes quality to write valid RDD-36 essence."
             )
         }
-        if format == .mp4, options.forcedOutputStartTimecode != nil {
+        if (format == .mp4 || format == .mkv), options.forcedOutputStartTimecode != nil {
             throw ProResEncoderError.invalidOption(
                 "forcedOutputStartTimecode is supported only in MOV."
             )
+        }
+
+        if let hybrid = options.hybridMovie {
+            guard format == .mov, quality != "pass", !wantsAV1,
+                  options.extraAudioURL == nil, !options.replaceSourceAudio,
+                  options.dolbyVisionXMLURL == nil, !options.outputVideoRaw,
+                  options.cmuMasteringNits == nil || (wantsHEVC && options.includeGeneratedDolbyVisionMetadata),
+                  (0...8).contains(hybrid.workers),
+                  hybrid.framesPerFragment == 0 || (24...2400).contains(hybrid.framesPerFragment) else {
+                throw ProResEncoderError.invalidOption("Hybrid MOV requires a VT codec, MOV, 0...8 workers and 0 (automatic) or 24...2400 frames per fragment; external audio/XML, raw and standalone CMU use the ordinary workflow.")
+            }
+            let internalProfile = options.dolbyVisionProfile.flatMap { DolbyVisionHEVCProfile(argument: $0.rawValue) }
+            let encoderOptions = (wantsHEVC || wantsH264) ? HEVCEncodeOptions(
+                bitrateMbps: options.bitrateMbps ?? 0, dvProfile: internalProfile,
+                bFrames: options.bFrames, multiPass: options.multiPass) : nil
+            let started = ContinuousClock.now
+            let success = await encodeHybridMOV(sourceURL: inputURL, outputURL: outputURL, quality: quality,
+                hevcOptions: encoderOptions, colorTransform: colorTransform,
+                forcedStartTimecode: options.forcedOutputStartTimecode, deleteSourceAudio: options.deleteSourceAudio,
+                cmuMasteringNits: options.cmuMasteringNits, useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
+                requestedWorkers: hybrid.workers, fragmentFrames: hybrid.framesPerFragment, resume: hybrid.resume)
+            guard success else { throw ProResEncoderError.encodingFailed("Hybrid MOV failed; any committed checkpoint is retained.") }
+            let count = await estimateFrameCount(asset: AVURLAsset(url: outputURL))
+            let elapsed = started.duration(to: .now)
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            return ProResEncodeResult(outputURLs: [outputURL], framesEncoded: count,
+                framesPerSecond: seconds > 0 ? Double(count) / seconds : nil)
         }
 
         switch format {
@@ -677,10 +723,10 @@ public final class ProResEncoder: Sendable {
                 options: options,
                 colorTransform: colorTransform
             )
-        case .mp4:
-            if outputURL.pathExtension.lowercased() != "mp4" {
+        case .mp4, .mkv:
+            if outputURL.pathExtension.lowercased() != format.rawValue {
                 throw ProResEncoderError.invalidOption(
-                    "MP4 output requires a .mp4 outputURL."
+                    "\(format.rawValue.uppercased()) output requires a .\(format.rawValue) outputURL."
                 )
             }
             return try await encodeMOVFile(
@@ -1023,6 +1069,9 @@ public final class ProResEncoder: Sendable {
         format: ProResOutputFormat = .mov,
         options: ProResEncodeOptions = ProResEncodeOptions()
     ) async throws -> ProResBatchEncodeResult {
+        guard options.hybridMovie == nil else {
+            throw ProResEncoderError.invalidOption("Hybrid MOV currently requires encode(inputURL:outputURL:options:) with one source file.")
+        }
         let fileManager = FileManager.default
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(
@@ -1059,8 +1108,7 @@ public final class ProResEncoder: Sendable {
             ).isRegularFile) == true else {
                 continue
             }
-            let asset = AVURLAsset(url: candidate)
-            if ((try? await asset.loadTracks(withMediaType: .video)) ?? []).isEmpty == false {
+            if await mediaContainerHasVideo(at: candidate) {
                 inputs.append(candidate)
             }
         }
@@ -1076,7 +1124,7 @@ public final class ProResEncoder: Sendable {
         guard Set(stems).count == stems.count else {
             throw ProResEncoderError.invalidOption("Folder inputs have duplicate output basenames.")
         }
-        if format == .mov || format == .mp4 {
+        if format == .mov || format == .mp4 || format == .mkv {
             let destinations = stems.map {
                 outputDirectoryURL.appendingPathComponent($0).appendingPathExtension(format.rawValue)
                     .standardizedFileURL.resolvingSymlinksInPath()
@@ -1111,7 +1159,7 @@ public final class ProResEncoder: Sendable {
         var results: [ProResEncodeResult] = []
         for inputURL in inputs {
             let outputURL: URL
-            if format == .mov || format == .mp4 {
+            if format == .mov || format == .mp4 || format == .mkv {
                 outputURL = outputDirectoryURL.appendingPathComponent(
                     inputURL.deletingPathExtension().lastPathComponent + ".\(format.rawValue)"
                 )
@@ -1131,7 +1179,7 @@ public final class ProResEncoder: Sendable {
 
         var sequenceAAFURL: URL?
         if options.aafMode == .sequence {
-            guard format != .mov && format != .mp4 else {
+            guard format != .mov && format != .mp4 && format != .mkv else {
                 throw ProResEncoderError.invalidOption(
                     "Sequence AAF generation requires OP-1a or OP-Atom MXF output."
                 )
@@ -1171,6 +1219,9 @@ public final class ProResEncoder: Sendable {
         mediaSearchURLs: [URL] = [],
         options: ProResEncodeOptions = ProResEncodeOptions()
     ) async throws -> ProResEncodeResult {
+        guard options.hybridMovie == nil else {
+            throw ProResEncoderError.invalidOption("Hybrid MOV currently supports one source file, not timeline composition.")
+        }
         guard FileManager.default.fileExists(atPath: inputTimelineURL.path) else {
             throw ProResEncoderError.inputNotFound(inputTimelineURL.path)
         }
@@ -1456,7 +1507,7 @@ public final class ProResEncoder: Sendable {
             fpsInfo: await framerateInfo(from: asset),
             colorTransform: colorTransform,
             useDolbyVisionCodecTag: options.useDolbyVisionCodecTag,
-            container: outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov,
+            container: outputURL.pathExtension.lowercased() == "mkv" ? .mkv : (outputURL.pathExtension.lowercased() == "mp4" ? .mp4 : .mov),
             outputVideoRaw: options.outputVideoRaw,
             progress: progress,
             privateFrameStreamMediaTimeScale: options.amaMediaTimeScale

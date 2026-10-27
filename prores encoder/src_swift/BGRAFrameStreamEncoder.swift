@@ -75,7 +75,7 @@ final class BGRAFrameStreamEncoder {
             throw MetalColorPipelineError.pixelBufferPoolFailed(status)
         }
         pool = createdPool
-        mux = try BGRAStreamMuxer(transaction: transaction, cancellationRequested: cancellationRequested)
+        mux = try BGRAStreamMuxer(transaction: transaction, cancellationRequested: cancellationRequested, timeScale: numerator)
         compression.setEncodedSampleHandler { [mux] sample in mux.enqueue(sample) }
     }
 

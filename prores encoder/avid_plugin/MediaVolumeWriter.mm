@@ -79,8 +79,11 @@ ACFRESULT ProResMediaVolumeWriter::GetWriterCapabilities(acfUInt64* caps) const 
     if (!caps) return ACF_E_POINTER;
     // ConsumeSample acknowledges only after the worker has accepted the frame.
     // The host-facing consumer is synchronous even though codec work overlaps.
-    *caps = AMA::IMediaWriter::kOnlySupportsVideo |
-            AMA::IMediaWriter::kSupportsVideoResolutionsOtherThanSDHD;
+    const auto options = job_.session()->advancedOptions();
+    const bool audio = !options.deleteSourceAudio && !options.replaceSourceAudio &&
+        (job_.session()->container() == ContainerChoice::MOV || job_.session()->container() == ContainerChoice::MP4 || job_.session()->container() == ContainerChoice::MKV);
+    *caps = AMA::IMediaWriter::kSupportsVideoResolutionsOtherThanSDHD |
+        (audio ? 0 : AMA::IMediaWriter::kOnlySupportsVideo);
     return ACF_OK;
 }
 

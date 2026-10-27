@@ -157,7 +157,8 @@ func runCMUAnalysisBeforeCompressedEncode(
     dolbyVisionProfile: DolbyVisionHEVCProfile?,
     masteringPeakNits: Float,
     forcedStartTimecode: String?,
-    progress: ProgressBar? = nil
+    progress: ProgressBar? = nil,
+    privateHybridFrameRange: Range<Int64>? = nil
 ) async throws -> CMUOutputArtifacts {
     guard isHEVCQuality(quality) || isAV1Quality(quality) else {
         throw CMUError.exportFailed(
@@ -198,7 +199,8 @@ func runCMUAnalysisBeforeCompressedEncode(
         masteringPeakNits: masteringPeakNits,
         forcedStartTimecode: forcedStartTimecode,
         colorTransform: resolvedTransform,
-        progress: progress
+        progress: progress,
+        privateHybridFrameRange: privateHybridFrameRange
     )
 }
 
@@ -212,7 +214,8 @@ private func runCMUAnalysis(
     masteringPeakNits: Float,
     forcedStartTimecode: String?,
     colorTransform: ResolvedColorTransform? = nil,
-    progress: ProgressBar? = nil
+    progress: ProgressBar? = nil,
+    privateHybridFrameRange: Range<Int64>? = nil
 ) async throws -> CMUOutputArtifacts {
     let timecode = try await cmuResolveTimecodeReference(
         analyzedURL: selectedURL,
@@ -238,12 +241,14 @@ private func runCMUAnalysis(
         masteringPeakNits: masteringPeakNits,
         timecode: timecode,
         colorTransform: colorTransform,
-        progress: progress
+        progress: progress,
+        privateHybridFrameRange: privateHybridFrameRange
     )
     progress?.prepareForLog()
     let artifacts = try CMUExporter.write(
         document: document,
-        sidecarBaseURL: sidecarBaseURL
+        sidecarBaseURL: sidecarBaseURL,
+        hybridStream: privateHybridFrameRange != nil
     )
     print(
         "[CMU] Analyzed \(document.durationFrames) actual decoded frames " +

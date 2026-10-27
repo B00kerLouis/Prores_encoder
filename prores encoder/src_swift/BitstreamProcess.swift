@@ -1439,6 +1439,7 @@ extension AsyncChannel: AsyncSequence {
 
 /// Refcon for the VT C callback: routes to async channel or sync box.
 private final class VTCallbackRefcon: @unchecked Sendable {
+    var requiresEveryFrame = false
     var sample: CMSampleBuffer?
     let failure = PipelineFailureBox()
     let syncLock = NSLock()
@@ -1639,6 +1640,13 @@ private func vtOutputCallback(
         rc.failure.store(NSError(domain: "ProResSession", code: Int(status),
             userInfo: [NSLocalizedDescriptionKey: "VideoToolbox output callback failed: \(status)"]))
     }
+    if rc.requiresEveryFrame, status != noErr || sampleBuffer == nil {
+        if status == noErr {
+            rc.failure.store(NSError(domain: "ProResSession", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "VideoToolbox dropped a required ProRes frame."]))
+        }
+        rc.asyncChannel?.finish()
+    }
     if let handler = rc.encodedSampleHandler {
         if status == noErr, let sampleBuffer {
             handler(SendableSampleBuffer(buf: sampleBuffer))
@@ -1697,7 +1705,9 @@ final class ProResSession: @unchecked Sendable {
          sourcePixelFormat: OSType? = nil,
          sourceFrameCount: Int = 0,
          sourceTimeRange: CMTimeRange = .invalid,
-         maximumFrameDelay: Int? = nil) throws {
+         maximumFrameDelay: Int? = nil,
+         parallelSubdivision: VTParallelSubdivision? = nil,
+         requireHardwareForHybridProbe: Bool = false) throws {
         var sess: VTCompressionSession?
         let rcPtr = Unmanaged.passUnretained(rc).toOpaque()
         let isHEVC = (codecType == kCMVideoCodecType_HEVC)
@@ -1709,7 +1719,7 @@ final class ProResSession: @unchecked Sendable {
         hevcMasteringDisplayColorVolume = colorSpace?.masteringDisplayColorVolume
         hevcContentLightLevelInfo = colorSpace?.contentLightLevelInfo
         let encoderSpecification = isAVCEncoder
-            ? hevcHardwareEncoderSpecification(requireHardware: requiresNativeHEVCHardware)
+            ? hevcHardwareEncoderSpecification(requireHardware: requiresNativeHEVCHardware || requireHardwareForHybridProbe)
             : proResHardwareEncoderSpecification()
         let imageBufferAttributeCandidates: [CFDictionary?] = [
             proResEncoderImageBufferAttributes(
@@ -1750,6 +1760,13 @@ final class ProResSession: @unchecked Sendable {
                             "VTCompressionSession create failed: \(st) (codec=\(fourCCString(codecType)), size=\(width)x\(height))"])
         }
         session = sess
+        var completedSetup = false
+        defer {
+            if !completedSetup {
+                if let storage = multiPassStorage { VTMultiPassStorageClose(storage) }
+                VTCompressionSessionInvalidate(sess)
+            }
+        }
         func setProperty(_ key: CFString, value: CFTypeRef, required: Bool = false) throws {
             let status = VTSessionSetProperty(session, key: key, value: value)
             if required && status != noErr {
@@ -1757,7 +1774,7 @@ final class ProResSession: @unchecked Sendable {
                     domain: "ProResSession",
                     code: Int(status),
                     userInfo: [NSLocalizedDescriptionKey:
-                        "VideoToolbox rejected required Native Dolby Vision encoder property \(key): \(status)"
+                        "VideoToolbox rejected required encoder property \(key): \(status)"
                     ]
                 )
             }
@@ -1768,6 +1785,27 @@ final class ProResSession: @unchecked Sendable {
             required: requiresNativeHEVCHardware
         )
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
+        if let parallelSubdivision, isAVCEncoder {
+            // Apple's offline subdivision contract. Each session owns a whole
+            // independently decodable range, rather than interleaved frames.
+            var properties: CFDictionary?
+            let status = VTSessionCopySupportedPropertyDictionary(session, supportedPropertyDictionaryOut: &properties)
+            let supported = properties as? [String: Any]
+            if status == noErr,
+               supported?[kVTCompressionPropertyKey_MoreFramesBeforeStart as String] != nil,
+               supported?[kVTCompressionPropertyKey_MoreFramesAfterEnd as String] != nil {
+                try setProperty(kVTCompressionPropertyKey_MoreFramesBeforeStart,
+                    value: parallelSubdivision.hasPrevious ? kCFBooleanTrue : kCFBooleanFalse,
+                    required: true)
+                try setProperty(kVTCompressionPropertyKey_MoreFramesAfterEnd,
+                    value: parallelSubdivision.hasNext ? kCFBooleanTrue : kCFBooleanFalse,
+                    required: true)
+            } else {
+                print("[VT] Subdivision hints unavailable; using independently closed GOPs.")
+            }
+            try setProperty(kVTCompressionPropertyKey_SourceFrameCount,
+                value: NSNumber(value: sourceFrameCount), required: true)
+        }
         let n = NSNumber(value: fpsHint)
         try setProperty(
             kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -1931,12 +1969,12 @@ final class ProResSession: @unchecked Sendable {
                 value: NSNumber(value: maximumFrameDelay))
         }
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
-        if requiresNativeHEVCHardware && prepareStatus != noErr {
+        if (requiresNativeHEVCHardware || requireHardwareForHybridProbe) && prepareStatus != noErr {
             throw NSError(domain: "ProResSession", code: Int(prepareStatus),
                           userInfo: [NSLocalizedDescriptionKey:
-                            "VideoToolbox could not prepare the required Native Dolby Vision hardware HEVC encoder: \(prepareStatus)"])
+                            "VideoToolbox could not prepare the required hardware encoder: \(prepareStatus)"])
         }
-        let usingHardware = isHEVC
+        let usingHardware = (isHEVC || requireHardwareForHybridProbe)
             ? vtSessionBooleanProperty(
                 session,
                 key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
@@ -1952,11 +1990,42 @@ final class ProResSession: @unchecked Sendable {
                           userInfo: [NSLocalizedDescriptionKey:
                             "VideoToolbox created a software HEVC encoder; hardware HEVC is required."])
         }
+        if requireHardwareForHybridProbe, usingHardware == false {
+            throw NSError(domain: "ProResSession", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "VideoToolbox did not provide the requested hardware encoder."])
+        }
+        completedSetup = true
+    }
+
+    /// Query the actual codec/raster instead of equating CPU cores with media engines.
+    func parallelEncodingRecommendation() -> (limit: Int?, minimumFrames: Int?, minimumDuration: Double?) {
+        func number(_ key: CFString) -> Int? {
+            var value: Unmanaged<CFTypeRef>?
+            let status = withUnsafeMutablePointer(to: &value) {
+                VTSessionCopyProperty(session, key: key, allocator: kCFAllocatorDefault,
+                    valueOut: UnsafeMutableRawPointer($0))
+            }
+            guard status == noErr, let value else { return nil }
+            return (value.takeRetainedValue() as? NSNumber)?.intValue
+        }
+        var duration: Unmanaged<CFTypeRef>?
+        let durationStatus = withUnsafeMutablePointer(to: &duration) {
+            VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_RecommendedParallelizedSubdivisionMinimumDuration,
+                allocator: kCFAllocatorDefault, valueOut: UnsafeMutableRawPointer($0))
+        }
+        var seconds: Double?
+        if durationStatus == noErr, let value = duration?.takeRetainedValue(), CFGetTypeID(value) == CFDictionaryGetTypeID() {
+            let time = CMTimeMakeFromDictionary(unsafeBitCast(value, to: CFDictionary.self))
+            if time.seconds.isFinite && time.seconds > 0 { seconds = time.seconds }
+        }
+        return (number(kVTCompressionPropertyKey_RecommendedParallelizationLimit).flatMap { $0 > 0 ? $0 : nil },
+                number(kVTCompressionPropertyKey_RecommendedParallelizedSubdivisionMinimumFrameCount).flatMap { $0 > 0 ? $0 : nil }, seconds)
     }
 
     /// Switch to async mode: creates the outputChannel and routes VT callback to it.
     /// Must be called before the first `submit()`. Multi-pass reuses this channel.
-    func enableAsyncMode(channelCapacity: Int = 4) {
+    func enableAsyncMode(channelCapacity: Int = 4, requiresEveryFrame: Bool = false) {
+        rc.requiresEveryFrame = requiresEveryFrame
         let ch = AsyncChannel<SendableSampleBuffer>(capacity: channelCapacity)
         outputChannel = ch
         rc.configureAsyncChannel(ch)
@@ -2157,6 +2226,12 @@ final class ProResSession: @unchecked Sendable {
     }
 
     var callbackError: Error? { rc.failure.error }
+
+    /// Abort an owned direct-stream session while keeping its retained handle
+    /// alive until the submitting task has unwound. Used only by Hybrid MOV.
+    func cancelPendingFrames() {
+        if let session { VTCompressionSessionInvalidate(session) }
+    }
 
     func completeFramesChecked() throws {
         let status = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)

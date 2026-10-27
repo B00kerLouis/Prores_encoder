@@ -32,9 +32,10 @@ public:
     explicit ProResSampleConsumer(IACFUnknown* outer)
         : CACFUnknown(outer) {}
 
-    void attach(std::shared_ptr<ExportSession> session, VideoFrameHandler videoFrames) {
+    void attach(std::shared_ptr<ExportSession> session, VideoFrameHandler videoFrames, AudioSampleHandler audioSamples) {
         session_ = std::move(session);
         videoFrames_ = std::move(videoFrames);
+        audioSamples_ = std::move(audioSamples);
     }
 
     ACFRESULT ACFMETHODCALLTYPE InternalQueryInterface(const acfIID& riid, void** ppv) override {
@@ -61,7 +62,7 @@ public:
         return CACFUnknown::InternalQueryInterface(riid, ppv);
     }
 
-    static ACFRESULT CreateForSession(const std::shared_ptr<ExportSession>& session, VideoFrameHandler videoFrames, AMA::ISampleConsumer** consumer) {
+    static ACFRESULT CreateForSession(const std::shared_ptr<ExportSession>& session, VideoFrameHandler videoFrames, AudioSampleHandler audioSamples, AMA::ISampleConsumer** consumer) {
         if (!consumer) {
             return ACF_E_POINTER;
         }
@@ -70,7 +71,7 @@ public:
         if (!object) {
             return ACF_E_OUTOFMEMORY;
         }
-        object->attach(session, std::move(videoFrames));
+        object->attach(session, std::move(videoFrames), std::move(audioSamples));
         object->InternalAddRef();
         const ACFRESULT result = object->InternalQueryInterface(AMA::IID_ISampleConsumer, reinterpret_cast<void**>(consumer));
         object->InternalRelease();
@@ -152,7 +153,10 @@ public:
             const ACFRESULT noted = MapStatus(session_->noteSample(track, sample, sampleCount, bytes));
             if (ACFFAILED(noted)) return returned.result = noted;
             ACFRESULT pushed = ACF_OK;
-            if (!pointer || bytes == 0) {
+            if (track > 0) {
+                if (audioSamples_) pushed = audioSamples_(track, sample, sampleCount, pointer, static_cast<std::size_t>(bytes));
+                else { session_->failWrite("The AMA audio sample handler is unavailable."); pushed = ACF_E_UNEXPECTED; }
+            } else if (!pointer || bytes == 0) {
                 session_->failWrite("The AMA host did not provide readable picture bytes.");
                 pushed = ACF_E_FAIL;
             } else if (videoFrames_ && sampleCount == 1) {
@@ -222,6 +226,7 @@ public:
 private:
     std::shared_ptr<ExportSession> session_;
     VideoFrameHandler videoFrames_;
+    AudioSampleHandler audioSamples_;
     std::atomic<std::uint64_t> calls_{0};
 };
 
@@ -263,11 +268,12 @@ ACF_DEFINE_FACTORY(ProResSampleConsumer)
 ACFRESULT CreateSampleConsumer(
     const std::shared_ptr<ExportSession>& session,
     VideoFrameHandler videoFrames,
+    AudioSampleHandler audioSamples,
     AMA::ISampleConsumer** consumer) {
     if (!session) {
         return ACF_E_INVALIDARG;
     }
-    return ProResSampleConsumer::CreateForSession(session, std::move(videoFrames), consumer);
+    return ProResSampleConsumer::CreateForSession(session, std::move(videoFrames), std::move(audioSamples), consumer);
 }
 
 }  // namespace prores_ama
