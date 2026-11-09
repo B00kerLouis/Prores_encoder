@@ -1997,6 +1997,37 @@ final class ProResSession: @unchecked Sendable {
         completedSetup = true
     }
 
+    /// Setup-only opt-in for the prepared-frame facade. Confirms the codec
+    /// delay where the encoder exposes it; false requires explicit bounded
+    /// drains by the facade. Existing per-frame paths retain their behavior.
+    func configurePreparedFrameStreaming(maximumFrameDelay: Int) throws -> Bool {
+        let status = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+            value: NSNumber(value: maximumFrameDelay))
+        guard status == noErr || status == kVTPropertyNotSupportedErr else {
+            throw NSError(domain: "ProResSession", code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Configuring prepared-stream maximum frame delay failed: \(status)"])
+        }
+        var value: Unmanaged<CFTypeRef>?
+        let readStatus = withUnsafeMutablePointer(to: &value) {
+            VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                allocator: kCFAllocatorDefault, valueOut: UnsafeMutableRawPointer($0))
+        }
+        let actual = (value?.takeRetainedValue() as? NSNumber)?.intValue
+        if status == noErr, !(readStatus == noErr && actual != nil && actual! >= 0 && actual! <= maximumFrameDelay) {
+            throw NSError(domain: "ProResSession", code: Int(readStatus),
+                userInfo: [NSLocalizedDescriptionKey: "Prepared streaming could not confirm the requested bounded codec delay."])
+        }
+        let prepared = VTCompressionSessionPrepareToEncodeFrames(session)
+        guard prepared == noErr else {
+            throw NSError(domain: "ProResSession", code: Int(prepared),
+                userInfo: [NSLocalizedDescriptionKey: "Preparing the high-precision streaming encoder failed: \(prepared)"])
+        }
+        // ProRes implementations may not expose this optional VT property.
+        // False requires explicit bounded batch drains in the new facade;
+        // callers must not infer a supported delay from an ignored property.
+        return status == noErr
+    }
+
     /// Query the actual codec/raster instead of equating CPU cores with media engines.
     func parallelEncodingRecommendation() -> (limit: Int?, minimumFrames: Int?, minimumDuration: Double?) {
         func number(_ key: CFString) -> Int? {

@@ -4137,8 +4137,16 @@ private func data(for patch: MOVSizeFieldPatch) throws -> Data {
 /// Selects the smallest Dolby Vision level whose raster width and pixel rate
 /// both cover the encoded signal. Pixel count thresholds alone misclassify
 /// non-16:9 DCI/letterboxed UHD rasters such as 3840x2076 at 24 fps.
-private func dolbyVisionLevel(width: Int, height: Int, fps: Double) -> UInt8 {
-    let limits: [(level: UInt8, maxWidth: Int, maxPixelsPerSecond: Double)] = [
+private func dolbyVisionLevel(width: Int, height: Int, rate: FramerateInfo, profile: DolbyVisionHEVCProfile) throws -> UInt8 {
+    guard width > 0, height > 0, rate.numerator > 0, rate.denominator > 0 else {
+        throw ProResEncoderError.invalidOption("Dolby Vision output raster and frame rate must be positive.")
+    }
+    let (pixels, pixelOverflow) = width.multipliedReportingOverflow(by: height)
+    let (scaledPixels, rateOverflow) = pixels.multipliedReportingOverflow(by: rate.numerator)
+    guard !pixelOverflow, !rateOverflow else {
+        throw ProResEncoderError.invalidOption("Dolby Vision output pixel rate exceeds integer range.")
+    }
+    let limits: [(level: UInt8, maxWidth: Int, maxPixelsPerSecond: Int)] = [
         (1, 1_280, 22_118_400),
         (2, 1_280, 27_648_000),
         (3, 1_920, 49_766_400),
@@ -4148,14 +4156,22 @@ private func dolbyVisionLevel(width: Int, height: Int, fps: Double) -> UInt8 {
         (7, 3_840, 248_832_000),
         (8, 3_840, 398_131_200),
         (9, 3_840, 497_664_000),
-        (10, 3_840, 995_328_000)
+        (10, 3_840, 995_328_000),
+        (11, 7_680, 995_328_000),
+        (12, 7_680, 1_990_656_000),
+        (13, 7_680, 3_981_312_000)
     ]
-    let pixelRate = Double(max(width, 0))
-        * Double(max(height, 0))
-        * max(fps, 0)
-    return limits.first {
-        width <= $0.maxWidth && pixelRate <= $0.maxPixelsPerSecond
-    }?.level ?? 10
+    guard let level = limits.first(where: { limit in
+        let (threshold, overflow) = limit.maxPixelsPerSecond.multipliedReportingOverflow(by: rate.denominator)
+        return width <= limit.maxWidth && !overflow && scaledPixels <= threshold
+    })?.level else {
+        throw ProResEncoderError.invalidOption("Dolby Vision output geometry exceeds Levels 1–13 or its rate cannot be represented.")
+    }
+    // The implemented P7 mode is BL:EL 1:1/4, whose DV limit is Level 9.
+    guard !profile.isProfile76 || level <= 9 else {
+        throw ProResEncoderError.invalidOption("Dolby Vision Profile 7.6 BL:EL 1:1/4 exceeds Level 9.")
+    }
+    return level
 }
 
 /// Builds a codec configuration box for the selected profile and compatibility ID.
@@ -4163,16 +4179,11 @@ private func makeDolbyVisionHEVCConfigurationBox(
     profile: DolbyVisionHEVCProfile,
     width: Int,
     height: Int,
-    fps: Double
-) -> Data {
+    rate: FramerateInfo
+) throws -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel: UInt8
-    if profile.isProfile76 {
-        dvLevel = 6
-    } else {
-        dvLevel = dolbyVisionLevel(width: width, height: height, fps: fps)
-    }
+    let dvLevel = try dolbyVisionLevel(width: width, height: height, rate: rate, profile: profile)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let layerFlags: UInt8 = profile.isProfile76 ? 0x07 : 0x05
     let byte3 = ((dvLevel & 0x1f) << 3) | layerFlags
@@ -4191,11 +4202,11 @@ private func makeDolbyVisionAV1ConfigurationBox(
     profile: DolbyVisionHEVCProfile,
     width: Int,
     height: Int,
-    fps: Double
-) -> Data {
+    rate: FramerateInfo
+) throws -> Data {
     let dvProfile = profile.containerProfile
     let compatibilityID = profile.compatibilityID
-    let dvLevel = dolbyVisionLevel(width: width, height: height, fps: fps)
+    let dvLevel = try dolbyVisionLevel(width: width, height: height, rate: rate, profile: profile)
     let byte2 = dvProfile << 1 | ((dvLevel >> 5) & 0x01)
     let byte3 = ((dvLevel & 0x1f) << 3) | 0x04 | 0x01
     let byte4 = compatibilityID << 4
@@ -5542,13 +5553,13 @@ private func patchDolbyVisionHEVCConfigurationAtom(
     profile: DolbyVisionHEVCProfile,
     width: Int,
     height: Int,
-    fps: Double
+    rate: FramerateInfo
 ) throws {
-    let box = makeDolbyVisionHEVCConfigurationBox(
+    let box = try makeDolbyVisionHEVCConfigurationBox(
         profile: profile,
         width: width,
         height: height,
-        fps: fps
+        rate: rate
     )
     if try replaceExistingDolbyVisionConfigurationBox(
         in: movieURL,
@@ -5575,13 +5586,13 @@ private func patchDolbyVisionAV1ConfigurationAtom(
     profile: DolbyVisionHEVCProfile,
     width: Int,
     height: Int,
-    fps: Double
+    rate: FramerateInfo
 ) throws {
-    let box = makeDolbyVisionAV1ConfigurationBox(
+    let box = try makeDolbyVisionAV1ConfigurationBox(
         profile: profile,
         width: width,
         height: height,
-        fps: fps
+        rate: rate
     )
     if try replaceExistingDolbyVisionConfigurationBox(
         in: movieURL,
@@ -8955,7 +8966,7 @@ func encodeMOV(
                     profile: profile,
                     width: profile7RasterPlan?.encodedWidth ?? width,
                     height: profile7RasterPlan?.encodedHeight ?? height,
-                    fps: fpsInfo.fps
+                    rate: fpsInfo
                 )
                 try removeHEVCStaticHDRSampleEntryBoxes(in: outputURL)
             }
@@ -9001,7 +9012,7 @@ func encodeMOV(
                     profile: profile,
                     width: width,
                     height: height,
-                    fps: fpsInfo.fps
+                    rate: fpsInfo
                 )
                 try removeAV1StaticHDRSampleEntryBoxes(in: outputURL)
             }
@@ -10481,7 +10492,7 @@ func finalizeAMAColorStream(spoolURL: URL, outputURL: URL, width: Int, height: I
         guard writer.status == .completed, !cancellationRequested() else {
             throw writer.error ?? ProResEncoderError.invalidOption("AMA metadata remux did not complete.")
         }
-        try patchDolbyVisionHEVCConfigurationAtom(in: transaction.workingURL, profile: .profile5, width: width, height: height, fps: rate.fps)
+        try patchDolbyVisionHEVCConfigurationAtom(in: transaction.workingURL, profile: .profile5, width: width, height: height, rate: rate)
         try removeHEVCStaticHDRSampleEntryBoxes(in: transaction.workingURL)
         _ = try normalizeCompressedVideoSampleEntry(in: transaction.workingURL, codec: .hevc,
             useDolbyVisionCodecTag: options.useDolbyVisionCodecTag, profile: .profile5)
